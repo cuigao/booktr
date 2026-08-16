@@ -1,0 +1,56 @@
+"""翻译记忆（Translation Memory）：双语片段缓存。"""
+from __future__ import annotations
+
+from . import util
+from .config import Config
+
+
+def _path(cfg: Config) -> str:
+    return cfg.get("tm", "path", default="work/tm.jsonl")
+
+
+def add(cfg: Config, src: str, dst: str, page: str, segment_id: int | None) -> None:
+    if not src or not dst or src == dst:
+        return
+    # 规范化：压缩空白，作为键
+    key = util.normalize_ws(src)
+    if not key:
+        return
+    records = util.read_jsonl(_path(cfg))
+    for r in records:
+        if r["key"] == key:
+            r["dst"] = dst
+            r["page"] = page
+            r["usage_count"] = r.get("usage_count", 0) + 1
+            _rewrite(cfg, records)
+            return
+    util.append_jsonl(
+        _path(cfg),
+        {"key": key, "src": src, "dst": dst, "page": page,
+         "segment_id": segment_id, "usage_count": 1},
+    )
+
+
+def _rewrite(cfg: Config, records: list[dict]) -> None:
+    path = _path(cfg)
+    with open(path, "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(util.json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def lookup(cfg: Config, text: str, threshold: float = 0.9) -> list[dict]:
+    """查找相似命中。"""
+    target = util.normalize_ws(text)
+    if not target:
+        return []
+    out = []
+    for r in util.read_jsonl(_path(cfg)):
+        score = util.dice_coefficient(r["key"], target)
+        if score >= threshold:
+            out.append({**r, "score": round(score, 3)})
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return out[:5]
+
+
+def size(cfg: Config) -> int:
+    return len(util.read_jsonl(_path(cfg)))

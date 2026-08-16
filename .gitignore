@@ -1,0 +1,13 @@
+# 数据目录（用户提供/生成，完全不入库）
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 测试与工具
+.pytest_cache/
+.coverage
