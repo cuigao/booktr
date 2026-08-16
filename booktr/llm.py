@@ -43,19 +43,33 @@ class LLMClient:
         self._stats = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0}
 
     # ------------------------------------------------------------------
-    def chat(self, system: str, user: str, temperature: float | None = None) -> str:
-        """单轮对话，返回文本。"""
+    def chat(self, system: str, user: str, temperature: float | None = None,
+             tag: str = "chat") -> str:
+        """单轮对话，返回文本。每次调用（含 mock）都完整记录到 llm_logs。"""
+        t0 = time.monotonic()
         if self.provider == "mock":
-            return self._mock(system, user)
+            resp = self._mock(system, user)
+            self._log(tag, system, user, resp, ok=True,
+                      duration_ms=(time.monotonic() - t0) * 1000)
+            return resp
         if not self.api_key:
-            raise LLMError(
-                f"未设置 API key（环境变量 {self.cfg.get('llm','api_key_env',default='BOOKTR_API_KEY')}）。"
-                "或在 data/config.json 将 llm.provider 设为 mock 进行离线测试。"
-            )
-        return self._openai_chat(system, user, temperature)
+            err = (f"未设置 API key（环境变量 {self.cfg.get('llm','api_key_env',default='BOOKTR_API_KEY')}）。"
+                   "或在 data/config.json 将 llm.provider 设为 mock 进行离线测试。")
+            self._log(tag, system, user, "", ok=False, error=err,
+                      duration_ms=(time.monotonic() - t0) * 1000)
+            raise LLMError(err)
+        try:
+            resp, usage = self._openai_chat(system, user, temperature)
+        except LLMError as e:
+            self._log(tag, system, user, "", ok=False, error=str(e),
+                      duration_ms=(time.monotonic() - t0) * 1000)
+            raise
+        self._log(tag, system, user, resp, ok=True, usage=usage,
+                  duration_ms=(time.monotonic() - t0) * 1000)
+        return resp
 
     # ------------------------------------------------------------------
-    def _openai_chat(self, system: str, user: str, temperature: float | None) -> str:
+    def _openai_chat(self, system: str, user: str, temperature: float | None) -> tuple[str, dict]:
         body = {
             "model": self.model,
             "messages": [
@@ -72,6 +86,7 @@ class LLMClient:
         }
         url = self.base_url + "/chat/completions"
         last_err: Exception | None = None
+        retries = 0
         for attempt in range(self.max_retries + 1):
             self._rate_limit()
             try:
@@ -79,21 +94,23 @@ class LLMClient:
                 if r.status_code == 200:
                     data = r.json()
                     content = data["choices"][0]["message"]["content"]
-                    self._record(data)
-                    return content
+                    usage = self._record(data)
+                    return content, usage
                 last_err = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
             except (requests.RequestException, ValueError) as e:
                 last_err = e
+            retries += 1
             delay = 2 ** attempt
             log.warning("LLM 调用失败(%s)，%.1fs 后重试: %s", attempt + 1, delay, last_err)
             time.sleep(delay)
         raise LLMError(f"LLM 调用最终失败: {last_err}")
 
-    def _record(self, data: dict) -> None:
+    def _record(self, data: dict) -> dict:
         use = (data.get("usage") or {})
         self._stats["calls"] += 1
         self._stats["prompt_tokens"] += use.get("prompt_tokens", 0)
         self._stats["completion_tokens"] += use.get("completion_tokens", 0)
+        return use
 
     def _rate_limit(self) -> None:
         if self.provider == "mock":
@@ -136,18 +153,38 @@ class LLMClient:
     def stats_report(self) -> dict:
         return dict(self._stats)
 
-    def log_call(self, tag: str, system: str, user: str, response: str) -> None:
+    def _log(self, tag: str, system: str, user: str, response: str,
+             ok: bool = True, error: str = "", usage: dict | None = None,
+             duration_ms: float = 0.0) -> None:
+        """完整记录一次 LLM 调用（成功或失败，含 mock）。"""
         d = self.cfg.get("llm_logs", "dir", default="")
         if not d:
             return
         os.makedirs(d, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         path = os.path.join(d, f"{tag}_{ts}.json")
+        entry = {
+            "ts": datetime.now().isoformat(timespec="milliseconds"),
+            "tag": tag,
+            "provider": self.provider,
+            "model": self.model,
+            "temperature": self.temperature,
+            "ok": ok,
+            "error": error,
+            "duration_ms": round(duration_ms, 1),
+            "usage": usage or {},
+            "system": system,
+            "user": user,
+            "response": response,
+        }
+        # 尝试解析响应中的 JSON（若为结构化输出）
+        try:
+            parsed = parse_json_response(response)
+            entry["parsed"] = parsed
+        except (LLMError, json.JSONDecodeError):
+            pass
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(
-                {"system": system, "user": user, "response": response},
-                f, ensure_ascii=False, indent=2,
-            )
+            json.dump(entry, f, ensure_ascii=False, indent=2)
 
 
 def parse_json_response(text: str) -> dict:

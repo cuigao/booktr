@@ -151,7 +151,7 @@ def summarize_page(cfg: Config, client, rel: str) -> dict:
         return {"summary": "", "entities": [], "content_type": ""}
     sysp = prompts.build_summary_system(cfg)
     usr = prompts.build_summary_user(text[:6000])
-    resp = client.chat(sysp, usr, temperature=0.3)
+    resp = client.chat(sysp, usr, temperature=0.3, tag=f"summary_{rel.replace('/','_')}")
     try:
         data = llm_mod.parse_json_response(resp)
     except llm_mod.LLMError:
@@ -226,8 +226,9 @@ def translate_page(
             usr = prompts.build_translate_user(
                 cfg, chk, page_ctx, chk_prior, ex_refs, tm_hits
             )
-            resp = client.chat(sysp, usr, temperature=cfg.get("llm", "temperature", default=0.3))
-            client.log_call(f"translate_{rel.replace('/','_')}", sysp, usr, resp)
+            resp = client.chat(sysp, usr,
+                               temperature=cfg.get("llm", "temperature", default=0.3),
+                               tag=f"translate_{rel.replace('/','_')}")
             try:
                 data = llm_mod.parse_json_response(resp)
             except llm_mod.LLMError:

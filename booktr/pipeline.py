@@ -123,7 +123,7 @@ def run_survey(cfg: Config) -> dict:
     lines = [f"{rel}\t{p.get('title','')}" for rel, p in pages.items()]
     sysp = prompts.build_survey_system(cfg)
     usr = prompts.build_survey_user("\n".join(lines))
-    resp = client.chat(sysp, usr, temperature=0.4)
+    resp = client.chat(sysp, usr, temperature=0.4, tag="survey")
     try:
         data = llm_mod.parse_json_response(resp)
     except llm_mod.LLMError:
@@ -148,7 +148,8 @@ def cmd_extract_terms(cfg: Config, args) -> None:
         text = "\n".join(s.text for s in segs if s.kind == "text")
         if not text.strip():
             continue
-        resp = client.chat(sysp, prompts.build_glossary_extract_user(text[:6000]), temperature=0.3)
+        resp = client.chat(sysp, prompts.build_glossary_extract_user(text[:6000]),
+                           temperature=0.3, tag="glossary_extract")
         try:
             data = llm_mod.parse_json_response(resp)
         except llm_mod.LLMError:

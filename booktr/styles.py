@@ -58,7 +58,7 @@ def extract_style_guide(cfg: Config, client) -> str:
 
     sysp = prompts.build_style_guide_system(cfg)
     usr = prompts.build_style_guide_user(refs)
-    guide = client.chat(sysp, usr, temperature=0.3)
+    guide = client.chat(sysp, usr, temperature=0.3, tag="style_guide")
     save_guide(cfg, guide)
     return guide
 

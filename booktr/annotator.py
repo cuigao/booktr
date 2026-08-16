@@ -39,7 +39,7 @@ def generate_for_page(cfg: Config, client, rel: str, translated: str) -> int:
                     summaries[rel_key] = data["summary"]
     sysp = prompts.build_translator_note_system(cfg)
     usr = prompts.build_translator_note_user(rel, translated[:5000], summaries)
-    resp = client.chat(sysp, usr, temperature=0.6)
+    resp = client.chat(sysp, usr, temperature=0.6, tag=f"annotate_{rel.replace('/','_')}")
     try:
         data = llm_mod.parse_json_response(resp)
     except llm_mod.LLMError:
