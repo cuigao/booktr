@@ -237,6 +237,62 @@ def _translate_chunk_with_repair(
             "untrusted": True, "glossary_conflicts": [], "notes": []}
 
 
+# ── 多轮对话翻译 ────────────────────────────────────────────────────────
+
+
+def _summarize_conversation(
+    cfg: Config, client, translations: list[str], rel: str,
+) -> str:
+    """对已翻译的多个段落生成摘要，用于摘要接力。"""
+    sysp = prompts.build_conversation_summary(cfg)
+    usr = prompts.build_conversation_summary_user(translations)
+    try:
+        resp = client.chat(sysp, usr,
+                           temperature=cfg.get("llm", "temperature", default=0.3),
+                           tag=f"summarize_conv_{rel.replace('/','_')}")
+        return resp.strip()
+    except llm_mod.LLMError:
+        return ""
+
+
+def _translate_chunk_with_repair_multi(
+    cfg: Config, client, messages: list[dict], rel: str, sid: str, chk: str,
+) -> dict:
+    """多轮对话模式翻译单个 chunk，带解析失败自愈与占位符校验。
+
+    messages 是可变列表，会就地追加 assistant/repair 消息。
+    """
+    max_repair = cfg.get("llm", "max_repair", default=3)
+    temperature = cfg.get("llm", "temperature", default=0.3)
+    tag = f"translate_{rel.replace('/', '_')}"
+
+    resp = client.chat_multi(messages, temperature=temperature, tag=tag)
+    for attempt in range(max_repair + 1):
+        try:
+            data = llm_mod.parse_json_response(resp)
+            messages.append({"role": "assistant", "content": resp})
+            return {**data, "untrusted": False}
+        except llm_mod.LLMError as e:
+            if attempt >= max_repair:
+                break
+            repair_hint = (
+                f"\n\n上次输出无法解析为合法 JSON。错误：{e}\n"
+                f"上次输出开头：{resp[:300]}\n"
+                "请重新输出严格合法的 JSON（不要任何多余文字、前后缀或换行包裹）。"
+            )
+            messages.append({"role": "user", "content": repair_hint})
+            resp = client.chat_multi(messages, temperature=temperature,
+                                     tag=f"repair_{rel.replace('/','_')}_seg{sid}")
+
+    # 兜底
+    cleaned = _cleanup_fallback(resp)
+    messages.append({"role": "assistant", "content": resp})
+    notes_mod.add(cfg, rel, int(sid), chk[:500],
+                  f"JSON 解析失败 {max_repair} 次后兜底清理", kind="存疑", created_by="llm")
+    return {"translation": cleaned, "confidence": 0.1, "needs_human": True,
+            "untrusted": True, "glossary_conflicts": [], "notes": []}
+
+
 def translate_page(
     cfg: Config,
     client,
@@ -247,7 +303,7 @@ def translate_page(
     review_queue: list[dict],
     interactive: bool = False,
 ) -> dict:
-    """翻译单个页面。返回 {status, segments_total, review_count}。"""
+    """翻译单个页面（多轮对话模式）。返回 {status, segments_total, review_count}。"""
     pstate = state.page(rel)
     if pstate.get("status") == STATUS["done"]:
         return {"status": "done", "skipped": True, "segments_total": len(pstate.get("segments", {}))}
@@ -261,8 +317,20 @@ def translate_page(
     focus = cfg.get("translators_notes", "focus", default="")
     tm_on = cfg.get("tm", "enabled", default=True)
     exemplar_on = cfg.get("style", "exemplar_enabled", default=True)
+    max_history = cfg.get("llm", "max_history_segments", default=50)
+    summary_on = cfg.get("llm", "summary_enabled", default=True)
+
+    # 构建 system prompt（整页共享，含全页词汇表）
+    all_gl = gl.load(cfg)
+    sysp = prompts.build_translate_system(cfg, all_gl, guide, user_rules, focus)
 
     result = {"status": "done", "skipped": False, "segments_total": len(segs), "review_count": 0}
+
+    # 多轮对话状态
+    conversation: list[dict] = [{"role": "system", "content": sysp}]
+    conversation_summary = ""  # 摘要接力的摘要
+    history_count = 0  # 当前对话中的翻译轮数
+    pending_translations: list[str] = []  # 用于摘要的已译段落
 
     for seg in segs:
         sid = str(seg.id)
@@ -273,61 +341,70 @@ def translate_page(
             seg.needs_human = done_seg.get("needs_human", False)
             continue
 
-        # 按 chunk_size 切分过长文本
         chunks = _chunk_text(seg.text, cfg.get("chunk_size", default=600))
         translated_chunks = []
         confidences = []
         needs_human = False
         untrusted = False
         collected_notes = []
+
         for chk in chunks:
-            # 短语精确记忆：去占位符后精确命中则直接采用，跳过 LLM
             chk_plain = re.sub(r"\[\[P\d+\]\]", "", chk).strip()
             ph_hit = phrases_mod.lookup(cfg, chk_plain)
             if ph_hit:
                 translated_chunks.append(ph_hit)
                 confidences.append(1.0)
+                pending_translations.append(ph_hit)
                 continue
+
+            # 构建用户消息
             gl_items = gl.relevant(cfg, chk)
-            if tm_on:
-                tm_hits = tm_mod.lookup(cfg, chk)
-            else:
-                tm_hits = []
-            if exemplar_on:
-                ex_refs = styles_mod.retrieve_exemplars(cfg, chk)
-            else:
-                ex_refs = []
+            # 更新 system prompt 中的词汇表（若有新术语）
+            if gl_items:
+                conversation[0] = {"role": "system", "content": sysp}
+
+            tm_hits = tm_mod.lookup(cfg, chk) if tm_on else []
+            ex_refs = styles_mod.retrieve_exemplars(cfg, chk) if exemplar_on else []
             notes_ctx = build_translation_context(cfg, rel, chk, page_ctx)
             chk_prior = prior_ctx
             if notes_ctx:
                 chk_prior = (chk_prior + "\n\n## 相关笔记\n" + notes_ctx).strip()
-            sysp = prompts.build_translate_system(
-                cfg, gl_items, guide, user_rules, focus
-            )
-            usr = prompts.build_translate_user(
-                cfg, chk, page_ctx, chk_prior, ex_refs, tm_hits
-            )
-            data = _translate_chunk_with_repair(cfg, client, sysp, usr, rel, sid, chk)
+
+            # 首条消息或摘要接力后：携带 page_ctx
+            is_first = (len(conversation) == 1) or (history_count == 0)
+            if is_first:
+                usr = prompts.build_translate_user_first(
+                    cfg, chk, page_ctx, chk_prior, ex_refs, tm_hits,
+                    summary=conversation_summary,
+                )
+            else:
+                usr = prompts.build_translate_user_subsequent(cfg, chk)
+
+            conversation.append({"role": "user", "content": usr})
+            data = _translate_chunk_with_repair_multi(cfg, client, conversation, rel, sid, chk)
             t = (data.get("translation") or "").strip()
-            # 占位符完整性校验：若译文丢失了 [[Px]]，触发一次 repair
+
+            # 占位符完整性校验
             missing = _check_placeholders(chk, t)
             if missing:
                 repair_usr = (
-                    prompts.build_translate_user(
-                        cfg, chk, page_ctx, chk_prior, ex_refs, tm_hits
-                    )
-                    + f"\n\n⚠️ 你丢失了占位符 {', '.join(missing)}，"
+                    f"⚠️ 你丢失了占位符 {', '.join(missing)}，"
                     "请重新翻译，必须在译文中保留所有 [[Px]] 占位符。"
                 )
-                data = _translate_chunk_with_repair(cfg, client, sysp, repair_usr, rel, sid, chk)
+                conversation.append({"role": "user", "content": repair_usr})
+                data = _translate_chunk_with_repair_multi(cfg, client, conversation, rel, sid, chk)
                 t = (data.get("translation") or "").strip()
                 still_missing = _check_placeholders(chk, t)
                 if still_missing:
                     untrusted = True
                     notes_mod.add(cfg, rel, int(sid), chk[:500],
                                   f"占位符丢失: {', '.join(still_missing)}", kind="存疑", created_by="llm")
+
             translated_chunks.append(t)
             confidences.append(float(data.get("confidence", 0.7)))
+            pending_translations.append(t)
+            history_count += 1
+
             if data.get("needs_human") or data.get("untrusted"):
                 needs_human = True
             if data.get("untrusted"):
@@ -344,14 +421,22 @@ def translate_page(
                 review_queue.append(
                     _make_review(cfg, rel, sid, seg.text, "low_confidence", t)
                 )
-            # 写入翻译记忆
             if tm_on and t and t != chk:
                 tm_mod.add(cfg, chk, t, rel, seg.id)
-            # 短语记忆：成功翻译的短短语记录供全文复用（排除含 prompt 标记的异常译文）
             if not data.get("untrusted") and t and chk_plain:
                 t_plain = re.sub(r"\[\[P\d+\]\]", "", t).strip()
                 if t_plain and "|TEXT|" not in t_plain and "|DST|" not in t_plain:
                     phrases_mod.add(cfg, chk_plain, t_plain)
+
+            # 摘要接力：达到轮次上限时触发
+            if summary_on and history_count >= max_history:
+                summary = _summarize_conversation(cfg, client, pending_translations, rel)
+                if summary:
+                    conversation_summary = summary
+                # 重建对话
+                conversation = [{"role": "system", "content": sysp}]
+                history_count = 0
+                pending_translations = []
 
         translation = "".join(translated_chunks)
         confidence = min(confidences) if confidences else None
@@ -371,10 +456,7 @@ def translate_page(
             result["review_count"] += 1
             pstate["status"] = STATUS["review"]
 
-    # 保存段索引
     _save_segment_index(cfg, rel, segs)
-
-    # 拼接回写
     out_html = seg_mod.reassemble(html, segs)
     seg_mod.write_page_output(cfg, rel, out_html)
 

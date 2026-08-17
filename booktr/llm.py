@@ -69,6 +69,81 @@ class LLMClient:
         return resp
 
     # ------------------------------------------------------------------
+    def chat_multi(self, messages: list[dict], temperature: float | None = None,
+                   tag: str = "chat_multi") -> str:
+        """多轮对话，messages = [{"role": "system"|"user"|"assistant", "content": ...}]。
+
+        返回最后一条 assistant 消息的文本。完整记录到 llm_logs。
+        """
+        t0 = time.monotonic()
+        system = ""
+        user_history = []
+        for m in messages:
+            if m["role"] == "system":
+                system = m["content"]
+            else:
+                user_history.append(m)
+        # 日志：仅记录最后一条 user 消息作为代表
+        last_user = next((m["content"] for m in reversed(user_history)
+                          if m["role"] == "user"), "")
+        if self.provider == "mock":
+            resp = self._mock(system, last_user)
+            self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
+                      resp, ok=True, duration_ms=(time.monotonic() - t0) * 1000)
+            return resp
+        if not self.api_key:
+            err = (f"未设置 API key（环境变量 {self.cfg.get('llm','api_key_env',default='BOOKTR_API_KEY')}）。"
+                   "或在 data/config.json 将 llm.provider 设为 mock 进行离线测试。")
+            self._log(tag, system, f"[{len(messages)} msgs]", "",
+                      ok=False, error=err,
+                      duration_ms=(time.monotonic() - t0) * 1000)
+            raise LLMError(err)
+        try:
+            resp, usage = self._openai_chat_multi(messages, temperature)
+        except LLMError as e:
+            self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
+                      "", ok=False, error=str(e),
+                      duration_ms=(time.monotonic() - t0) * 1000)
+            raise
+        self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
+                  resp, ok=True, usage=usage,
+                  duration_ms=(time.monotonic() - t0) * 1000)
+        return resp
+
+    def _openai_chat_multi(self, messages: list[dict],
+                           temperature: float | None) -> tuple[str, dict]:
+        """多轮对话底层调用。"""
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature if temperature is None else temperature,
+        }
+        if self.max_tokens:
+            body["max_tokens"] = self.max_tokens
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        url = self.base_url + "/chat/completions"
+        last_err: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            self._rate_limit()
+            try:
+                r = requests.post(url, headers=headers, json=body, timeout=self.timeout)
+                if r.status_code == 200:
+                    data = r.json()
+                    content = data["choices"][0]["message"]["content"]
+                    usage = self._record(data)
+                    return content, usage
+                last_err = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
+            except (requests.RequestException, ValueError) as e:
+                last_err = e
+            delay = 2 ** attempt
+            log.warning("LLM multi 调用失败(%s)，%.1fs 后重试: %s", attempt + 1, delay, last_err)
+            time.sleep(delay)
+        raise LLMError(f"LLM multi 调用最终失败: {last_err}")
+
+    # ------------------------------------------------------------------
     def _openai_chat(self, system: str, user: str, temperature: float | None) -> tuple[str, dict]:
         body = {
             "model": self.model,

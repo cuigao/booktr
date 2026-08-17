@@ -16,7 +16,9 @@
     "timeout": 120,
     "max_retries": 3,
     "max_requests_per_minute": 60,
-    "max_repair": 3
+    "max_repair": 3,
+    "max_history_segments": 50,
+    "summary_enabled": true
   },
   "planner": {
     "static_first": true,

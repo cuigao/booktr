@@ -88,6 +88,63 @@ def build_translate_user(
     return "\n\n".join(parts)
 
 
+def build_translate_user_first(
+    cfg,
+    src_text: str,
+    page_ctx: str,
+    prior_ctx: str,
+    exemplars: list[dict],
+    tm_hits: list[dict],
+    summary: str = "",
+) -> str:
+    """多轮对话首条消息：携带 page_ctx + 可选的前文翻译摘要。"""
+    tgt = cfg.get("lang", "target", default="zh-Hans")
+    parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt}。"]
+    if summary:
+        parts.append(f"## 前文翻译摘要（保持术语与风格一致）\n{summary}")
+    if page_ctx:
+        parts.append(f"## 当前页面上下文\n{page_ctx}")
+    if prior_ctx:
+        parts.append(f"## 前文上下文（保持叙事与术语一致）\n{prior_ctx}")
+    if tm_hits:
+        tm_lines = [f"{h['src']} → {h['dst']}" for h in tm_hits]
+        parts.append("## 翻译记忆命中（可参考，但优先词汇表）\n" + "\n".join(tm_lines))
+    if exemplars:
+        ex_lines = [f"原文：{e['src']}\n参考译文：{e['dst']}" for e in exemplars]
+        parts.append(
+            "## 风格参照样例（仅模仿其风格与措辞倾向，勿照抄内容）\n"
+            + "\n\n".join(ex_lines)
+        )
+    parts.append("## 待翻译文本\n\n" + src_text)
+    return "\n\n".join(parts)
+
+
+def build_translate_user_subsequent(cfg, src_text: str) -> str:
+    """多轮对话后续消息：仅携带待翻译文本。"""
+    return f"## 待翻译文本\n\n{src_text}"
+
+
+def build_conversation_summary(cfg) -> str:
+    """多轮对话摘要 prompt（system）。"""
+    return (
+        "你是翻译助理。请总结以下翻译会话的要点，用于后续翻译的上下文参考。\n"
+        "要求：\n"
+        "- 本页主题与整体风格\n"
+        "- 已使用的关键术语（如人名、专有名词的译法）\n"
+        "- 翻译决策（如保留原文的部分、特殊处理）\n"
+        "- 后续翻译需保持一致的要点\n"
+        "控制在 200 字以内，用要点列表。只输出摘要文本，不要 JSON。"
+    )
+
+
+def build_conversation_summary_user(translations: list[str]) -> str:
+    """多轮对话摘要 prompt（user）。"""
+    lines = []
+    for i, tr in enumerate(translations, 1):
+        lines.append(f"[段{i}] {tr[:300]}")
+    return "## 已翻译内容\n" + "\n\n".join(lines)
+
+
 def _srcname(cfg) -> str:
     return lang_name(cfg.get("lang", "source", default="ja"))
 

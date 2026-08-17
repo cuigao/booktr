@@ -29,6 +29,8 @@ DEFAULTS: dict[str, Any] = {
         "max_retries": 3,
         "max_requests_per_minute": 60,
         "max_repair": 3,  # 解析失败自愈重试次数
+        "max_history_segments": 50,  # 多轮对话保留历史段落数
+        "summary_enabled": True,  # 摘要接力开关
     },
     "planner": {
         "static_first": True,
