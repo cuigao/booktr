@@ -577,6 +577,8 @@ def _build_clean_items(cfg: Config, args) -> list[_CleanItem]:
                    lambda c: _count_json_list(c, "review_queue.json")),
         _CleanItem("notes", "翻译笔记", "notes.jsonl", "truncate",
                    lambda c: _count_jsonl(c, "notes.jsonl")),
+        _CleanItem("logs", "导出日志", "logs", "dir",
+                   lambda c: _count_dir_files(c, "logs")),
         _CleanItem("output", "输出目录", cfg.output_dir, "dir",
                    lambda c: _count_output(c), default=False),
         _CleanItem("plan", "计划", "plan.json", "file",
