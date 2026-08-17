@@ -391,6 +391,7 @@ def translate_page(
         needs_human = False
         untrusted = False
         collected_notes = []
+        skipped_phrases = []  # 短语记忆跳过的翻译，注入到下一条 user message
 
         for chk in chunks:
             chk_plain = re.sub(r"\[\[P\d+\]\]", "", chk).strip()
@@ -400,6 +401,7 @@ def translate_page(
                 translated_chunks.append(restored)
                 confidences.append(1.0)
                 pending_translations.append(restored)
+                skipped_phrases.append(f"{chk_plain} → {ph_hit}")
                 continue
 
             # 构建用户消息
@@ -424,6 +426,12 @@ def translate_page(
                 )
             else:
                 usr = prompts.build_translate_user_subsequent(cfg, chk)
+
+            # 注入短语记忆跳过的翻译到待翻译文本之前
+            if skipped_phrases:
+                inject = "\n\n".join(skipped_phrases)
+                usr = f"## 前文自动处理的短语（供参考，保持一致）\n{inject}\n\n{usr}"
+                skipped_phrases = []
 
             conversation.append({"role": "user", "content": usr})
             data = _translate_chunk_with_repair_multi(cfg, client, conversation, rel, sid, chk)
