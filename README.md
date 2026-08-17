@@ -109,6 +109,11 @@ python booktr-cli.py clean --all -y       # 全清（含 output）
 python booktr-cli.py clean --reset -y     # 额外清理 plan.json + site_map.json
 python booktr-cli.py clean                # 交互选择
 
+# 14) 导出指定页面的完整 LLM 对话日志为 Markdown
+python booktr-cli.py export-log today/today6.html
+python booktr-cli.py export-log today/today6.html --sessions 1  # 只导出最近1次翻译任务
+python booktr-cli.py export-log today/today6.html --task tsk_1755432600000  # 指定 task_id
+
 # 查看进度
 python booktr-cli.py status
 ```
@@ -128,14 +133,23 @@ python booktr-cli.py status
   - `lang.source/target` 源/目标语言代码（默认 `ja` → `zh-Hans`）
   - `llm.provider`：`mock`（离线测试）或 `openai-compatible`（真实 API）
   - `llm.base_url/model/api_key_env`：OpenAI 兼容服务接入参数
+  - `llm.max_repair`：解析失败自愈重试次数（默认 3）
+  - `llm.max_history_segments`：多轮对话保留历史段落数（默认 50）
+  - `llm.summary_enabled`：摘要接力开关（默认 true）
+  - `llm_logs.auto_export`：translate 完成后自动导出对话日志（默认 true）
+  - `llm_logs.auto_export_sessions`：自动导出最近 N 个翻译任务（默认 1）
   - `style.refs_path`：风格样例文件（用户自备，接口就绪）
 
 ## 核心机制
 
 - **逐段拼接**：在原始解码文本上定位每个可翻译文字段的字符偏移，翻译后原位拼回。除被替换的文字外，标签、注释、`tppabs` 属性、空白等字节完全不变，保证"完全相同样式"。段索引（`work/segments/*.json`）记录 `页面/段ID/源偏移/译文/引文`，为译者注与未来的浏览器插件提供锚点。
 - **编码**：逐文件探测（Shift-JIS 优先，失败回退 UTF-8）；输出统一 UTF-8 并在 `<head>` 补/改 `<meta charset>`（中文无法在 Shift-JIS 编码，这是唯一必要改动）。
-- **占位符**：段内内联标签（`<img>/<font>/<a>…`）转为 `[[P0]]` 占位符交给 LLM，译文必须原样保留，拼接时还原。相邻 inline 标签合并为单个占位符，减少 LLM 困惑。
+- **占位符**：段内内联标签（`<img>/<font>/<a>…`）转为 `[[P0]]` 占位符交给 LLM，译文必须原样保留，拼接时还原。相邻 inline 标签合并为单个占位符，减少 LLM 困惑。短语记忆命中后从原始 chunk 恢复占位符。
 - **解析自愈**：LLM 输出非法 JSON 时自动重试（最多 `max_repair` 次），每次携带具体错误信息让 LLM 修正；占位符丢失时触发额外 repair；兜底清理去除 `|TEXT|`/JSON 残渣。
+- **多轮对话翻译**：页面内所有段落共享同一对话上下文，LLM 能保持术语与风格一致性。
+  - **摘要接力**：达到 `max_history_segments`（默认 50）后自动生成摘要，重建对话继续翻译。
+  - **短语记忆注入**：被短语记忆跳过的翻译结果注入到下一条 user message，保持 LLM 上下文。
+- **LLM 异常防护**：所有 LLM 返回路径均有防护——None 内容检查、API 格式异常捕获、confidence null 防护、`parse_json_response` 空响应处理。
 - **翻译顺序（统一加权模型）**：每页计算一组归一化指标分（`semantic` 层级语义序 / `has_semantic` / `is_index` / `is_orphan` / `hotness` 引用热度 / `depth` / `chrono` 日期 / `volume` 编号 / `nav` 导航位次 / `dfs` 遍历序 / `len` 原文长度），按**加权总分降序**排列。
   - **层级语义序**：递归发现各级索引页（root 的 `index.html`、`today0.html`、`photo0.html`、`rec_idx.html` 等，判定 = 链接覆盖本级成员比例 ≥ `index_threshold`），页面语义分 = 目录链上各级位置的级联，跨目录自然分层、组内按索引链接序连续。
   - **权重/方向/阈值全部可调**：`config.json` 的 `planner.weights/directions/index_threshold`，或命令行 `plan --weights '{"semantic":0.4}' --direction semantic:reverse --index-threshold 0.7`。
@@ -157,6 +171,7 @@ python booktr-cli.py status
 | 上下文包 | 前 N 篇日记摘要 | `planner.context_window` |
 | 一致性 QA | 校验术语一致与 HTML 安全 | `qa.deep_llm_check` |
 | 译者注 | 跨页关联/趣味发现 → 外部 JSON | `annotate` |
+| Session ID | 页面翻译任务标识（task_id）+ 多轮对话标识（context_id） | 自动生成，写入 LLM 日志 |
 
 优先级：**词汇表 > 风格样例 > 风格规则**。
 
@@ -182,6 +197,8 @@ python booktr-cli.py status
 | `work/state.json` | 检查点 |
 | `work/review_queue.json` | 待人工审核项 |
 | `work/qa_report.json` | QA 报告 |
+| `work/llm_logs/*.json` | LLM 调用日志（含完整对话历史、task_id、context_id） |
+| `work/logs/*.md` | 导出的 Markdown 对话日志（自动或手动导出） |
 | `out/` | 翻译后完整镜像 |
 
 ## Git 约定
