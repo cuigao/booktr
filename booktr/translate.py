@@ -410,19 +410,37 @@ def translate_page(
 
         for chk in chunks:
             chk_plain = re.sub(r"\[\[P\d+\]\]", "", chk).strip()
+
+            # 1. 词汇表 read_only 条目 → 机械替换
+            gl_hit = gl.lookup_read_only(cfg, chk_plain)
+            if gl_hit:
+                restored = _restore_placeholders_from_src(chk, gl_hit)
+                translated_chunks.append(restored)
+                confidences.append(1.0)
+                pending_translations.append(restored)
+                skipped_phrases.append(f"{chk_plain} → {gl_hit} [词汇表]")
+                continue
+
+            # 2. 短语记忆 → 机械替换
             ph_hit = phrases_mod.lookup(cfg, chk_plain)
             if ph_hit:
                 restored = _restore_placeholders_from_src(chk, ph_hit)
                 translated_chunks.append(restored)
                 confidences.append(1.0)
                 pending_translations.append(restored)
-                skipped_phrases.append(f"{chk_plain} → {ph_hit}")
+                skipped_phrases.append(f"{chk_plain} → {ph_hit} [短语记忆]")
                 continue
 
-            # 构建用户消息
-            gl_items = gl.relevant(cfg, chk)
-            # 更新 system prompt 中的词汇表（若有新术语）
-            if gl_items:
+            # 3. 注入相关条目 + LLM 翻译
+            gl_items = gl.relevant(cfg, chk)  # 词汇表相关（含 read_only）
+            ph_items = phrases_mod.relevant(cfg, chk)  # 短语记忆相关
+            all_injections = gl_items + ph_items
+
+            # 更新 system prompt 中的注入内容
+            if all_injections:
+                sysp = prompts.build_translate_system(
+                    cfg, all_injections, guide, user_rules, focus
+                )
                 conversation[0] = {"role": "system", "content": sysp}
 
             tm_hits = tm_mod.lookup(cfg, chk) if tm_on else []

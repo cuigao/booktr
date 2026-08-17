@@ -29,7 +29,10 @@ def save(cfg: Config, data: dict) -> None:
 
 
 def add(cfg: Config, src: str, dst: str) -> bool:
-    """记录短语（src/dst 均为去占位符后的纯文本）。"""
+    """记录短语。如果词汇表已有 read_only 条目，不写入。"""
+    from . import glossary as gl
+    if gl.lookup_read_only(cfg, src) is not None:
+        return False
     key = util.normalize_ws(src)
     if not key or len(key) > _max_len(cfg):
         return False
@@ -47,6 +50,22 @@ def lookup(cfg: Config, text: str) -> str | None:
     data = load(cfg)
     hit = data.get(key)
     return hit.get("dst") if hit else None
+
+
+def relevant(cfg: Config, text: str, limit: int = 10) -> list[dict]:
+    """返回与给定文本相关的短语记忆条目（子串匹配）。"""
+    data = load(cfg)
+    if not data:
+        return []
+    scored = []
+    for src, info in data.items():
+        if not src:
+            continue
+        if src in text or text in src:
+            scored.append({"src": src, "dst": info["dst"],
+                           "usage": info.get("usage", 0), "source": "phrase"})
+    scored.sort(key=lambda x: x["usage"], reverse=True)
+    return scored[:limit]
 
 
 def size(cfg: Config) -> int:

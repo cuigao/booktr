@@ -13,7 +13,16 @@ CATEGORIES = ("person", "song", "album", "show", "place", "term", "other")
 def load(cfg: Config) -> list[dict]:
     path = cfg.get("glossary", "path", default="work/glossary.json")
     data = util.read_json(path, [])
-    return data if isinstance(data, list) else []
+    items = data if isinstance(data, list) else []
+    # 迁移：confirmed 条目默认 read_only=True
+    changed = False
+    for it in items:
+        if it.get("status") == "confirmed" and "read_only" not in it:
+            it["read_only"] = True
+            changed = True
+    if changed:
+        save(cfg, items)
+    return items
 
 
 def save(cfg: Config, items: list[dict]) -> None:
@@ -40,6 +49,8 @@ def upsert(cfg: Config, entry: dict, author: str = "user") -> tuple[bool, str]:
                 it["category"] = entry["category"]
             if entry.get("note"):
                 it["note"] = entry["note"]
+            if entry.get("status") == "confirmed":
+                it["read_only"] = True
             save(cfg, items)
             return True, conflict or "已更新"
     item = {
@@ -48,6 +59,7 @@ def upsert(cfg: Config, entry: dict, author: str = "user") -> tuple[bool, str]:
         "category": entry.get("category", "other"),
         "note": entry.get("note", ""),
         "status": entry.get("status", "confirmed"),
+        "read_only": entry.get("status") == "confirmed",  # confirmed 默认 read_only
         "confidence": entry.get("confidence", 1.0),
         "usage_count": 0,
         "author": author,
@@ -100,6 +112,18 @@ def relevant(cfg: Config, text: str, limit: int = 30) -> list[dict]:
             scored.append((cnt * len(src), it))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [it for _, it in scored[:limit]]
+
+
+def lookup_read_only(cfg: Config, text: str) -> str | None:
+    """查找词汇表中 read_only=True 的条目，精确匹配返回译文。"""
+    key = util.normalize_ws(text)
+    if not key:
+        return None
+    items = load(cfg)
+    for it in items:
+        if it.get("read_only") and it.get("src") == key:
+            return it.get("dst")
+    return None
 
 
 def all_confirmed(cfg: Config) -> list[dict]:

@@ -38,11 +38,21 @@ def build_translate_system(
     if glossary:
         gl_lines = []
         for g in glossary:
-            gl_lines.append(
-                f"- {g['src']} → {g['dst']}"
-                + (f"（{g.get('note','')}）" if g.get("note") else "")
-                + (f" [{g.get('category','')}]" if g.get("category") else "")
-            )
+            src = g.get("src", "")
+            dst = g.get("dst", "")
+            source = g.get("source", "")
+            if source == "phrase":
+                # 短语记忆条目
+                gl_lines.append(f"- {src} → {dst} [参考译法]")
+            elif g.get("read_only"):
+                # 词汇表 confirmed 条目
+                note = f"（{g.get('note', '')}）" if g.get("note") else ""
+                gl_lines.append(f"- {src} → {dst}{note} [固定译法]")
+            else:
+                # 词汇表 auto-candidate 条目
+                note = f"（{g.get('note', '')}）" if g.get("note") else ""
+                cat = f" [{g.get('category', '')}]" if g.get("category") else ""
+                gl_lines.append(f"- {src} → {dst}{note}{cat}")
         parts.append("## 词汇表（必须遵循，翻译专名时优先使用）\n" + "\n".join(gl_lines))
     if style_guide:
         parts.append(f"## 风格指南\n{style_guide}")
