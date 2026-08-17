@@ -91,7 +91,7 @@ DEFAULTS: dict[str, Any] = {
     "tm": {"path": "work/tm.jsonl", "enabled": True},
     "qa": {"deep_llm_check": True},
     "translators_notes": {"path": "work/translators_notes.json", "focus": ""},
-    "review": {"path": "work/review_queue.json"},
+    "review": {"path": "work/review_queue.json", "auto_regenerate": True},
     "state": {"path": "work/state.json"},
     "summaries": {"dir": "work/summaries"},
     "segments_dir": "work/segments",

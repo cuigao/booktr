@@ -93,7 +93,8 @@
     "focus": ""
   },
   "review": {
-    "path": "work/review_queue.json"
+    "path": "work/review_queue.json",
+    "auto_regenerate": true
   },
   "state": {
     "path": "work/state.json"
