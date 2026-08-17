@@ -83,7 +83,7 @@ def split_segments(html: str, cfg: Config) -> list[Segment]:
         if not any(ch.strip() for ch in text_joined):
             cur_chunks = []
             return
-        # 构造带占位符的文本（相邻 inline 标签合并为一个占位符）
+        # 构造带占位符的文本（相邻 inline 标签合并为一个占位符，跳过纯空白）
         ph_map: dict[str, str] = {}
         out_parts: list[str] = []
         ph_idx = [0]
@@ -97,13 +97,22 @@ def split_segments(html: str, cfg: Config) -> list[Segment]:
                 out_parts.append(html[s:e])
                 i += 1
             else:
-                # 合并连续的 tag 块
+                # 合并连续的 tag 块（跳过纯空白 text chunk）
                 tag_start = s
                 tag_end = e
                 i += 1
-                while i < nchunks and cur_chunks[i][0] == "tag":
-                    tag_end = cur_chunks[i][2]
-                    i += 1
+                while i < nchunks:
+                    if cur_chunks[i][0] == "tag":
+                        tag_end = cur_chunks[i][2]
+                        i += 1
+                    elif cur_chunks[i][0] == "text":
+                        # 纯空白跳过，继续合并 tag
+                        if not html[cur_chunks[i][1]:cur_chunks[i][2]].strip():
+                            i += 1
+                            continue
+                        break
+                    else:
+                        break
                 token = _placeholder(ph_open, ph_close, ph_idx[0])
                 ph_idx[0] += 1
                 ph_map[token] = html[tag_start:tag_end]
