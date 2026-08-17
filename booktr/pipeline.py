@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 
 from . import annotator, crawler, glossary as gl, llm as llm_mod
@@ -416,6 +417,186 @@ def cmd_export(cfg: Config, args) -> None:
     print(f"输出清单: {out_json}")
 
 
+# ── clean 命令 ──────────────────────────────────────────────────────────
+
+
+class _CleanItem:
+    """可清理项的描述。"""
+
+    def __init__(self, key: str, label: str, path: str, kind: str,
+                 count_fn=None, default: bool = True):
+        self.key = key
+        self.label = label
+        self.path = path          # 相对于 work_dir 的路径（或绝对）
+        self.kind = kind          # file | dir | json_reset
+        self.count_fn = count_fn  # callable(cfg) -> str 显示条目数
+        self.default = default
+        self.count_str = ""
+
+    def load_count(self, cfg: Config) -> None:
+        if self.count_fn:
+            self.count_str = self.count_fn(cfg)
+
+    def clean(self, cfg: Config) -> None:
+        if self.kind == "dir":
+            d = self._abs(cfg)
+            if os.path.isdir(d):
+                shutil.rmtree(d)
+                os.makedirs(d, exist_ok=True)
+        elif self.kind == "file":
+            p = self._abs(cfg)
+            if os.path.exists(p):
+                os.remove(p)
+        elif self.kind == "json_reset":
+            p = self._abs(cfg)
+            util.write_json(p, {} if "state" not in self.key else self._reset_state(cfg))
+        elif self.kind == "json_empty":
+            p = self._abs(cfg)
+            util.write_json(p, [])
+        elif self.kind == "truncate":
+            p = self._abs(cfg)
+            with open(p, "w", encoding="utf-8") as f:
+                pass  # 清空
+
+    def _abs(self, cfg: Config) -> str:
+        if os.path.isabs(self.path):
+            return self.path
+        return os.path.join(cfg.work_dir, self.path)
+
+    def _reset_state(self, cfg: Config) -> dict:
+        state_path = os.path.join(cfg.work_dir, "state.json")
+        data = util.read_json(state_path, {})
+        for p in data.get("pages", {}).values():
+            p["status"] = "pending"
+            p["segments"] = {}
+        data["done_pages"] = []
+        return data
+
+
+def _count_dir_files(cfg: Config, subdir: str) -> str:
+    d = os.path.join(cfg.work_dir, subdir)
+    if not os.path.isdir(d):
+        return "0 文件"
+    n = sum(1 for _ in os.scandir(d) if _.is_file())
+    return f"{n} 文件"
+
+
+def _count_jsonl(cfg: Config, filename: str) -> str:
+    p = os.path.join(cfg.work_dir, filename)
+    if not os.path.exists(p):
+        return "0 条"
+    with open(p, encoding="utf-8") as f:
+        n = sum(1 for line in f if line.strip())
+    return f"{n} 条"
+
+
+def _count_json_list(cfg: Config, filename: str) -> str:
+    p = os.path.join(cfg.work_dir, filename)
+    if not os.path.exists(p):
+        return "0 条"
+    data = util.read_json(p, [])
+    return f"{len(data)} 条"
+
+
+def _count_state(cfg: Config) -> str:
+    p = os.path.join(cfg.work_dir, "state.json")
+    data = util.read_json(p, {})
+    pages = data.get("pages", {})
+    done = len(data.get("done_pages", []))
+    return f"{len(pages)} 页 ({done} 已完成)"
+
+
+def _count_output(cfg: Config) -> str:
+    d = cfg.output_dir
+    if not os.path.isdir(d):
+        return "0 文件"
+    n = sum(1 for r, _, fs in os.walk(d) for f in fs if f.endswith(".html"))
+    return f"{n} 文件"
+
+
+def _build_clean_items(cfg: Config, args) -> list[_CleanItem]:
+    items = [
+        _CleanItem("phrase_memory", "短语记忆", "phrase_memory.json", "json_empty",
+                   lambda c: _count_json_list(c, "phrase_memory.json")),
+        _CleanItem("tm", "翻译记忆 TM", "tm.jsonl", "truncate",
+                   lambda c: _count_jsonl(c, "tm.jsonl")),
+        _CleanItem("segments", "段缓存", "segments", "dir",
+                   lambda c: _count_dir_files(c, "segments")),
+        _CleanItem("summaries", "页面摘要", "summaries", "dir",
+                   lambda c: _count_dir_files(c, "summaries")),
+        _CleanItem("llm_logs", "LLM 日志", "llm_logs", "dir",
+                   lambda c: _count_dir_files(c, "llm_logs")),
+        _CleanItem("state", "翻译状态", "state.json", "json_reset",
+                   lambda c: _count_state(c)),
+        _CleanItem("review", "审核队列", "review_queue.json", "json_empty",
+                   lambda c: _count_json_list(c, "review_queue.json")),
+        _CleanItem("notes", "翻译笔记", "notes.jsonl", "truncate",
+                   lambda c: _count_jsonl(c, "notes.jsonl")),
+        _CleanItem("output", "输出目录", cfg.output_dir, "dir",
+                   lambda c: _count_output(c), default=False),
+        _CleanItem("plan", "计划", "plan.json", "file",
+                   lambda c: "存在" if os.path.exists(os.path.join(c.work_dir, "plan.json")) else "不存在",
+                   default=False),
+        _CleanItem("site_map", "站点地图", "site_map.json", "file",
+                   lambda c: "存在" if os.path.exists(os.path.join(c.work_dir, "site_map.json")) else "不存在",
+                   default=False),
+    ]
+    # --all: 选中默认项 + output（但不含 plan/site_map，需 --reset）
+    if args.all:
+        for it in items:
+            if it.key in ("plan", "site_map"):
+                it.default = False
+            elif it.key == "output":
+                it.default = True
+            else:
+                it.default = True
+    # --reset: 额外选中 plan + site_map
+    if getattr(args, "reset", False):
+        for it in items:
+            if it.key in ("plan", "site_map"):
+                it.default = True
+    # 单独选项: 强制选中
+    for it in items:
+        if getattr(args, it.key.replace("-", "_"), False):
+            it.default = True
+    return items
+
+
+def _interactive_select(items: list[_CleanItem]) -> list[_CleanItem]:
+    """交互式选择要清理的项。返回选中的列表。"""
+    print("\n将清理以下自动产物：\n")
+    for i, it in enumerate(items, 1):
+        mark = "[x]" if it.default else "[ ]"
+        print(f"  {mark} {it.label} ({it.count_str})")
+    print()
+    val = input("确认清理？[y/N] ").strip().lower()
+    if val in ("y", "yes"):
+        return [it for it in items if it.default]
+    print("已取消。")
+    return []
+
+
+def cmd_clean(cfg: Config, args) -> None:
+    """清理翻译缓存，从全新状态开始。"""
+    items = _build_clean_items(cfg, args)
+    for it in items:
+        it.load_count(cfg)
+
+    if args.yes:
+        selected = [it for it in items if it.default]
+    else:
+        selected = _interactive_select(items)
+
+    if not selected:
+        return
+
+    for it in selected:
+        it.clean(cfg)
+        print(f"  已清理: {it.label} ({it.count_str})")
+
+    print(f"\n完成，共清理 {len(selected)} 项。")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="booktr", description="古早网站本地化翻译 agent")
 
@@ -499,6 +680,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = mk("export", help="导出输出镜像与静态资源")
     sp.set_defaults(func=cmd_export)
+
+    sp = mk("clean", help="清理翻译缓存，从全新状态开始")
+    sp.add_argument("--all", action="store_true", help="清理所有自动产物（含 output，不含 plan/site_map）")
+    sp.add_argument("--phrase-memory", action="store_true", help="清理短语记忆")
+    sp.add_argument("--tm", action="store_true", help="清理翻译记忆")
+    sp.add_argument("--segments", action="store_true", help="清理段缓存")
+    sp.add_argument("--summaries", action="store_true", help="清理页面摘要")
+    sp.add_argument("--llm-logs", action="store_true", help="清理 LLM 日志")
+    sp.add_argument("--state", action="store_true", help="重置翻译状态")
+    sp.add_argument("--review", action="store_true", help="清理审核队列")
+    sp.add_argument("--notes", action="store_true", help="清理翻译笔记")
+    sp.add_argument("--output", action="store_true", help="清理输出目录")
+    sp.add_argument("--reset", action="store_true", help="额外清理 plan.json 和 site_map.json")
+    sp.add_argument("-y", "--yes", action="store_true", help="跳过交互确认")
+    sp.set_defaults(func=cmd_clean)
 
     return p
 

@@ -15,7 +15,8 @@
     "max_tokens": 4096,
     "timeout": 120,
     "max_retries": 3,
-    "max_requests_per_minute": 60
+    "max_requests_per_minute": 60,
+    "max_repair": 3
   },
   "planner": {
     "static_first": true,
@@ -73,6 +74,10 @@
   },
   "notes": {
     "path": "work/notes.jsonl"
+  },
+  "phrases": {
+    "path": "work/phrase_memory.json",
+    "max_len": 30
   },
   "tm": {
     "path": "work/tm.jsonl",

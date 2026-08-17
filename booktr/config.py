@@ -28,6 +28,7 @@ DEFAULTS: dict[str, Any] = {
         "timeout": 120,
         "max_retries": 3,
         "max_requests_per_minute": 60,
+        "max_repair": 3,  # 解析失败自愈重试次数
     },
     "planner": {
         "static_first": True,
@@ -84,6 +85,7 @@ DEFAULTS: dict[str, Any] = {
         "exemplar_topk": 3,
     },
     "notes": {"path": "work/notes.jsonl"},
+    "phrases": {"path": "work/phrase_memory.json", "max_len": 30},
     "tm": {"path": "work/tm.jsonl", "enabled": True},
     "qa": {"deep_llm_check": True},
     "translators_notes": {"path": "work/translators_notes.json", "focus": ""},

@@ -83,19 +83,30 @@ def split_segments(html: str, cfg: Config) -> list[Segment]:
         if not any(ch.strip() for ch in text_joined):
             cur_chunks = []
             return
-        # 构造带占位符的文本
+        # 构造带占位符的文本（相邻 inline 标签合并为一个占位符）
         ph_map: dict[str, str] = {}
         out_parts: list[str] = []
         ph_idx = [0]
         start = cur_chunks[0][1]
         end = cur_chunks[-1][2]
-        for kind, s, e in cur_chunks:
+        i = 0
+        nchunks = len(cur_chunks)
+        while i < nchunks:
+            kind, s, e = cur_chunks[i]
             if kind == "text":
                 out_parts.append(html[s:e])
-            else:  # inline tag
+                i += 1
+            else:
+                # 合并连续的 tag 块
+                tag_start = s
+                tag_end = e
+                i += 1
+                while i < nchunks and cur_chunks[i][0] == "tag":
+                    tag_end = cur_chunks[i][2]
+                    i += 1
                 token = _placeholder(ph_open, ph_close, ph_idx[0])
                 ph_idx[0] += 1
-                ph_map[token] = html[s:e]
+                ph_map[token] = html[tag_start:tag_end]
                 out_parts.append(token)
         display = "".join(out_parts)
         if len(display.strip()) < min_len:

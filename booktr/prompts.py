@@ -30,6 +30,8 @@ def build_translate_system(
         "- 输出严格为 JSON，只输出 JSON 本身，不要任何额外文字或 markdown 围栏",
         "- 保留原文中的英文/字母写法：全角英文字母（ＡＢＣ…）保持全角不转半角，"
         "英文/拉丁字母不翻译；人名保留原形；其余日文内容翻译为简体中文",
+        "- 译文中必须保留原文的所有 [[Px]] 占位符（如 [[P0]]、[[P1]]），"
+        "它们是 HTML 标签的替代标记，翻译后需原样还原",
     ]
     if glossary:
         gl_lines = []
@@ -82,7 +84,7 @@ def build_translate_user(
             "## 风格参照样例（仅模仿其风格与措辞倾向，勿照抄内容）\n"
             + "\n\n".join(ex_lines)
         )
-    parts.append("## 待翻译文本\n|TEXT|\n" + src_text)
+    parts.append("## 待翻译文本\n\n" + src_text)
     return "\n\n".join(parts)
 
 

@@ -187,10 +187,43 @@ class LLMClient:
             json.dump(entry, f, ensure_ascii=False, indent=2)
 
 
+def _extract_balanced_json(text: str) -> str | None:
+    """用平衡花括号提取第一个完整的 JSON 对象。"""
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        start = text.find("{", start + 1)
+    return None
+
+
 def parse_json_response(text: str) -> dict:
-    """从 LLM 输出中提取 JSON（容忍 markdown 围栏与前后缀）。"""
+    """从 LLM 输出中提取 JSON（容忍 markdown 围栏与前后缀）。
+
+    用平衡花括号匹配提取完整 JSON 对象，避免抓到半截/嵌套错块。
+    解析失败抛 LLMError（调用方据此自愈重试）。
+    """
     text = text.strip()
-    # 去除 ```json ... ```
     m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     if m:
         text = m.group(1).strip()
@@ -199,11 +232,12 @@ def parse_json_response(text: str) -> dict:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
-    # 尝试提取第一个 {...} 块
-    m = re.search(r"\{.*\}", text, re.S)
-    if m:
+    block = _extract_balanced_json(text)
+    if block:
         try:
-            return json.loads(m.group(0))
+            data = json.loads(block)
+            if isinstance(data, dict):
+                return data
         except json.JSONDecodeError:
             pass
     raise LLMError(f"无法解析 LLM JSON 输出: {text[:300]}")
