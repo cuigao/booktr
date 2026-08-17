@@ -97,9 +97,8 @@ def interactive_review(cfg: Config, prompt: str = None, max_items: int = 0) -> i
         elif act == "d":
             it["status"] = "deleted"
             # 删除该段翻译，标记为 pending
-            from . import translate as tr
-            from . import state as state_mod
-            state = state_mod.State(cfg)
+            from .translate import State, STATUS
+            state = State(cfg)
             pstate = state.page(it["page"])
             sid = str(it["segment_id"])
             seg_state = pstate.get("segments", {}).get(sid)
