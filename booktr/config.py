@@ -95,7 +95,11 @@ DEFAULTS: dict[str, Any] = {
     "state": {"path": "work/state.json"},
     "summaries": {"dir": "work/summaries"},
     "segments_dir": "work/segments",
-    "llm_logs": {"dir": "work/llm_logs"},
+    "llm_logs": {
+        "dir": "work/llm_logs",
+        "auto_export": True,
+        "auto_export_sessions": 1,
+    },
     "mode": "auto",  # auto | interactive
     "pause_on_review": True,
     "chunk_size": 600,

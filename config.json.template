@@ -103,7 +103,9 @@
   },
   "segments_dir": "work/segments",
   "llm_logs": {
-    "dir": "work/llm_logs"
+    "dir": "work/llm_logs",
+    "auto_export": true,
+    "auto_export_sessions": 1
   },
   "mode": "auto",
   "pause_on_review": true,

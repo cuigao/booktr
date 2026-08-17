@@ -70,7 +70,8 @@ class LLMClient:
 
     # ------------------------------------------------------------------
     def chat_multi(self, messages: list[dict], temperature: float | None = None,
-                   tag: str = "chat_multi") -> str:
+                   tag: str = "chat_multi", task_id: str = "",
+                   context_id: str = "") -> str:
         """多轮对话，messages = [{"role": "system"|"user"|"assistant", "content": ...}]。
 
         返回最后一条 assistant 消息的文本。完整记录到 llm_logs。
@@ -90,7 +91,7 @@ class LLMClient:
             resp = self._mock(system, last_user)
             self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
                       resp, ok=True, duration_ms=(time.monotonic() - t0) * 1000,
-                      messages=messages)
+                      messages=messages, task_id=task_id, context_id=context_id)
             return resp
         if not self.api_key:
             err = (f"未设置 API key（环境变量 {self.cfg.get('llm','api_key_env',default='BOOKTR_API_KEY')}）。"
@@ -98,7 +99,7 @@ class LLMClient:
             self._log(tag, system, f"[{len(messages)} msgs]", "",
                       ok=False, error=err,
                       duration_ms=(time.monotonic() - t0) * 1000,
-                      messages=messages)
+                      messages=messages, task_id=task_id, context_id=context_id)
             raise LLMError(err)
         try:
             resp, usage = self._openai_chat_multi(messages, temperature)
@@ -106,12 +107,12 @@ class LLMClient:
             self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
                       "", ok=False, error=str(e),
                       duration_ms=(time.monotonic() - t0) * 1000,
-                      messages=messages)
+                      messages=messages, task_id=task_id, context_id=context_id)
             raise
         self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
                   resp, ok=True, usage=usage,
                   duration_ms=(time.monotonic() - t0) * 1000,
-                  messages=messages)
+                  messages=messages, task_id=task_id, context_id=context_id)
         return resp
 
     def _openai_chat_multi(self, messages: list[dict],
@@ -244,7 +245,8 @@ class LLMClient:
 
     def _log(self, tag: str, system: str, user: str, response: str,
              ok: bool = True, error: str = "", usage: dict | None = None,
-             duration_ms: float = 0.0, messages: list[dict] | None = None) -> None:
+             duration_ms: float = 0.0, messages: list[dict] | None = None,
+             task_id: str = "", context_id: str = "") -> None:
         """完整记录一次 LLM 调用（成功或失败，含 mock）。"""
         d = self.cfg.get("llm_logs", "dir", default="")
         if not d:
@@ -266,6 +268,10 @@ class LLMClient:
             "user": user,
             "response": response,
         }
+        if task_id:
+            entry["task_id"] = task_id
+        if context_id:
+            entry["context_id"] = context_id
         if messages is not None:
             entry["messages"] = messages
         # 尝试解析响应中的 JSON（若为结构化输出）

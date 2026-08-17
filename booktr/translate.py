@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 
 from . import glossary as gl
 from . import llm as llm_mod
@@ -293,6 +294,7 @@ def _summarize_conversation(
 
 def _translate_chunk_with_repair_multi(
     cfg: Config, client, messages: list[dict], rel: str, sid: str, chk: str,
+    task_id: str = "", context_id: str = "",
 ) -> dict:
     """多轮对话模式翻译单个 chunk，带解析失败自愈与占位符校验。
 
@@ -302,7 +304,8 @@ def _translate_chunk_with_repair_multi(
     temperature = cfg.get("llm", "temperature", default=0.3)
     tag = f"translate_{rel.replace('/', '_')}"
 
-    resp = client.chat_multi(messages, temperature=temperature, tag=tag)
+    resp = client.chat_multi(messages, temperature=temperature, tag=tag,
+                             task_id=task_id, context_id=context_id)
     for attempt in range(max_repair + 1):
         try:
             data = llm_mod.parse_json_response(resp)
@@ -318,7 +321,8 @@ def _translate_chunk_with_repair_multi(
             )
             messages.append({"role": "user", "content": repair_hint})
             resp = client.chat_multi(messages, temperature=temperature,
-                                     tag=f"repair_{rel.replace('/','_')}_seg{sid}")
+                                     tag=f"repair_{rel.replace('/','_')}_seg{sid}",
+                                     task_id=task_id, context_id=context_id)
 
     # 兜底
     cleaned = _cleanup_fallback(resp or "")
@@ -367,6 +371,13 @@ def translate_page(
     sysp = prompts.build_translate_system(cfg, all_gl, guide, user_rules, focus)
 
     result = {"status": "done", "skipped": False, "segments_total": len(segs), "review_count": 0}
+
+    # Session ID: task_id = 一次完整页面翻译，context_id = 一轮多轮对话
+    _epoch_ms = lambda: int(time.time() * 1000)
+    page_key = rel.replace("/", "_").replace(".html", "")
+    task_id = f"tsk_{_epoch_ms()}_{page_key}"
+    context_seq = 0
+    context_id = f"ctx_{_epoch_ms()}_{page_key}_{context_seq}"
 
     # 多轮对话状态
     conversation: list[dict] = [{"role": "system", "content": sysp}]
@@ -434,7 +445,8 @@ def translate_page(
                 skipped_phrases = []
 
             conversation.append({"role": "user", "content": usr})
-            data = _translate_chunk_with_repair_multi(cfg, client, conversation, rel, sid, chk)
+            data = _translate_chunk_with_repair_multi(cfg, client, conversation, rel, sid, chk,
+                                                      task_id=task_id, context_id=context_id)
             t = (data.get("translation") or "").strip()
 
             # 占位符完整性校验
@@ -446,7 +458,8 @@ def translate_page(
                     "请重新翻译，必须在译文中保留所有 [[Px]] 占位符。"
                 )
                 conversation.append({"role": "user", "content": repair_usr})
-                data = _translate_chunk_with_repair_multi(cfg, client, conversation, rel, sid, chk)
+                data = _translate_chunk_with_repair_multi(cfg, client, conversation, rel, sid, chk,
+                                                          task_id=task_id, context_id=context_id)
                 t = (data.get("translation") or "").strip()
                 still_missing = _check_placeholders(chk, t)
                 if still_missing:
@@ -504,10 +517,12 @@ def translate_page(
                 summary = _summarize_conversation(cfg, client, pending_translations, rel)
                 if summary:
                     conversation_summary = summary
-                # 重建对话
+                # 重建对话，生成新 context_id
                 conversation = [{"role": "system", "content": sysp}]
                 history_count = 0
                 pending_translations = []
+                context_seq += 1
+                context_id = f"ctx_{_epoch_ms()}_{page_key}_{context_seq}"
 
         translation = "".join(translated_chunks)
         confidence = min(confidences) if confidences else None

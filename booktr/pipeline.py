@@ -344,6 +344,14 @@ def cmd_translate(cfg: Config, args) -> None:
             print(f"  ✓ {rel} 完成（{r.get('segments_total', 0)} 段）")
         state.save()
 
+        # 自动导出对话日志
+        auto_export = cfg.get("llm_logs", "auto_export", default=True)
+        if auto_export:
+            n = cfg.get("llm_logs", "auto_export_sessions", default=1)
+            out = export_page_log(cfg, rel, max_sessions=n)
+            if out:
+                print(f"  📄 对话日志: {out}")
+
     review_mod.save_queue(cfg, review_items)
     remaining = sum(1 for rel in order
                     if state.page(rel).get("status") == tr.STATUS["pending"])
@@ -634,169 +642,234 @@ def cmd_clean(cfg: Config, args) -> None:
     print(f"\n完成，共清理 {len(selected)} 项。")
 
 
-def cmd_export_log(cfg: Config, args) -> None:
-    """导出指定页面的完整 LLM 对话日志为人类可读的 Markdown。"""
+def _find_page_logs(cfg: Config, page: str) -> list[dict]:
+    """查找指定页面的所有 LLM 日志。"""
     import glob as _glob
     import re as _re
 
-    page = args.page
     log_dir = cfg.get("llm_logs", "dir", default="work/llm_logs")
     if not os.path.isdir(log_dir):
-        print(f"日志目录不存在: {log_dir}")
-        return
+        return []
 
-    # 查找该页所有日志
     all_logs = []
     page_key = page.replace("/", "_").replace("\\", "_").replace(".html", "")
     for f in sorted(_glob.glob(os.path.join(log_dir, "*.json"))):
         d = util.read_json(f, {})
         tag = d.get("tag", "")
-        # 移除前缀，提取页面标识
         base = tag
         for prefix in ("translate_", "repair_", "summarize_conv_", "summarize_"):
             if base.startswith(prefix):
                 base = base[len(prefix):]
                 break
-        # 移除 _segX 后缀
         base = _re.sub(r"_seg\d+$", "", base)
         base_key = base.replace(".html", "")
         if base_key == page_key or base == page:
             all_logs.append(d)
+    return all_logs
 
-    if not all_logs:
-        print(f"未找到 {page} 的日志")
-        return
+
+def _group_logs_by_task(logs: list[dict]) -> list[list[dict]]:
+    """按 task_id 分组日志为翻译任务。无 task_id 的旧日志按消息数分组。"""
+    import re as _re
 
     # 按时间排序
-    all_logs.sort(key=lambda x: x.get("ts", ""))
+    logs.sort(key=lambda x: x.get("ts", ""))
 
-    # 按消息数分组会话
-    sessions = []
-    current_session = []
-    prev_msg_count = 0
+    # 检查是否有 task_id（新日志）
+    has_task_id = any(log.get("task_id") for log in logs)
 
-    for log in all_logs:
-        user_field = log.get("user", "")
-        m = _re.match(r"\[(\d+) msgs\]", user_field)
-        msg_count = int(m.group(1)) if m else 0
-
-        # 消息数减少或从 0 开始 = 新会话
-        if msg_count > 0 and msg_count <= prev_msg_count:
-            if current_session:
-                sessions.append(current_session)
-            current_session = []
-
-        current_session.append(log)
-        if msg_count > 0:
-            prev_msg_count = msg_count
-
-    if current_session:
-        sessions.append(current_session)
-
-    # 输出 Markdown
-    lines = [
-        f"# LLM 对话日志：{page}",
-        f"共 {len(sessions)} 次翻译会话，{len(all_logs)} 条调用记录",
-        "",
-    ]
-
-    for sess_idx, session in enumerate(sessions, 1):
-        ts_start = session[0].get("ts", "")[:19]
-        ts_end = session[-1].get("ts", "")[:19]
-        lines.append(f"---")
-        lines.append(f"## 会话 #{sess_idx}（{ts_start} ~ {ts_end}）")
-        lines.append("")
-
-        prev_len = 0
-        for call_idx, log in enumerate(session, 1):
-            tag = log.get("tag", "")
-            ts = log.get("ts", "")[:19]
-            ok = log.get("ok", True)
-            error = log.get("error", "")
-            usage = log.get("usage", {})
-            tokens = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
-
-            # 解析调用类型
-            if "repair" in tag:
-                call_type = "repair"
-            elif "summarize_conv" in tag:
-                call_type = "摘要接力"
-            elif "summarize" in tag:
-                call_type = "摘要"
-            elif "translate" in tag:
-                call_type = "翻译"
-            else:
-                call_type = "其他"
-
+    if has_task_id:
+        # 按 task_id 分组
+        task_groups: dict[str, list[dict]] = {}
+        for log in logs:
+            tid = log.get("task_id", f"old_{log.get('ts', '')}")
+            task_groups.setdefault(tid, []).append(log)
+        return list(task_groups.values())
+    else:
+        # 旧日志：按消息数分组
+        sessions = []
+        current_session = []
+        prev_msg_count = 0
+        for log in logs:
             user_field = log.get("user", "")
             m = _re.match(r"\[(\d+) msgs\]", user_field)
             msg_count = int(m.group(1)) if m else 0
-            msg_str = f"[{msg_count} msgs]" if msg_count else ""
+            if msg_count > 0 and msg_count <= prev_msg_count:
+                if current_session:
+                    sessions.append(current_session)
+                current_session = []
+            current_session.append(log)
+            if msg_count > 0:
+                prev_msg_count = msg_count
+        if current_session:
+            sessions.append(current_session)
+        return sessions
 
-            lines.append(f"### 调用 #{call_idx} | {call_type} | {msg_str} | {ts}")
-            if not ok:
-                lines.append(f"**失败**: {error}")
-            if tokens:
-                lines.append(f"tokens: {tokens}")
-            lines.append("")
 
-            # 从 messages 字段提取新增消息（兼容旧日志无 messages 字段）
-            messages = log.get("messages", [])
-            response = log.get("response", "")
+def _group_logs_by_context(task_logs: list[dict]) -> list[list[dict]]:
+    """将一个任务的日志按 context_id 分组为多轮对话。"""
+    import re as _re
 
-            if messages:
-                new_msgs = messages[prev_len:]
-                for msg in new_msgs:
-                    role = msg.get("role", "")
-                    content = msg.get("content", "")
-                    if role == "system" and prev_len > 0 and call_type != "摘要接力":
-                        lines.append(f"### system（同上）")
-                    else:
-                        lines.append(f"### {role}")
-                        lines.append(content)
-                    lines.append("")
-                prev_len = len(messages)
+    ctx_groups: dict[str, list[dict]] = {}
+    for log in task_logs:
+        cid = log.get("context_id", "")
+        if not cid:
+            # 旧日志或非对话日志：用消息数推断
+            user_field = log.get("user", "")
+            m = _re.match(r"\[(\d+) msgs\]", user_field)
+            msg_count = int(m.group(1)) if m else 0
+            if msg_count <= 2:
+                cid = f"ctx_inferred_{log.get('ts', '')}"
             else:
-                # 旧日志：从 system/user 字段构建
-                system = log.get("system", "")
-                user_raw = log.get("user", "")
-                # 去掉 "[N msgs] " 前缀
-                user_clean = _re.sub(r"^\[\d+ msgs\]\s*", "", user_raw)
-                if call_idx == 1:
-                    if system:
-                        lines.append("### system")
-                        lines.append(system)
-                        lines.append("")
-                    lines.append("### user")
-                    lines.append(user_clean)
-                    lines.append("")
+                # 继续上一个 context
+                if ctx_groups:
+                    cid = list(ctx_groups.keys())[-1]
                 else:
-                    lines.append("### user")
-                    lines.append(user_clean)
-                    lines.append("")
+                    cid = f"ctx_inferred_{log.get('ts', '')}"
+        ctx_groups.setdefault(cid, []).append(log)
+    return list(ctx_groups.values())
 
-            # 输出 assistant 响应
-            if response:
-                lines.append(f"### assistant")
-                # 尝试 prettify JSON
-                try:
-                    parsed = json.loads(response) if response.startswith("{") else None
-                    if parsed:
-                        lines.append("```json")
-                        lines.append(json.dumps(parsed, ensure_ascii=False, indent=2))
-                        lines.append("```")
-                    else:
-                        lines.append(response)
-                except (json.JSONDecodeError, ValueError):
-                    lines.append(response)
-                lines.append("")
 
-            lines.append("---")
+def _format_call_markdown(call_idx: int, log: dict, prev_msg_len: int) -> tuple[list[str], int]:
+    """格式化单次调用为 Markdown 行，返回 (lines, new_msg_len)。"""
+    import re as _re
+
+    tag = log.get("tag", "")
+    ts = log.get("ts", "")[:19]
+    ok = log.get("ok", True)
+    error = log.get("error", "")
+    usage = log.get("usage", {})
+    tokens = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+
+    if "repair" in tag:
+        call_type = "repair"
+    elif "summarize_conv" in tag:
+        call_type = "摘要接力"
+    elif "summarize" in tag:
+        call_type = "摘要"
+    elif "translate" in tag:
+        call_type = "翻译"
+    else:
+        call_type = "其他"
+
+    user_field = log.get("user", "")
+    m = _re.match(r"\[(\d+) msgs\]", user_field)
+    msg_count = int(m.group(1)) if m else 0
+    msg_str = f"[{msg_count} msgs]" if msg_count else ""
+
+    lines = [
+        f"### 调用 #{call_idx} | {call_type} | {msg_str} | {ts}",
+    ]
+    if not ok:
+        lines.append(f"**失败**: {error}")
+    if tokens:
+        lines.append(f"tokens: {tokens}")
+    lines.append("")
+
+    messages = log.get("messages", [])
+    response = log.get("response", "")
+    new_msg_len = prev_msg_len
+
+    if messages:
+        new_msgs = messages[prev_msg_len:]
+        for msg in new_msgs:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "system" and prev_msg_len > 0 and call_type != "摘要接力":
+                lines.append(f"### system（同上）")
+            else:
+                lines.append(f"### {role}")
+                lines.append(content)
             lines.append("")
+        new_msg_len = len(messages)
+    else:
+        system = log.get("system", "")
+        user_raw = log.get("user", "")
+        user_clean = _re.sub(r"^\[\d+ msgs\]\s*", "", user_raw)
+        if call_idx == 1:
+            if system:
+                lines.append("### system")
+                lines.append(system)
+                lines.append("")
+            lines.append("### user")
+            lines.append(user_clean)
+            lines.append("")
+        else:
+            lines.append("### user")
+            lines.append(user_clean)
+            lines.append("")
+
+    if response:
+        lines.append(f"### assistant")
+        try:
+            parsed = json.loads(response) if response.startswith("{") else None
+            if parsed:
+                lines.append("```json")
+                lines.append(json.dumps(parsed, ensure_ascii=False, indent=2))
+                lines.append("```")
+            else:
+                lines.append(response)
+        except (json.JSONDecodeError, ValueError):
+            lines.append(response)
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    return lines, new_msg_len
+
+
+def export_page_log(cfg: Config, page: str, max_sessions: int | None = None,
+                    output_path: str | None = None) -> str | None:
+    """导出指定页面的 LLM 对话日志为 Markdown。
+
+    Args:
+        page: 页面路径
+        max_sessions: 最多导出最近 N 个翻译任务（None=全部）
+        output_path: 输出路径（None=自动）
+
+    Returns:
+        输出文件路径，无日志时返回 None
+    """
+    all_logs = _find_page_logs(cfg, page)
+    if not all_logs:
+        return None
+
+    task_groups = _group_logs_by_task(all_logs)
+
+    # 取最近 N 个任务
+    if max_sessions and len(task_groups) > max_sessions:
+        task_groups = task_groups[-max_sessions:]
+
+    lines = [
+        f"# LLM 对话日志：{page}",
+        f"共 {len(task_groups)} 次翻译任务，{len(all_logs)} 条调用记录",
+        "",
+    ]
+
+    for task_idx, task_logs in enumerate(task_groups, 1):
+        task_id = task_logs[0].get("task_id", "")
+        ts_start = task_logs[0].get("ts", "")[:19]
+        ts_end = task_logs[-1].get("ts", "")[:19]
+        ctx_groups = _group_logs_by_context(task_logs)
+
+        lines.append(f"---")
+        lines.append(f"## 任务 #{task_idx}（{task_id}）")
+        lines.append(f"{ts_start} ~ {ts_end} | {len(ctx_groups)} 轮对话")
+        lines.append("")
+
+        for ctx_idx, ctx_logs in enumerate(ctx_groups, 1):
+            ctx_id = ctx_logs[0].get("context_id", "")
+            lines.append(f"### 对话 #{ctx_idx}（{ctx_id}）")
+            lines.append("")
+
+            prev_msg_len = 0
+            for call_idx, log in enumerate(ctx_logs, 1):
+                call_lines, prev_msg_len = _format_call_markdown(call_idx, log, prev_msg_len)
+                lines.extend(call_lines)
 
     # 写入文件
-    if args.output:
-        out_path = args.output
+    if output_path:
+        out_path = output_path
     else:
         logs_dir = os.path.join(cfg.work_dir, "logs")
         os.makedirs(logs_dir, exist_ok=True)
@@ -805,8 +878,17 @@ def cmd_export_log(cfg: Config, args) -> None:
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    print(f"对话日志已导出: {out_path}")
-    print(f"  {len(sessions)} 次会话，{len(all_logs)} 条调用")
+    return out_path
+
+
+def cmd_export_log(cfg: Config, args) -> None:
+    """导出指定页面的完整 LLM 对话日志为人类可读的 Markdown。"""
+    out_path = export_page_log(cfg, args.page, max_sessions=args.sessions,
+                               output_path=args.output)
+    if out_path:
+        print(f"对话日志已导出: {out_path}")
+    else:
+        print(f"未找到 {args.page} 的日志")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -913,6 +995,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = mk("export-log", help="导出指定页面的完整 LLM 对话日志为 Markdown")
     sp.add_argument("page", help="页面路径，如 today/today6.html")
     sp.add_argument("-o", "--output", default=None, help="输出文件路径（默认 work/logs/<page>.md）")
+    sp.add_argument("-s", "--sessions", type=int, default=None,
+                    help="最多导出最近 N 个翻译任务（默认全部）")
     sp.set_defaults(func=cmd_export_log)
 
     return p
