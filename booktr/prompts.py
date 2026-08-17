@@ -6,20 +6,43 @@ from __future__ import annotations
 
 from . import util
 
-SRC_LANG_NAME = {"ja": "日语（日本原文）", "en": "英语", "zh": "中文"}
-
-RETRANSLATE_RULES = (
-    "## 重新翻译任务（当收到"重新翻译"指令时适用）\n"
-    "- 这是重新翻译任务，之前的翻译存在问题（可能未翻译或翻译不准确）\n"
-    "- 完整翻译为简体中文，不要保留任何原文\n"
-    "- 保持与前文/后文的术语和风格一致\n"
-    "- 保留所有 [[Px]] 占位符\n"
-    "- 保留全角写法（全角字母/数字/符号）、人名原形等规则仍然适用"
-)
+LANG_NAMES = {
+    "ja": "日语",
+    "en": "英语",
+    "zh": "中文",
+    "zh-Hans": "简体中文",
+    "zh-Hant": "繁体中文",
+    "ko": "韩语",
+    "fr": "法语",
+    "de": "德语",
+    "es": "西班牙语",
+    "pt": "葡萄牙语",
+    "ru": "俄语",
+    "it": "意大利语",
+    "ar": "阿拉伯语",
+    "th": "泰语",
+    "vi": "越南语",
+}
 
 
 def lang_name(code: str) -> str:
-    return SRC_LANG_NAME.get(code, code)
+    """语言代码转人类可读名称。支持 zh-Hans 等复合代码。"""
+    if code in LANG_NAMES:
+        return LANG_NAMES[code]
+    main = code.split("-")[0]
+    return LANG_NAMES.get(main, code)
+
+
+def _build_retranslate_rules(src_name: str, tgt_name: str) -> str:
+    """构建重新翻译规则（使用配置的源/目标语言名称）。"""
+    return (
+        "## 重新翻译任务（当收到\u201c重新翻译\u201d指令时适用）\n"
+        "- 这是重新翻译任务，之前的翻译存在问题（可能未翻译或翻译不准确）\n"
+        f"- 完整翻译为{tgt_name}，不要保留任何原文\n"
+        "- 保持与前文/后文的术语和风格一致\n"
+        "- 保留所有 [[Px]] 占位符\n"
+        "- 保留全角写法（全角字母/数字/符号）、人名原形等规则仍然适用"
+    )
 
 
 def build_translate_system(
@@ -32,8 +55,10 @@ def build_translate_system(
 ) -> str:
     tgt = cfg.get("lang", "target", default="zh-Hans")
     src = cfg.get("lang", "source", default="ja")
+    src_name = lang_name(src)
+    tgt_name = lang_name(tgt)
     parts = [
-        f"你是一名资深译者，负责把{lang_name(src)}网站内容翻译成{lang_name(tgt)}。",
+        f"你是一名资深译者，负责把{src_name}网站内容翻译成{tgt_name}。",
         "翻译要求：",
         "- 忠实传达原意，保持原文的语气、人称与个人色彩",
         "- 目标语言需自然流畅，不要逐字硬译",
@@ -41,7 +66,7 @@ def build_translate_system(
         "- 保留原文中的全角写法：全角英文字母（Ａ-Ｚ, ａ-ｚ）、全角数字（０-９）、"
         "全角符号（！？～・＆＊＝＋＜＞等）保持全角不转半角，与 CJK 字符混排时全角形式融合更好；"
         "几何符号（●○■）、省略号（…）、破折号（――）、智能引号（\u201c\u201d\u2018\u2019）保持原样；"
-        "英文/拉丁字母不翻译；人名保留原形；其余日文内容翻译为简体中文",
+        f"英文/拉丁字母不翻译；人名保留原形；其余{src_name}内容翻译为{tgt_name}",
         "- 译文中必须保留原文的所有 [[Px]] 占位符（如 [[P0]]、[[P1]]），"
         "它们是 HTML 标签的替代标记，翻译后需原样还原",
     ]
@@ -77,7 +102,7 @@ def build_translate_system(
         '"notes": ["需要记录的重要/存疑信息"], "needs_human": true/false}'
     )
     if is_retranslation:
-        parts.append(RETRANSLATE_RULES)
+        parts.append(_build_retranslate_rules(src_name, tgt_name))
     return "\n\n".join(parts)
 
 
@@ -192,8 +217,9 @@ def _srcname(cfg) -> str:
 
 
 def build_glossary_extract_system(cfg) -> str:
+    src_name = lang_name(cfg.get("lang", "source", default="ja"))
     return (
-        "你是术语抽取助手。从给定的日文文本中识别专有名词与值得进入词汇表的术语。\n"
+        f"你是术语抽取助手。从给定的{src_name}文本中识别专有名词与值得进入词汇表的术语。\n"
         "专名包括：人名、团体名、歌曲/专辑名、节目名、地名、作品名、特有的固定译法等。\n"
         "输出 JSON：{\"terms\": [{\"src\": \"原文\", \"dst\": \"建议译文\", "
         "\"category\": \"person|song|album|show|place|term|other\", "
