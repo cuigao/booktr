@@ -259,14 +259,14 @@ def _translate_chunk_with_repair(
             # 自愈：把具体错误与上次输出片段提供给 LLM，要求重新输出
             repair_hint = (
                 f"\n\n上次输出无法解析为合法 JSON。错误：{e}\n"
-                f"上次输出开头：{resp[:300]}\n"
+                f"上次输出开头：{(resp or '')[:300]}\n"
                 "请重新输出严格合法的 JSON（不要任何多余文字、前后缀或换行包裹）。"
             )
             resp = client.chat(sysp, usr + repair_hint,
                                temperature=cfg.get("llm", "temperature", default=0.3),
                                tag=f"repair_{rel.replace('/','_')}_seg{sid}")
     # 兜底：修复耗尽，清理后作为译文，标记不可信
-    cleaned = _cleanup_fallback(resp)
+    cleaned = _cleanup_fallback(resp or "")
     notes_mod.add(cfg, rel, int(sid), chk[:500],
                   f"JSON 解析失败 {max_repair} 次后兜底清理", kind="存疑", created_by="llm")
     return {"translation": cleaned, "confidence": 0.1, "needs_human": True,
@@ -306,14 +306,14 @@ def _translate_chunk_with_repair_multi(
     for attempt in range(max_repair + 1):
         try:
             data = llm_mod.parse_json_response(resp)
-            messages.append({"role": "assistant", "content": resp})
+            messages.append({"role": "assistant", "content": resp or ""})
             return {**data, "untrusted": False}
         except llm_mod.LLMError as e:
             if attempt >= max_repair:
                 break
             repair_hint = (
                 f"\n\n上次输出无法解析为合法 JSON。错误：{e}\n"
-                f"上次输出开头：{resp[:300]}\n"
+                f"上次输出开头：{(resp or '')[:300]}\n"
                 "请重新输出严格合法的 JSON（不要任何多余文字、前后缀或换行包裹）。"
             )
             messages.append({"role": "user", "content": repair_hint})
@@ -321,8 +321,8 @@ def _translate_chunk_with_repair_multi(
                                      tag=f"repair_{rel.replace('/','_')}_seg{sid}")
 
     # 兜底
-    cleaned = _cleanup_fallback(resp)
-    messages.append({"role": "assistant", "content": resp})
+    cleaned = _cleanup_fallback(resp or "")
+    messages.append({"role": "assistant", "content": resp or ""})
     notes_mod.add(cfg, rel, int(sid), chk[:500],
                   f"JSON 解析失败 {max_repair} 次后兜底清理", kind="存疑", created_by="llm")
     return {"translation": cleaned, "confidence": 0.1, "needs_human": True,
