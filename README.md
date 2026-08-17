@@ -114,6 +114,10 @@ python booktr-cli.py export-log today/today6.html
 python booktr-cli.py export-log today/today6.html --sessions 1  # 只导出最近1次翻译任务
 python booktr-cli.py export-log today/today6.html --task tsk_1755432600000  # 指定 task_id
 
+# 15) 重新生成指定页面的 out 文件（从段索引离线重组）
+python booktr-cli.py regenerate profile/profile.html
+python booktr-cli.py regenerate --all  # 重新生成所有已处理页
+
 # 查看进度
 python booktr-cli.py status
 ```
@@ -138,17 +142,28 @@ python booktr-cli.py status
   - `llm.summary_enabled`：摘要接力开关（默认 true）
   - `llm_logs.auto_export`：translate 完成后自动导出对话日志（默认 true）
   - `llm_logs.auto_export_sessions`：自动导出最近 N 个翻译任务（默认 1）
+  - `review.auto_regenerate`：review 接受后自动重生成 out 页面（默认 true）
+  - `llm.retranslate_context_chars`：重新翻译时前后文字符数（默认 1000）
+  - `llm.retranslate_use_summary`：重新翻译时使用页面摘要（默认 true）
   - `style.refs_path`：风格样例文件（用户自备，接口就绪）
 
 ## 核心机制
 
 - **逐段拼接**：在原始解码文本上定位每个可翻译文字段的字符偏移，翻译后原位拼回。除被替换的文字外，标签、注释、`tppabs` 属性、空白等字节完全不变，保证"完全相同样式"。段索引（`work/segments/*.json`）记录 `页面/段ID/源偏移/译文/引文`，为译者注与未来的浏览器插件提供锚点。
 - **编码**：逐文件探测（Shift-JIS 优先，失败回退 UTF-8）；输出统一 UTF-8 并在 `<head>` 补/改 `<meta charset>`（中文无法在 Shift-JIS 编码，这是唯一必要改动）。
-- **占位符**：段内内联标签（`<img>/<font>/<a>…`）转为 `[[P0]]` 占位符交给 LLM，译文必须原样保留，拼接时还原。相邻 inline 标签合并为单个占位符，减少 LLM 困惑。短语记忆命中后从原始 chunk 恢复占位符。
+- **全角字符保留**：保留原文中的全角写法——全角英文字母、全角数字（０-９）、
+  全角符号（！？～・＆＊＝＋＜＞等）保持全角不转半角；几何符号（●○■）、
+  省略号（…）、破折号（――）、智能引号（""''）保持原样。
+- **占位符**：段内内联标签（`<img>/<font>/<a>…`）转为 `[[P0]]` 占位符交给 LLM，译文必须原样保留，拼接时还原。相邻 inline 标签（含纯空白分隔）合并为单个占位符，减少 LLM 困惑。短语记忆命中后从原始 chunk 恢复占位符。
 - **解析自愈**：LLM 输出非法 JSON 时自动重试（最多 `max_repair` 次），每次携带具体错误信息让 LLM 修正；占位符丢失时触发额外 repair；兜底清理去除 `|TEXT|`/JSON 残渣。
 - **多轮对话翻译**：页面内所有段落共享同一对话上下文，LLM 能保持术语与风格一致性。
   - **摘要接力**：达到 `max_history_segments`（默认 50）后自动生成摘要，重建对话继续翻译。
   - **短语记忆注入**：被短语记忆跳过的翻译结果注入到下一条 user message，保持 LLM 上下文。
+- **重新翻译**：删除 review 条目后，该段落标记为 pending，下次 translate 时自动重新翻译。
+  - **上下文窗口**：重新翻译时提供前文/后文已翻译内容（各 500 字符），让 LLM 看到完整的"上-中-下"结构。
+  - **页面摘要**：注入页面摘要，提供整体上下文。
+  - **全新对话**：重新翻译时创建新对话，不受之前翻译历史影响。
+  - **系统提示词强化**：注入"重新翻译任务"规则，强调完整翻译、术语一致、占位符保留。
 - **LLM 异常防护**：所有 LLM 返回路径均有防护——None 内容检查、API 格式异常捕获、confidence null 防护、`parse_json_response` 空响应处理。
 - **翻译顺序（统一加权模型）**：每页计算一组归一化指标分（`semantic` 层级语义序 / `has_semantic` / `is_index` / `is_orphan` / `hotness` 引用热度 / `depth` / `chrono` 日期 / `volume` 编号 / `nav` 导航位次 / `dfs` 遍历序 / `len` 原文长度），按**加权总分降序**排列。
   - **层级语义序**：递归发现各级索引页（root 的 `index.html`、`today0.html`、`photo0.html`、`rec_idx.html` 等，判定 = 链接覆盖本级成员比例 ≥ `index_threshold`），页面语义分 = 目录链上各级位置的级联，跨目录自然分层、组内按索引链接序连续。
@@ -163,9 +178,9 @@ python booktr-cli.py status
 
 | 工具 | 说明 | 配置 |
 |---|---|---|
-| 词汇表 | 人工预置 + `extract-terms` LLM 自动抽取候选（需确认） | `glossary.path` |
+| 词汇表 | 人工预置 + `extract-terms` LLM 自动抽取候选（需确认）；confirmed 条目默认 `read_only=true`，机械替换时跳过 LLM | `glossary.path` |
 | 翻译记忆 TM | 双语片段缓存，跨页复用 | `tm.enabled` |
-| 短语记忆 | 导航短语精确匹配复用（如 RETURN→返回） | `phrases.max_len` |
+| 短语记忆 | 导航短语精确匹配复用；自动学习，写入前检查 glossary read_only 防覆盖 | `phrases.max_len` |
 | 风格指南 | `style-extract` 从对照样例提炼规则注入 | `style.rules_enabled` |
 | 风格锚定 | 字符 n-gram 相似度检索 top-k 样例 few-shot 注入 | `style.exemplar_enabled` |
 | 上下文包 | 前 N 篇日记摘要 | `planner.context_window` |
