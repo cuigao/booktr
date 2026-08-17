@@ -455,7 +455,7 @@ def translate_page(
                                   f"占位符丢失: {', '.join(still_missing)}", kind="存疑", created_by="llm")
 
             translated_chunks.append(t)
-            confidences.append(float(data.get("confidence", 0.7)))
+            confidences.append(float(data.get("confidence") or 0.7))
             pending_translations.append(t)
             history_count += 1
             _ev("chunk_done", {"sid": sid, "chunk_idx": len(translated_chunks),

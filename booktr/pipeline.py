@@ -255,8 +255,9 @@ def _make_progress_callback(verbose: bool = True):
         elif event == "chunk_done":
             conf = data["confidence"]
             flag = " ⚠" if data["needs_human"] else ""
+            conf_str = f"{conf:.2f}" if conf is not None else "?"
             print(f"    chunk {data['chunk_idx']}/{data['chunks_total']} "
-                  f"[conf={conf:.2f}]{flag}")
+                  f"[conf={conf_str}]{flag}")
         elif event == "segment_done":
             flag = " ⚠需审核" if data["needs_human"] else ""
             conf_str = f"[conf={data['confidence']:.2f}]" if data["confidence"] is not None else ""

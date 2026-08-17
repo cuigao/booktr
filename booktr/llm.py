@@ -132,7 +132,12 @@ class LLMClient:
                 r = requests.post(url, headers=headers, json=body, timeout=self.timeout)
                 if r.status_code == 200:
                     data = r.json()
-                    content = data["choices"][0]["message"]["content"]
+                    try:
+                        content = data["choices"][0]["message"]["content"]
+                    except (KeyError, IndexError, TypeError) as e:
+                        raise LLMError(f"API 响应格式异常: {e}")
+                    if content is None:
+                        raise LLMError("LLM 返回空内容")
                     usage = self._record(data)
                     return content, usage
                 last_err = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
@@ -168,7 +173,12 @@ class LLMClient:
                 r = requests.post(url, headers=headers, json=body, timeout=self.timeout)
                 if r.status_code == 200:
                     data = r.json()
-                    content = data["choices"][0]["message"]["content"]
+                    try:
+                        content = data["choices"][0]["message"]["content"]
+                    except (KeyError, IndexError, TypeError) as e:
+                        raise LLMError(f"API 响应格式异常: {e}")
+                    if content is None:
+                        raise LLMError("LLM 返回空内容")
                     usage = self._record(data)
                     return content, usage
                 last_err = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
