@@ -774,6 +774,8 @@ def _format_call_markdown(call_idx: int, log: dict, prev_msg_len: int) -> tuple[
         new_msgs = messages[prev_msg_len:]
         for msg in new_msgs:
             role = msg.get("role", "")
+            if role == "assistant":
+                continue  # assistant 由 response 字段单独输出
             content = msg.get("content", "")
             if role == "system" and prev_msg_len > 0 and call_type != "摘要接力":
                 lines.append(f"### system（同上）")
