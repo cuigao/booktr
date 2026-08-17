@@ -254,8 +254,9 @@ class LLMClient:
         }
         # 尝试解析响应中的 JSON（若为结构化输出）
         try:
-            parsed = parse_json_response(response)
-            entry["parsed"] = parsed
+            if response:
+                parsed = parse_json_response(response)
+                entry["parsed"] = parsed
         except (LLMError, json.JSONDecodeError):
             pass
         with open(path, "w", encoding="utf-8") as f:
