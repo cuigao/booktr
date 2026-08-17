@@ -299,6 +299,8 @@ def parse_json_response(text: str) -> dict:
     用平衡花括号匹配提取完整 JSON 对象，避免抓到半截/嵌套错块。
     解析失败抛 LLMError（调用方据此自愈重试）。
     """
+    if text is None:
+        raise LLMError("LLM 响应为空")
     text = text.strip()
     m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     if m:
