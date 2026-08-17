@@ -7,10 +7,10 @@ from __future__ import annotations
 from . import util
 
 LANG_NAMES = {
-    "ja": "日语",
-    "en": "英语",
     "zh-Hans": "简体中文",
     "zh-Hant": "繁体中文",
+    "en": "英语",
+    "ja": "日语",
     "ko": "韩语",
     "fr": "法语",
     "de": "德语",
