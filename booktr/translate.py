@@ -202,6 +202,42 @@ def _check_placeholders(src_text: str, translation: str) -> list[str]:
     return sorted(src_ph - dst_ph)
 
 
+def _restore_placeholders_from_src(src_text: str, plain_translation: str) -> str:
+    """根据原始文本的占位符结构，将占位符恢复到纯文本译文中。
+
+    策略：按原始文本中占位符的相对位置（开头/结尾），在译文对应位置插入。
+    """
+    parts = re.split(r'(\[\[P\d+\]\])', src_text)
+    if len(parts) <= 1:
+        return plain_translation
+
+    # 分离占位符和文本
+    placeholders = [p for p in parts if re.match(r'\[\[P\d+\]\]', p)]
+    if not placeholders:
+        return plain_translation
+
+    # 找到第一个非空文本的位置，区分 leading/trailing 占位符
+    leading = []
+    trailing = []
+    found_text = False
+    for p in parts:
+        if re.match(r'\[\[P\d+\]\]', p):
+            if not found_text:
+                leading.append(p)
+            else:
+                trailing.append(p)
+        elif p.strip():
+            found_text = True
+
+    # 在译文首尾插入占位符
+    result = plain_translation
+    for p in leading:
+        result = p + result
+    for p in trailing:
+        result = result + p
+    return result
+
+
 def _translate_chunk_with_repair(
     cfg: Config, client, sysp: str, usr: str, rel: str, sid: str, chk: str,
 ) -> dict:
@@ -360,9 +396,10 @@ def translate_page(
             chk_plain = re.sub(r"\[\[P\d+\]\]", "", chk).strip()
             ph_hit = phrases_mod.lookup(cfg, chk_plain)
             if ph_hit:
-                translated_chunks.append(ph_hit)
+                restored = _restore_placeholders_from_src(chk, ph_hit)
+                translated_chunks.append(restored)
                 confidences.append(1.0)
-                pending_translations.append(ph_hit)
+                pending_translations.append(restored)
                 continue
 
             # 构建用户消息
@@ -437,9 +474,12 @@ def translate_page(
             if tm_on and t and t != chk:
                 tm_mod.add(cfg, chk, t, rel, seg.id)
             if not data.get("untrusted") and t and chk_plain:
-                t_plain = re.sub(r"\[\[P\d+\]\]", "", t).strip()
-                if t_plain and "|TEXT|" not in t_plain and "|DST|" not in t_plain:
-                    phrases_mod.add(cfg, chk_plain, t_plain)
+                # 原始 chunk 含占位符时不记录短语记忆（防止存储不完整译文）
+                has_ph = bool(re.search(r'\[\[P\d+\]\]', chk))
+                if not has_ph:
+                    t_plain = re.sub(r"\[\[P\d+\]\]", "", t).strip()
+                    if t_plain and "|TEXT|" not in t_plain and "|DST|" not in t_plain:
+                        phrases_mod.add(cfg, chk_plain, t_plain)
 
             # 摘要接力：达到轮次上限时触发
             if summary_on and history_count >= max_history:
