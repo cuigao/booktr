@@ -868,13 +868,15 @@ def _format_call_markdown(call_idx: int, log: dict, prev_msg_len: int) -> tuple[
 
 
 def export_page_log(cfg: Config, page: str, max_sessions: int | None = None,
-                    output_path: str | None = None) -> str | None:
+                    output_path: str | None = None,
+                    task_id: str | None = None) -> str | None:
     """导出指定页面的 LLM 对话日志为 Markdown。
 
     Args:
         page: 页面路径
         max_sessions: 最多导出最近 N 个翻译任务（None=全部）
         output_path: 输出路径（None=自动）
+        task_id: 指定 task_id 导出（支持前缀匹配，None=全部）
 
     Returns:
         输出文件路径，无日志时返回 None
@@ -882,6 +884,10 @@ def export_page_log(cfg: Config, page: str, max_sessions: int | None = None,
     all_logs = _find_page_logs(cfg, page)
     if not all_logs:
         return None
+
+    # 按 task_id 过滤
+    if task_id:
+        all_logs = [l for l in all_logs if l.get("task_id", "").startswith(task_id)]
 
     task_groups = _group_logs_by_task(all_logs)
 
@@ -933,7 +939,8 @@ def export_page_log(cfg: Config, page: str, max_sessions: int | None = None,
 def cmd_export_log(cfg: Config, args) -> None:
     """导出指定页面的完整 LLM 对话日志为人类可读的 Markdown。"""
     out_path = export_page_log(cfg, args.page, max_sessions=args.sessions,
-                               output_path=args.output)
+                               output_path=args.output,
+                               task_id=args.task)
     if out_path:
         print(f"对话日志已导出: {out_path}")
     else:
@@ -1046,6 +1053,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-o", "--output", default=None, help="输出文件路径（默认 work/logs/<page>.md）")
     sp.add_argument("-s", "--sessions", type=int, default=None,
                     help="最多导出最近 N 个翻译任务（默认全部）")
+    sp.add_argument("-t", "--task", default=None,
+                    help="指定 task_id 导出（支持前缀匹配）")
     sp.set_defaults(func=cmd_export_log)
 
     return p
