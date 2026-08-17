@@ -84,7 +84,7 @@ def build_translate_user(
             "## 风格参照样例（仅模仿其风格与措辞倾向，勿照抄内容）\n"
             + "\n\n".join(ex_lines)
         )
-    parts.append("## 待翻译文本\n\n" + src_text)
+    parts.append("### 待翻译文本\n\n" + src_text)
     return "\n\n".join(parts)
 
 
@@ -115,13 +115,13 @@ def build_translate_user_first(
             "## 风格参照样例（仅模仿其风格与措辞倾向，勿照抄内容）\n"
             + "\n\n".join(ex_lines)
         )
-    parts.append("## 待翻译文本\n\n" + src_text)
+    parts.append("### 待翻译文本\n\n" + src_text)
     return "\n\n".join(parts)
 
 
 def build_translate_user_subsequent(cfg, src_text: str) -> str:
     """多轮对话后续消息：仅携带待翻译文本。"""
-    return f"## 待翻译文本\n\n{src_text}"
+    return f"### 待翻译文本\n\n{src_text}"
 
 
 def build_conversation_summary(cfg) -> str:

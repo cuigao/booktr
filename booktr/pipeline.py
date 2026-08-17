@@ -730,16 +730,31 @@ def _group_logs_by_context(task_logs: list[dict]) -> list[list[dict]]:
     return list(ctx_groups.values())
 
 
+def _extract_src_text(log: dict, prev_msg_len: int) -> str:
+    """从 messages 中提取待翻译文本。"""
+    messages = log.get("messages", [])
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            m = _re.search(r'### 待翻译文本\s*\n+(.*)', content, re.S)
+            if m:
+                return m.group(1).strip()
+            m = _re.search(r'## 待翻译文本\s*\n+(.*)', content, re.S)
+            if m:
+                return m.group(1).strip()
+            return content
+    return ""
+
+
 def _format_call_markdown(call_idx: int, log: dict, prev_msg_len: int) -> tuple[list[str], int]:
     """格式化单次调用为 Markdown 行，返回 (lines, new_msg_len)。"""
-    import re as _re
-
     tag = log.get("tag", "")
     ts = log.get("ts", "")[:19]
     ok = log.get("ok", True)
     error = log.get("error", "")
     usage = log.get("usage", {})
     tokens = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+    response = log.get("response", "")
 
     if "repair" in tag:
         call_type = "repair"
@@ -766,58 +781,88 @@ def _format_call_markdown(call_idx: int, log: dict, prev_msg_len: int) -> tuple[
         lines.append(f"tokens: {tokens}")
     lines.append("")
 
-    messages = log.get("messages", [])
-    response = log.get("response", "")
-    new_msg_len = prev_msg_len
-
-    if messages:
-        new_msgs = messages[prev_msg_len:]
-        for msg in new_msgs:
-            role = msg.get("role", "")
-            if role == "assistant":
-                continue  # assistant 由 response 字段单独输出
-            content = msg.get("content", "")
-            if role == "system" and prev_msg_len > 0 and call_type != "摘要接力":
-                lines.append(f"### system（同上）")
-            else:
-                lines.append(f"### {role}")
-                lines.append(content)
-            lines.append("")
-        new_msg_len = len(messages)
-    else:
-        system = log.get("system", "")
-        user_raw = log.get("user", "")
-        user_clean = _re.sub(r"^\[\d+ msgs\]\s*", "", user_raw)
-        if call_idx == 1:
-            if system:
-                lines.append("### system")
-                lines.append(system)
-                lines.append("")
-            lines.append("### user")
-            lines.append(user_clean)
-            lines.append("")
-        else:
-            lines.append("### user")
-            lines.append(user_clean)
-            lines.append("")
-
-    if response:
-        lines.append(f"### assistant")
+    # 判断是否为 Clean 模式
+    is_repair = "repair" in tag
+    is_clean = ok and not is_repair
+    parsed = None
+    if is_clean and response:
         try:
             parsed = json.loads(response) if response.startswith("{") else None
-            if parsed:
-                lines.append("```json")
-                lines.append(json.dumps(parsed, ensure_ascii=False, indent=2))
-                lines.append("```")
-            else:
-                lines.append(response)
+            is_clean = parsed is not None and "translation" in parsed
         except (json.JSONDecodeError, ValueError):
-            lines.append(response)
+            is_clean = False
+
+    if is_clean and parsed:
+        # ═══ Clean 模式：原文/译文 + JSON ═══
+        src_text = _extract_src_text(log, prev_msg_len)
+        translation = parsed.get("translation", "")
+        confidence = parsed.get("confidence")
+        conf_str = f" | conf={confidence:.2f}" if confidence is not None else ""
+
+        lines.append(f"### 原文{conf_str}")
+        lines.append("---")
+        lines.append(src_text)
         lines.append("")
+        lines.append("### 译文")
+        lines.append("---")
+        lines.append(translation)
+        lines.append("")
+        lines.append("```json")
+        lines.append(json.dumps(parsed, ensure_ascii=False, indent=2))
+        lines.append("```")
+    else:
+        # ═══ Raw 模式：原始 prompt/response ═══
+        messages = log.get("messages", [])
+        new_msg_len = prev_msg_len
+
+        if messages:
+            new_msgs = messages[prev_msg_len:]
+            for msg in new_msgs:
+                role = msg.get("role", "")
+                if role == "assistant":
+                    continue
+                content = msg.get("content", "")
+                if role == "system" and prev_msg_len > 0 and call_type != "摘要接力":
+                    lines.append(f"### system（同上）")
+                else:
+                    lines.append(f"### {role}")
+                    lines.append(content)
+                lines.append("")
+            new_msg_len = len(messages)
+        else:
+            system = log.get("system", "")
+            user_raw = log.get("user", "")
+            user_clean = _re.sub(r"^\[\d+ msgs\]\s*", "", user_raw)
+            if call_idx == 1:
+                if system:
+                    lines.append("### system")
+                    lines.append(system)
+                    lines.append("")
+                lines.append("### user")
+                lines.append(user_clean)
+                lines.append("")
+            else:
+                lines.append("### user")
+                lines.append(user_clean)
+                lines.append("")
+
+        if response:
+            lines.append(f"### assistant")
+            try:
+                resp_parsed = json.loads(response) if response.startswith("{") else None
+                if resp_parsed:
+                    lines.append("```json")
+                    lines.append(json.dumps(resp_parsed, ensure_ascii=False, indent=2))
+                    lines.append("```")
+                else:
+                    lines.append(response)
+            except (json.JSONDecodeError, ValueError):
+                lines.append(response)
+            lines.append("")
 
     lines.append("---")
     lines.append("")
-    return lines, new_msg_len
+    return lines, new_msg_len if not is_clean else prev_msg_len
 
 
 def export_page_log(cfg: Config, page: str, max_sessions: int | None = None,
