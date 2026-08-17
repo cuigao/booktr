@@ -482,9 +482,14 @@ def translate_page(
             if tm_on and t and t != chk:
                 tm_mod.add(cfg, chk, t, rel, seg.id)
             if not data.get("untrusted") and t and chk_plain:
-                # 原始 chunk 含占位符时不记录短语记忆（防止存储不完整译文）
-                has_ph = bool(re.search(r'\[\[P\d+\]\]', chk))
-                if not has_ph:
+                # 首尾两端占位符的 chunk 才记录短语记忆
+                ph_positions = [m.start() for m in re.finditer(r'\[\[P\d+\]\]', chk)]
+                is两端占位符 = (
+                    len(ph_positions) == 2
+                    and ph_positions[0] == 0
+                    and ph_positions[1] + len('[[P0]]') >= len(chk) - 1
+                )
+                if is两端占位符 or not ph_positions:
                     t_plain = re.sub(r"\[\[P\d+\]\]", "", t).strip()
                     if t_plain and "|TEXT|" not in t_plain and "|DST|" not in t_plain:
                         phrases_mod.add(cfg, chk_plain, t_plain)
