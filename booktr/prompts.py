@@ -9,7 +9,6 @@ from . import util
 LANG_NAMES = {
     "ja": "日语",
     "en": "英语",
-    "zh": "中文",
     "zh-Hans": "简体中文",
     "zh-Hant": "繁体中文",
     "ko": "韩语",
@@ -18,11 +17,15 @@ LANG_NAMES = {
     "es": "西班牙语",
     "pt": "葡萄牙语",
     "ru": "俄语",
+    "zh": "中文",
     "it": "意大利语",
     "ar": "阿拉伯语",
     "th": "泰语",
     "vi": "越南语",
 }
+
+# 从 LANG_NAMES 自动构建（排除 zh，与 zh-Hans 重复）
+LANG_OPTIONS = [(code, name) for code, name in LANG_NAMES.items() if code != "zh"]
 
 
 def lang_name(code: str) -> str:

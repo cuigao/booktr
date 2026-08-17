@@ -36,6 +36,49 @@ def _prompt(label: str, default: str = "") -> str:
     return val if val else default
 
 
+def _select(label: str, options: list[str], default: str = "") -> str:
+    """交互式选择，显示编号选项。"""
+    print(f"{label}:")
+    for i, opt in enumerate(options, 1):
+        print(f"  [{i}] {opt}")
+    val = input(f"选择 (1-{len(options)}，默认: {default}): ").strip()
+    if not val:
+        return default
+    try:
+        idx = int(val) - 1
+        if 0 <= idx < len(options):
+            return options[idx]
+    except ValueError:
+        pass
+    if val in options:
+        return val
+    print(f"  无效选择，使用默认: {default}")
+    return default
+
+
+def _select_lang(label: str, default: str = "") -> str:
+    """交互式选择语言，支持自定义输入。"""
+    from .prompts import LANG_OPTIONS
+    print(f"{label}:")
+    for i, (code, name) in enumerate(LANG_OPTIONS, 1):
+        print(f"  [{i}] {name} ({code})")
+    print(f"  [{len(LANG_OPTIONS)+1}] 自定义（输入语言代码或全名）")
+    val = input(f"选择 (1-{len(LANG_OPTIONS)+1}，默认: {default}): ").strip()
+    if not val:
+        return default
+    try:
+        idx = int(val) - 1
+        if 0 <= idx < len(LANG_OPTIONS):
+            return LANG_OPTIONS[idx][0]
+        if idx == len(LANG_OPTIONS):
+            custom = input("  输入语言代码或全名: ").strip()
+            return custom if custom else default
+    except ValueError:
+        pass
+    # 直接输入（可能是语言代码或全名）
+    return val
+
+
 def cmd_init(cfg: Config, args) -> None:
     """交互式初始化：从 config.json.template 生成 <data_dir>/config.json。"""
     config_path = os.path.join(cfg.data_dir, "config.json")
@@ -59,18 +102,17 @@ def cmd_init(cfg: Config, args) -> None:
     data["output_dir"] = _prompt("输出镜像目录", str(data.get("output_dir", "out")))
     data["work_dir"] = _prompt("工作目录", str(data.get("work_dir", "work")))
     data.setdefault("lang", {})
-    data["lang"]["source"] = _prompt("源语言代码", str(data.get("lang", {}).get("source", "ja")))
-    data["lang"]["target"] = _prompt("目标语言代码", str(data.get("lang", {}).get("target", "zh-Hans")))
+    data["lang"]["source"] = _select_lang("源语言", str(data.get("lang", {}).get("source", "ja")))
+    data["lang"]["target"] = _select_lang("目标语言", str(data.get("lang", {}).get("target", "zh-Hans")))
 
     llm = data.setdefault("llm", {})
     print("\n-- LLM 配置 --")
     providers = ["mock", "openai-compatible"]
-    provider = _prompt("provider (mock=离线测试 / openai-compatible=真实API)", str(llm.get("provider", "mock")))
-    if provider not in providers:
-        print(f"警告: 未知 provider {provider}，已使用默认 mock")
-        provider = "mock"
-    llm["provider"] = provider
-    if provider == "openai-compatible":
+    llm["provider"] = _select("LLM provider", providers, str(llm.get("provider", "mock")))
+    if llm["provider"] not in providers:
+        print(f"  警告: 未知 provider {llm['provider']}，已使用默认 mock")
+        llm["provider"] = "mock"
+    if llm["provider"] == "openai-compatible":
         llm["base_url"] = _prompt("base_url", str(llm.get("base_url", "https://api.openai.com/v1")))
         llm["model"] = _prompt("model", str(llm.get("model", "gpt-4o-mini")))
         llm["api_key_env"] = _prompt("API key 环境变量名", str(llm.get("api_key_env", "BOOKTR_API_KEY")))
