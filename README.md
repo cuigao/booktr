@@ -21,6 +21,7 @@ src/                       # 项目根（发布单元 / git 仓库根 / 运行�
 │   ├── review.py          # 交互审核队列
 │   ├── qa.py              # 一致性 QA pass
 │   ├── annotator.py       # 译者注生成
+│   ├── phrases.py         # 短语记忆（导航短语精确复用）
 │   ├── pipeline.py        # CLI 编排
 │   └── config.py          # 配置加载与路径解析
 ├── booktr-cli.py          # 启动脚本（等效 python -m booktr）
@@ -103,6 +104,11 @@ python booktr-cli.py annotate
 # 12) 导出镜像与静态资源
 python booktr-cli.py export
 
+# 13) 清理翻译缓存，从全新状态开始（保留 glossary）
+python booktr-cli.py clean --all -y       # 全清（含 output）
+python booktr-cli.py clean --reset -y     # 额外清理 plan.json + site_map.json
+python booktr-cli.py clean                # 交互选择
+
 # 查看进度
 python booktr-cli.py status
 ```
@@ -128,7 +134,8 @@ python booktr-cli.py status
 
 - **逐段拼接**：在原始解码文本上定位每个可翻译文字段的字符偏移，翻译后原位拼回。除被替换的文字外，标签、注释、`tppabs` 属性、空白等字节完全不变，保证"完全相同样式"。段索引（`work/segments/*.json`）记录 `页面/段ID/源偏移/译文/引文`，为译者注与未来的浏览器插件提供锚点。
 - **编码**：逐文件探测（Shift-JIS 优先，失败回退 UTF-8）；输出统一 UTF-8 并在 `<head>` 补/改 `<meta charset>`（中文无法在 Shift-JIS 编码，这是唯一必要改动）。
-- **占位符**：段内内联标签（`<img>/<font>/<a>…`）转为 `[[P0]]` 占位符交给 LLM，译文必须原样保留，拼接时还原。
+- **占位符**：段内内联标签（`<img>/<font>/<a>…`）转为 `[[P0]]` 占位符交给 LLM，译文必须原样保留，拼接时还原。相邻 inline 标签合并为单个占位符，减少 LLM 困惑。
+- **解析自愈**：LLM 输出非法 JSON 时自动重试（最多 `max_repair` 次），每次携带具体错误信息让 LLM 修正；占位符丢失时触发额外 repair；兜底清理去除 `|TEXT|`/JSON 残渣。
 - **翻译顺序（统一加权模型）**：每页计算一组归一化指标分（`semantic` 层级语义序 / `has_semantic` / `is_index` / `is_orphan` / `hotness` 引用热度 / `depth` / `chrono` 日期 / `volume` 编号 / `nav` 导航位次 / `dfs` 遍历序 / `len` 原文长度），按**加权总分降序**排列。
   - **层级语义序**：递归发现各级索引页（root 的 `index.html`、`today0.html`、`photo0.html`、`rec_idx.html` 等，判定 = 链接覆盖本级成员比例 ≥ `index_threshold`），页面语义分 = 目录链上各级位置的级联，跨目录自然分层、组内按索引链接序连续。
   - **权重/方向/阈值全部可调**：`config.json` 的 `planner.weights/directions/index_threshold`，或命令行 `plan --weights '{"semantic":0.4}' --direction semantic:reverse --index-threshold 0.7`。
@@ -144,6 +151,7 @@ python booktr-cli.py status
 |---|---|---|
 | 词汇表 | 人工预置 + `extract-terms` LLM 自动抽取候选（需确认） | `glossary.path` |
 | 翻译记忆 TM | 双语片段缓存，跨页复用 | `tm.enabled` |
+| 短语记忆 | 导航短语精确匹配复用（如 RETURN→返回） | `phrases.max_len` |
 | 风格指南 | `style-extract` 从对照样例提炼规则注入 | `style.rules_enabled` |
 | 风格锚定 | 字符 n-gram 相似度检索 top-k 样例 few-shot 注入 | `style.exemplar_enabled` |
 | 上下文包 | 前 N 篇日记摘要 | `planner.context_window` |
@@ -167,6 +175,7 @@ python booktr-cli.py status
 | `work/plan.json` | 翻译顺序 + 全部指标分 + 权重公式 + 语义序来源（证据可追溯） |
 | `work/glossary.json` | 词汇表（`status: confirmed / auto-candidate`） |
 | `work/tm.jsonl` | 翻译记忆 |
+| `work/phrase_memory.json` | 短语记忆（导航短语精确复用） |
 | `work/notes.jsonl` | 翻译笔记（追加式，可溯源） |
 | `work/translators_notes.json` | 译者注（锚定页面+偏移+引文） |
 | `work/segments/*.json` | 每页段索引（源偏移↔译文↔引文） |
