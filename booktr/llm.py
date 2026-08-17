@@ -89,25 +89,29 @@ class LLMClient:
         if self.provider == "mock":
             resp = self._mock(system, last_user)
             self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
-                      resp, ok=True, duration_ms=(time.monotonic() - t0) * 1000)
+                      resp, ok=True, duration_ms=(time.monotonic() - t0) * 1000,
+                      messages=messages)
             return resp
         if not self.api_key:
             err = (f"未设置 API key（环境变量 {self.cfg.get('llm','api_key_env',default='BOOKTR_API_KEY')}）。"
                    "或在 data/config.json 将 llm.provider 设为 mock 进行离线测试。")
             self._log(tag, system, f"[{len(messages)} msgs]", "",
                       ok=False, error=err,
-                      duration_ms=(time.monotonic() - t0) * 1000)
+                      duration_ms=(time.monotonic() - t0) * 1000,
+                      messages=messages)
             raise LLMError(err)
         try:
             resp, usage = self._openai_chat_multi(messages, temperature)
         except LLMError as e:
             self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
                       "", ok=False, error=str(e),
-                      duration_ms=(time.monotonic() - t0) * 1000)
+                      duration_ms=(time.monotonic() - t0) * 1000,
+                      messages=messages)
             raise
         self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
                   resp, ok=True, usage=usage,
-                  duration_ms=(time.monotonic() - t0) * 1000)
+                  duration_ms=(time.monotonic() - t0) * 1000,
+                  messages=messages)
         return resp
 
     def _openai_chat_multi(self, messages: list[dict],
@@ -240,7 +244,7 @@ class LLMClient:
 
     def _log(self, tag: str, system: str, user: str, response: str,
              ok: bool = True, error: str = "", usage: dict | None = None,
-             duration_ms: float = 0.0) -> None:
+             duration_ms: float = 0.0, messages: list[dict] | None = None) -> None:
         """完整记录一次 LLM 调用（成功或失败，含 mock）。"""
         d = self.cfg.get("llm_logs", "dir", default="")
         if not d:
@@ -262,6 +266,8 @@ class LLMClient:
             "user": user,
             "response": response,
         }
+        if messages is not None:
+            entry["messages"] = messages
         # 尝试解析响应中的 JSON（若为结构化输出）
         try:
             if response:
