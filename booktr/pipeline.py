@@ -732,6 +732,7 @@ def _group_logs_by_context(task_logs: list[dict]) -> list[list[dict]]:
 
 def _extract_src_text(log: dict, prev_msg_len: int) -> str:
     """从 messages 中提取待翻译文本。"""
+    import re as _re
     messages = log.get("messages", [])
     for msg in reversed(messages):
         if msg.get("role") == "user":
@@ -748,6 +749,7 @@ def _extract_src_text(log: dict, prev_msg_len: int) -> str:
 
 def _format_call_markdown(call_idx: int, log: dict, prev_msg_len: int) -> tuple[list[str], int]:
     """格式化单次调用为 Markdown 行，返回 (lines, new_msg_len)。"""
+    import re as _re
     tag = log.get("tag", "")
     ts = log.get("ts", "")[:19]
     ok = log.get("ok", True)
