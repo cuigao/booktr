@@ -241,6 +241,36 @@ def prepopulate_output(cfg: Config) -> None:
     rebuild_processed_output(cfg)
 
 
+def _make_progress_callback(verbose: bool = True):
+    """创建翻译进度回调。verbose=True 时打印详情到控制台。"""
+    def callback(event: str, data: dict) -> None:
+        if not verbose:
+            return
+        if event == "plan":
+            print(f"  计划: {data['segments']} 段, {data['total_chars']} 字符")
+        elif event == "segment_start":
+            preview = data["text_preview"][:30].replace("\n", " ")
+            print(f"  [{data['seg_idx']}/{data['total']}] 段{data['sid']} "
+                  f"({preview}...) [{data['chunks']} chunk]")
+        elif event == "chunk_done":
+            conf = data["confidence"]
+            flag = " ⚠" if data["needs_human"] else ""
+            print(f"    chunk {data['chunk_idx']}/{data['chunks_total']} "
+                  f"[conf={conf:.2f}]{flag}")
+        elif event == "segment_done":
+            flag = " ⚠需审核" if data["needs_human"] else ""
+            conf_str = f"[conf={data['confidence']:.2f}]" if data["confidence"] is not None else ""
+            print(f"  → 段{data['sid']} 完成 {conf_str}{flag}")
+        elif event == "repair":
+            print(f"  ⚠ 段{data['sid']} 占位符修复: {data['missing']}")
+        elif event == "summary":
+            print(f"  📝 摘要接力: 已翻译 {data['history_count']} 段")
+        elif event == "done":
+            flag = " ✓" if data["status"] == "done" else " ⚠"
+            print(f"  → 完成{flag} ({data['segments_total']} 段, {data['review_count']} 审核)")
+    return callback
+
+
 def cmd_translate(cfg: Config, args) -> None:
     client = _client(cfg)
     ensure_dirs(cfg)
@@ -279,6 +309,12 @@ def cmd_translate(cfg: Config, args) -> None:
         targets = order
 
     done = 0
+    # 确定 verbose 模式
+    verbose = getattr(args, "verbose", None)
+    if verbose is None:
+        verbose = cfg.get("verbose_translation", default=True)
+    progress = _make_progress_callback(verbose)
+
     for i, rel in enumerate(targets, 1):
         pstate = state.page(rel)
         if pstate.get("status") == tr.STATUS["done"]:
@@ -293,7 +329,7 @@ def cmd_translate(cfg: Config, args) -> None:
         print(f"[{i}/{len(targets)}] 翻译 {rel} ...", flush=True)
         try:
             r = tr.translate_page(cfg, client, rel, state, sm, plan, review_items,
-                                  interactive=args.interactive)
+                                  interactive=args.interactive, progress=progress)
         except llm_mod.LLMError as e:
             print(f"  ✗ {rel}: {e}")
             break
@@ -660,6 +696,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", help="仅显示下一个/批待译页，不翻译")
     sp.add_argument("--interactive", action="store_true", help="交互模式")
     sp.add_argument("--no-pause", action="store_true", help="遇到审核项不暂停")
+    sp.add_argument("-v", "--verbose", action="store_true", default=None,
+                    help="显示翻译进度详情（默认跟随 config verbose_translation）")
     sp.set_defaults(func=cmd_translate)
 
     sp = mk("review", help="处理审核队列")

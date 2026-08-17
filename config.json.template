@@ -108,5 +108,6 @@
   "mode": "auto",
   "pause_on_review": true,
   "chunk_size": 600,
+  "verbose_translation": true,
   "user_rules": ""
 }

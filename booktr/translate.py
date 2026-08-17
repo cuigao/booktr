@@ -302,8 +302,11 @@ def translate_page(
     plan: dict,
     review_queue: list[dict],
     interactive: bool = False,
+    progress=None,
 ) -> dict:
     """翻译单个页面（多轮对话模式）。返回 {status, segments_total, review_count}。"""
+    _ev = lambda event, data: progress(event, data) if progress else None
+
     pstate = state.page(rel)
     if pstate.get("status") == STATUS["done"]:
         return {"status": "done", "skipped": True, "segments_total": len(pstate.get("segments", {}))}
@@ -311,6 +314,9 @@ def translate_page(
     raw = open(_src_path(cfg, rel), "rb").read()
     html, _ = util.decode_html(raw)
     segs = seg_mod.segments_for_page(cfg, rel)
+    text_segs = [s for s in segs if s.kind == "text"]
+    total_chars = sum(len(s.text) for s in text_segs)
+    _ev("plan", {"segments": len(text_segs), "total_chars": total_chars, "rel": rel})
 
     page_ctx, prior_ctx, user_rules = build_context(cfg, site_map, plan, rel)
     guide = styles_mod.load_guide(cfg) if cfg.get("style", "rules_enabled", default=True) else ""
@@ -332,7 +338,7 @@ def translate_page(
     history_count = 0  # 当前对话中的翻译轮数
     pending_translations: list[str] = []  # 用于摘要的已译段落
 
-    for seg in segs:
+    for seg_idx, seg in enumerate(segs, 1):
         sid = str(seg.id)
         done_seg = pstate.get("segments", {}).get(sid)
         if done_seg and done_seg.get("translation") is not None:
@@ -342,6 +348,8 @@ def translate_page(
             continue
 
         chunks = _chunk_text(seg.text, cfg.get("chunk_size", default=600))
+        _ev("segment_start", {"sid": sid, "seg_idx": seg_idx, "total": len(segs),
+                              "text_preview": seg.text[:60], "chunks": len(chunks)})
         translated_chunks = []
         confidences = []
         needs_human = False
@@ -387,6 +395,7 @@ def translate_page(
             # 占位符完整性校验
             missing = _check_placeholders(chk, t)
             if missing:
+                _ev("repair", {"sid": sid, "missing": missing})
                 repair_usr = (
                     f"⚠️ 你丢失了占位符 {', '.join(missing)}，"
                     "请重新翻译，必须在译文中保留所有 [[Px]] 占位符。"
@@ -404,6 +413,10 @@ def translate_page(
             confidences.append(float(data.get("confidence", 0.7)))
             pending_translations.append(t)
             history_count += 1
+            _ev("chunk_done", {"sid": sid, "chunk_idx": len(translated_chunks),
+                               "chunks_total": len(chunks), "confidence": data.get("confidence", 0.7),
+                               "needs_human": data.get("needs_human", False),
+                               "translation_preview": t[:40]})
 
             if data.get("needs_human") or data.get("untrusted"):
                 needs_human = True
@@ -430,6 +443,7 @@ def translate_page(
 
             # 摘要接力：达到轮次上限时触发
             if summary_on and history_count >= max_history:
+                _ev("summary", {"history_count": history_count})
                 summary = _summarize_conversation(cfg, client, pending_translations, rel)
                 if summary:
                     conversation_summary = summary
@@ -455,6 +469,8 @@ def translate_page(
         if needs_human:
             result["review_count"] += 1
             pstate["status"] = STATUS["review"]
+        _ev("segment_done", {"sid": sid, "confidence": confidence,
+                             "needs_human": needs_human, "review": needs_human})
 
     _save_segment_index(cfg, rel, segs)
     out_html = seg_mod.reassemble(html, segs)
@@ -468,6 +484,8 @@ def translate_page(
     if rel not in state.data["done_pages"] and result["status"] == "done":
         state.data["done_pages"].append(rel)
     state.save()
+    _ev("done", {"status": result["status"], "segments_total": result["segments_total"],
+                 "review_count": result["review_count"]})
     return result
 
 

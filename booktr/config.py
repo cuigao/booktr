@@ -98,7 +98,8 @@ DEFAULTS: dict[str, Any] = {
     "llm_logs": {"dir": "work/llm_logs"},
     "mode": "auto",  # auto | interactive
     "pause_on_review": True,
-    "chunk_size": 600,  # 每段最大源字符数，超过则再切分
+    "chunk_size": 600,
+    "verbose_translation": True,  # 每段最大源字符数，超过则再切分
     "user_rules": "",  # 用户注入的全局翻译规则
 }
 
