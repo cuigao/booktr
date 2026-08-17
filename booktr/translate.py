@@ -337,6 +337,73 @@ def _translate_chunk_with_repair_multi(
             "untrusted": True, "glossary_conflicts": [], "notes": []}
 
 
+def _get_page_summary(cfg: Config, rel: str) -> str:
+    """获取页面摘要。"""
+    summary_path = os.path.join(cfg.get("summaries", "dir", default="work/summaries"),
+                                rel.replace("/", "__") + ".json")
+    if not os.path.exists(summary_path):
+        return ""
+    data = util.read_json(summary_path, {})
+    return data.get("summary", "")
+
+
+def _get_adjacent_translations(cfg: Config, seg, segs: list, state, rel: str,
+                               max_chars: int) -> tuple[str, str]:
+    """获取待翻译段落的前后文已翻译内容。"""
+    idx = segs.index(seg)
+    pstate = state.page(rel)
+
+    # 前文
+    before = []
+    chars = 0
+    for i in range(idx - 1, -1, -1):
+        prev = segs[i]
+        tr = pstate.get("segments", {}).get(str(prev.id), {}).get("translation", "")
+        if tr:
+            if chars + len(tr) > max_chars:
+                before.insert(0, tr[-(max_chars - chars):])
+                break
+            before.insert(0, tr)
+            chars += len(tr)
+
+    # 后文
+    after = []
+    chars = 0
+    for i in range(idx + 1, len(segs)):
+        nxt = segs[i]
+        tr = pstate.get("segments", {}).get(str(nxt.id), {}).get("translation", "")
+        if tr:
+            if chars + len(tr) > max_chars:
+                after.append(tr[:max_chars - chars])
+                break
+            after.append(tr)
+            chars += len(tr)
+
+    return "\n".join(before), "\n".join(after)
+
+
+def _build_retranslate_context(cfg: Config, rel: str, seg, segs: list,
+                               state, site_map: dict, plan: dict) -> dict:
+    """构建重新翻译的上下文。"""
+    page_ctx, _, _ = build_context(cfg, site_map, plan, rel)
+
+    summary = ""
+    if cfg.get("llm", "retranslate_use_summary", default=True):
+        summary = _get_page_summary(cfg, rel)
+
+    max_chars = cfg.get("llm", "retranslate_context_chars", default=1000)
+    before_text, after_text = _get_adjacent_translations(
+        cfg, seg, segs, state, rel, max_chars // 2
+    )
+
+    return {
+        "page_ctx": page_ctx,
+        "summary": summary,
+        "context_before": before_text,
+        "context_after": after_text,
+    }
+
+
 def translate_page(
     cfg: Config,
     client,
@@ -392,7 +459,15 @@ def translate_page(
     for seg_idx, seg in enumerate(segs, 1):
         sid = str(seg.id)
         done_seg = pstate.get("segments", {}).get(sid)
-        if done_seg and done_seg.get("translation") is not None:
+
+        # 检测是否需要重新翻译（翻译为空或 needs_human=True）
+        needs_retranslate = (
+            done_seg is None
+            or done_seg.get("translation") is None
+            or (done_seg.get("needs_human") and done_seg.get("translation") is None)
+        )
+
+        if done_seg and done_seg.get("translation") is not None and not needs_retranslate:
             seg.translation = done_seg["translation"]
             seg.confidence = done_seg.get("confidence")
             seg.needs_human = done_seg.get("needs_human", False)
@@ -407,6 +482,18 @@ def translate_page(
         untrusted = False
         collected_notes = []
         skipped_phrases = []  # 短语记忆跳过的翻译，注入到下一条 user message
+
+        # 重新翻译模式：构建上下文窗口 + 新对话
+        retranslate_context = None
+        if needs_retranslate and (done_seg is None or done_seg.get("translation") is None):
+            retranslate_context = _build_retranslate_context(
+                cfg, rel, seg, segs, state, site_map, plan
+            )
+            # 创建新对话（fresh start）
+            conversation = [{"role": "system", "content": sysp}]
+            history_count = 0
+            pending_translations = []
+            _ev("retranslate", {"sid": sid, "has_context": bool(retranslate_context)})
 
         for chk in chunks:
             chk_plain = re.sub(r"\[\[P\d+\]\]", "", chk).strip()
@@ -436,10 +523,12 @@ def translate_page(
             ph_items = phrases_mod.relevant(cfg, chk)  # 短语记忆相关
             all_injections = gl_items + ph_items
 
-            # 更新 system prompt 中的注入内容
-            if all_injections:
+            # 更新 system prompt 中的注入内容（重新翻译时添加重翻译规则）
+            is_retranslation = retranslate_context is not None
+            if all_injections or is_retranslation:
                 sysp = prompts.build_translate_system(
-                    cfg, all_injections, guide, user_rules, focus
+                    cfg, all_injections, guide, user_rules, focus,
+                    is_retranslation=is_retranslation
                 )
                 conversation[0] = {"role": "system", "content": sysp}
 
@@ -453,10 +542,14 @@ def translate_page(
             # 首条消息或摘要接力后：携带 page_ctx
             is_first = (len(conversation) == 1) or (history_count == 0)
             if is_first:
-                usr = prompts.build_translate_user_first(
-                    cfg, chk, page_ctx, chk_prior, ex_refs, tm_hits,
-                    summary=conversation_summary,
-                )
+                if retranslate_context:
+                    # 重新翻译模式：使用带上下文窗口的消息
+                    usr = prompts.build_retranslate_user(cfg, chk, retranslate_context)
+                else:
+                    usr = prompts.build_translate_user_first(
+                        cfg, chk, page_ctx, chk_prior, ex_refs, tm_hits,
+                        summary=conversation_summary,
+                    )
             else:
                 usr = prompts.build_translate_user_subsequent(cfg, chk)
 

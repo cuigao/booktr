@@ -96,6 +96,21 @@ def interactive_review(cfg: Config, prompt: str = None, max_items: int = 0) -> i
             accepted_pages.add(it["page"])
         elif act == "d":
             it["status"] = "deleted"
+            # 删除该段翻译，标记为 pending
+            from . import translate as tr
+            from . import state as state_mod
+            state = state_mod.State(cfg)
+            pstate = state.page(it["page"])
+            sid = str(it["segment_id"])
+            seg_state = pstate.get("segments", {}).get(sid)
+            if seg_state:
+                seg_state["translation"] = None
+                seg_state["needs_human"] = False
+                seg_state["untrusted"] = False
+            # 从 done_pages 中移除（如果有）
+            if it["page"] in state.data.get("done_pages", []):
+                state.data["done_pages"].remove(it["page"])
+            state.save()
         elif act == "s":
             it["status"] = "skipped"
         handled += 1

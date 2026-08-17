@@ -8,6 +8,15 @@ from . import util
 
 SRC_LANG_NAME = {"ja": "日语（日本原文）", "en": "英语", "zh": "中文"}
 
+RETRANSLATE_RULES = (
+    "## 重新翻译任务（当收到"重新翻译"指令时适用）\n"
+    "- 这是重新翻译任务，之前的翻译存在问题（可能未翻译或翻译不准确）\n"
+    "- 完整翻译为简体中文，不要保留任何原文\n"
+    "- 保持与前文/后文的术语和风格一致\n"
+    "- 保留所有 [[Px]] 占位符\n"
+    "- 保留全角写法（全角字母/数字/符号）、人名原形等规则仍然适用"
+)
+
 
 def lang_name(code: str) -> str:
     return SRC_LANG_NAME.get(code, code)
@@ -19,6 +28,7 @@ def build_translate_system(
     style_guide: str,
     user_rules: str,
     focus: str,
+    is_retranslation: bool = False,
 ) -> str:
     tgt = cfg.get("lang", "target", default="zh-Hans")
     src = cfg.get("lang", "source", default="ja")
@@ -66,6 +76,8 @@ def build_translate_system(
         '"glossary_conflicts": ["发现问题的术语条目"], '
         '"notes": ["需要记录的重要/存疑信息"], "needs_human": true/false}'
     )
+    if is_retranslation:
+        parts.append(RETRANSLATE_RULES)
     return "\n\n".join(parts)
 
 
@@ -134,6 +146,24 @@ def build_translate_user_first(
 def build_translate_user_subsequent(cfg, src_text: str) -> str:
     """多轮对话后续消息：仅携带待翻译文本。"""
     return f"### 待翻译文本\n\n{src_text}"
+
+
+def build_retranslate_user(cfg, src_text: str, context: dict) -> str:
+    """重新翻译时的用户消息（带上下文窗口）。"""
+    tgt = cfg.get("lang", "target", default="zh-Hans")
+    parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt}。"]
+
+    if context.get("page_ctx"):
+        parts.append(f"## 页面上下文\n{context['page_ctx']}")
+    if context.get("summary"):
+        parts.append(f"## 页面摘要\n{context['summary']}")
+    if context.get("context_before"):
+        parts.append(f"## 前文（已翻译，保持术语与风格一致）\n{context['context_before']}")
+    parts.append(f"## 待翻译文本\n\n{src_text}")
+    if context.get("context_after"):
+        parts.append(f"## 后文（已翻译，保持术语与风格一致）\n{context['context_after']}")
+
+    return "\n\n".join(parts)
 
 
 def build_conversation_summary(cfg) -> str:

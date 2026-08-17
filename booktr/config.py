@@ -31,6 +31,8 @@ DEFAULTS: dict[str, Any] = {
         "max_repair": 3,  # 解析失败自愈重试次数
         "max_history_segments": 50,  # 多轮对话保留历史段落数
         "summary_enabled": True,  # 摘要接力开关
+        "retranslate_context_chars": 1000,  # 重新翻译时前后文字符数
+        "retranslate_use_summary": True,  # 重新翻译时使用页面摘要
     },
     "planner": {
         "static_first": True,

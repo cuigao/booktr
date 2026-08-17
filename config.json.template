@@ -18,7 +18,9 @@
     "max_requests_per_minute": 60,
     "max_repair": 3,
     "max_history_segments": 50,
-    "summary_enabled": true
+    "summary_enabled": true,
+    "retranslate_context_chars": 1000,
+    "retranslate_use_summary": true
   },
   "planner": {
     "static_first": true,
