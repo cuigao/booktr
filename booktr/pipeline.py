@@ -737,10 +737,10 @@ def _extract_src_text(log: dict, prev_msg_len: int) -> str:
     for msg in reversed(messages):
         if msg.get("role") == "user":
             content = msg.get("content", "")
-            m = _re.search(r'### 待翻译文本\s*\n+(.*)', content, re.S)
+            m = _re.search(r'### 待翻译文本\s*\n+(.*)', content, _re.S)
             if m:
                 return m.group(1).strip()
-            m = _re.search(r'## 待翻译文本\s*\n+(.*)', content, re.S)
+            m = _re.search(r'## 待翻译文本\s*\n+(.*)', content, _re.S)
             if m:
                 return m.group(1).strip()
             return content
