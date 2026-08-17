@@ -372,6 +372,31 @@ def cmd_review(cfg: Config, args) -> None:
     review_mod.interactive_review(cfg, max_items=args.max_items)
 
 
+def cmd_regenerate(cfg: Config, args) -> None:
+    """重新生成指定页面的 out 文件（从段索引离线重组）。"""
+    if args.all:
+        state = tr.State(cfg)
+        pages = [rel for rel, p in state.data.get("pages", {}).items()
+                 if p.get("status") in (tr.STATUS["done"], tr.STATUS["review"])]
+    else:
+        pages = args.pages
+
+    if not pages:
+        print("未指定页面")
+        return
+
+    ok_count = 0
+    for page in pages:
+        success = review_mod._regenerate_page(cfg, page)
+        if success:
+            print(f"  ✓ 已重生成: {page}")
+            ok_count += 1
+        else:
+            print(f"  ✗ 无法重生成: {page}")
+
+    print(f"\n重生成完成: {ok_count}/{len(pages)}")
+
+
 def cmd_qa(cfg: Config, args) -> None:
     client = _client(cfg)
     state = tr.State(cfg)
@@ -1020,6 +1045,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--page", default=None, help="只看某页的审核项")
     sp.add_argument("--max-items", type=int, default=0, help="最多处理条数")
     sp.set_defaults(func=cmd_review)
+
+    sp = mk("regenerate", help="重新生成指定页面的 out 文件（从段索引离线重组）")
+    sp.add_argument("pages", nargs="*", help="页面路径，如 profile/profile.html")
+    sp.add_argument("--all", action="store_true", help="重新生成所有已处理页")
+    sp.set_defaults(func=cmd_regenerate)
 
     sp = mk("qa", help="一致性 QA pass")
     sp.add_argument("--pages", nargs="*", help="限定检查页面")
