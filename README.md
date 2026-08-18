@@ -143,7 +143,7 @@ python booktr-cli.py status
   - `llm_logs.auto_export`：translate 完成后自动导出对话日志（默认 true）
   - `llm_logs.auto_export_sessions`：自动导出最近 N 个翻译任务（默认 1）
   - `review.auto_regenerate`：review 接受后自动重生成 out 页面（默认 true）
-  - `llm.retranslate_context_chars`：重新翻译时前后文字符数（默认 1000）
+  - `llm.retranslate_context_chars`：重新翻译时前后文总字符数（默认 1000，每侧一半=500）
   - `llm.retranslate_use_summary`：重新翻译时使用页面摘要（默认 true）
   - `llm.auto_retranslate`：翻译需要 review 时自动用重翻译提示词再试（默认 true）
   - `llm.auto_retranslate_attempts`：自动重翻译尝试次数（默认 1）
@@ -162,13 +162,14 @@ python booktr-cli.py status
   - **摘要接力**：达到 `max_history_segments`（默认 50）后自动生成摘要，重建对话继续翻译。
   - **短语记忆注入**：被短语记忆跳过的翻译结果注入到下一条 user message，保持 LLM 上下文。
 - **重新翻译**：删除 review 条目后，该段落标记为 pending，下次 translate 时自动重新翻译。
-  - **上下文窗口**：重新翻译时提供前文/后文已翻译内容（各 500 字符），让 LLM 看到完整的"上-中-下"结构。
+  - **上下文窗口**：重新翻译时提供前文/后文已翻译内容（总 `retranslate_context_chars`，每侧一半），让 LLM 看到完整的"上-中-下"结构。
   - **页面摘要**：注入页面摘要，提供整体上下文。
-  - **全新对话**：重新翻译时创建新对话，不受之前翻译历史影响。
+  - **全新对话**：重新翻译时创建新对话（新 context_id），不受之前翻译历史影响。
   - **系统提示词强化**：注入"重新翻译任务"规则，强调完整翻译、术语一致、占位符保留。
+  - **上下文差异**：段级重翻译（review 删除后触发）发生在段翻译起点，此时**后文尚未翻译**，故 `context_after` 通常为空；仅前文可用。页面级 auto-retranslate（见下）因整页译完，前后文均完整。
 - **自动重翻译（auto-retranslate）**：翻译过程中需要 review 的 chunk（低置信度 / needs_human / 格式错误），
   在**整个页面主翻译结束后**统一用重翻译提示词再试（`auto_retranslate_attempts` 次）。
-  此时全页段均已翻译，前后文上下文完整。成功则采用新译文并清除 review 标记；
+  此时全页段均已翻译，前后文上下文完整。成功则采用新译文并清除 review 标记（含已入队的词汇表冲突条目）；
   仍失败则保留结果并进入 review 队列。
 - **LLM 异常防护**：所有 LLM 返回路径均有防护——None 内容检查、API 格式异常捕获、confidence null 防护、`parse_json_response` 空响应处理。
 - **翻译顺序（统一加权模型）**：每页计算一组归一化指标分（`semantic` 层级语义序 / `has_semantic` / `is_index` / `is_orphan` / `hotness` 引用热度 / `depth` / `chrono` 日期 / `volume` 编号 / `nav` 导航位次 / `dfs` 遍历序 / `len` 原文长度），按**加权总分降序**排列。

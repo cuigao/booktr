@@ -42,12 +42,6 @@ class State:
         return self.data.setdefault("llm_stats", {})
 
 
-def _page_summary(cfg: Config, rel: str) -> str:
-    p = os.path.join(cfg.get("summaries", "dir", default=""), rel.replace("/", "__") + ".json")
-    data = util.read_json(p, {})
-    return data.get("summary", "")
-
-
 def process_inbox(cfg: Config, state: State) -> None:
     """处理用户注入目录 inbox/：其中的 .txt/.md 会转为笔记并入状态，随后清除。
 
@@ -111,7 +105,7 @@ def build_context(cfg: Config, site_map: dict, plan: dict, rel: str) -> tuple[st
             prevs = order[max(0, idx - window) : idx]
             lines = []
             for pr in prevs:
-                s = _page_summary(cfg, pr)
+                s = _get_page_summary(cfg, pr)
                 if s:
                     lines.append(f"- {pr}: {s}")
             prior_ctx = "\n".join(lines)
@@ -159,7 +153,7 @@ def summarize_page(cfg: Config, client, rel: str) -> dict:
     except llm_mod.LLMError:
         data = {"summary": resp.strip()[:300], "entities": [], "content_type": "其他"}
     out_path = os.path.join(
-        cfg.get("summaries", "dir", default=""), rel.replace("/", "__") + ".json"
+        cfg.get("summaries", "dir", default="work/summaries"), rel.replace("/", "__") + ".json"
     )
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     util.write_json(out_path, data)
@@ -489,7 +483,9 @@ def translate_page(
             retranslate_context = _build_retranslate_context(
                 cfg, rel, seg, segs, state, site_map, plan
             )
-            # 创建新对话（fresh start）
+            # 创建新对话（fresh start），生成新 context_id
+            context_seq += 1
+            context_id = f"ctx_{_epoch_ms()}_{page_key}_{context_seq}"
             conversation = [{"role": "system", "content": sysp}]
             history_count = 0
             pending_translations = []
@@ -506,6 +502,7 @@ def translate_page(
                 confidences.append(1.0)
                 pending_translations.append(restored)
                 skipped_phrases.append(f"{chk_plain} → {gl_hit} [词汇表]")
+                history_count += 1
                 continue
 
             # 2. 短语记忆 → 机械替换
@@ -516,6 +513,7 @@ def translate_page(
                 confidences.append(1.0)
                 pending_translations.append(restored)
                 skipped_phrases.append(f"{chk_plain} → {ph_hit} [短语记忆]")
+                history_count += 1
                 continue
 
             # 3. 注入相关条目 + LLM 翻译
@@ -676,6 +674,9 @@ def translate_page(
                 rt_context = _build_retranslate_context(
                     cfg, rel, item["seg"], segs, state, site_map, plan
                 )
+                # 每次 auto-retranslate 使用独立 context_id（利于日志归组）
+                rt_context_seq = context_seq + 1
+                rt_context_id = f"ctx_{_epoch_ms()}_{page_key}_{rt_context_seq}"
                 rt_still_bad = True
                 for _ in range(max_rt):
                     rt_sysp = prompts.build_translate_system(
@@ -688,7 +689,7 @@ def translate_page(
                                         cfg, item["chk"], rt_context)})
                     rt_data = _translate_chunk_with_repair_multi(
                         cfg, client, rt_conv, rel, item["sid"], item["chk"],
-                        task_id=task_id, context_id=context_id
+                        task_id=task_id, context_id=rt_context_id
                     )
                     rt_t = (rt_data.get("translation") or "").strip()
                     rt_still_bad = (
@@ -700,6 +701,12 @@ def translate_page(
                         # 成功：替换该 chunk 译文 + confidence
                         item["translated_chunks"][item["chunk_idx"]] = rt_t
                         item["confidences"][item["chunk_idx"]] = float(rt_data.get("confidence") or 0.9)
+                        # 清理该段已入队的 glossary_conflict 条目（重翻译解决了冲突）
+                        review_queue[:] = [
+                            rq for rq in review_queue
+                            if not (rq.get("page") == rel and rq.get("segment_id") == item["sid"]
+                                    and rq.get("reason") == "glossary_conflict")
+                        ]
                         break
                 if rt_still_bad:
                     # 方案 A：保留重翻译结果 + 入 review_queue
@@ -711,7 +718,7 @@ def translate_page(
                                      "low_confidence", rt_t)
                     )
                 else:
-                    _ev("chunk_done", {"sid": item["sid"], "chunk_idx": item["chunk_idx"],
+                    _ev("chunk_done", {"sid": item["sid"], "chunk_idx": item["chunk_idx"] + 1,
                                        "chunks_total": len(item["translated_chunks"]),
                                        "confidence": float(rt_data.get("confidence") or 0.9),
                                        "needs_human": False,
