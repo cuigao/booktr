@@ -308,6 +308,13 @@ def _make_progress_callback(verbose: bool = True):
             print(f"  ⚠ 段{data['sid']} 占位符修复: {data['missing']}")
         elif event == "summary":
             print(f"  📝 摘要接力: 已翻译 {data['history_count']} 段")
+        elif event == "retranslate":
+            print(f"  🔄 重新翻译: 段{data['sid']}（{'有上下文' if data['has_context'] else '无上下文'}）")
+        elif event == "auto_retranslate":
+            if data.get("skipped"):
+                print(f"  🚫 自动重翻译已关闭，{data['count']} 个 chunk 进入 review 队列")
+            else:
+                print(f"  🔄 自动重翻译: {data['count']} 个 chunk")
         elif event == "done":
             flag = " ✓" if data["status"] == "done" else " ⚠"
             print(f"  → 完成{flag} ({data['segments_total']} 段, {data['review_count']} 审核)")

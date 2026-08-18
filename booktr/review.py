@@ -42,18 +42,19 @@ def _regenerate_page(cfg: Config, rel: str) -> bool:
 
 def _finalize_review(cfg: Config, page: str) -> None:
     """处理完所有审核条目后，更新页面状态并重生成 out。"""
-    from . import translate as tr
-    from . import state as state_mod
+    from .translate import State, STATUS
 
     items = load_queue(cfg)
     has_open = any(it["page"] == page and it["status"] == "open" for it in items)
 
-    state = state_mod.State(cfg)
+    state = State(cfg)
     pstate = state.page(page)
 
     if not has_open:
-        if pstate.get("status") == tr.STATUS["review"]:
-            pstate["status"] = tr.STATUS["done"]
+        if pstate.get("status") == STATUS["review"]:
+            pstate["status"] = STATUS["done"]
+            if page not in state.data.get("done_pages", []):
+                state.data["done_pages"].append(page)
             state.save()
 
     _regenerate_page(cfg, page)
