@@ -11,3 +11,4 @@ venv/
 # 测试与工具
 .pytest_cache/
 .coverage
+temp/
