@@ -193,12 +193,17 @@ def _cleanup_fallback(resp: str) -> str:
 
 
 def _check_placeholders(src_text: str, translation: str) -> list[str]:
-    """检查译文是否保留了原文的所有 [[Px]] 占位符，返回缺失的列表。"""
+    """检查译文占位符与原文的一致性，返回异常列表。
+
+    检测两类异常：
+    - 缺失：原文有但译文缺的 [[Px]]
+    - 多余：译文凭空多出的 [[Px]]（原文无）
+    """
     src_ph = set(re.findall(r'\[\[P\d+\]\]', src_text))
-    if not src_ph:
-        return []
     dst_ph = set(re.findall(r'\[\[P\d+\]\]', translation))
-    return sorted(src_ph - dst_ph)
+    missing = src_ph - dst_ph
+    extra = dst_ph - src_ph
+    return sorted(missing | extra)
 
 
 def _restore_placeholders_from_src(src_text: str, plain_translation: str) -> str:
