@@ -455,10 +455,11 @@ def translate_page(
         sid = str(seg.id)
         done_seg = pstate.get("segments", {}).get(sid)
 
-        # 检测是否需要重新翻译（段翻译为空时触发，如 review 删除后）
+        # 检测是否需要重新翻译：
+        # - 全新段（segments 无该 sid，done_seg is None）→ 正常首次翻译
+        # - 被 review 删除的段（segments 存在但 translation is None）→ 重翻译
         needs_retranslate = (
-            done_seg is None
-            or done_seg.get("translation") is None
+            done_seg is not None and done_seg.get("translation") is None
         )
 
         if done_seg and done_seg.get("translation") is not None and not needs_retranslate:
@@ -477,9 +478,9 @@ def translate_page(
         collected_notes = []
         skipped_phrases = []  # 短语记忆跳过的翻译，注入到下一条 user message
 
-        # 重新翻译模式：构建上下文窗口 + 新对话
+        # 重新翻译模式：构建上下文窗口 + 新对话（仅 review 删除的段）
         retranslate_context = None
-        if needs_retranslate and (done_seg is None or done_seg.get("translation") is None):
+        if needs_retranslate:
             retranslate_context = _build_retranslate_context(
                 cfg, rel, seg, segs, state, site_map, plan
             )
