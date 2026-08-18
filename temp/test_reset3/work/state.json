@@ -1,0 +1,21 @@
+{
+  "pages": {
+    "today/today4.html": {
+      "status": "pending",
+      "segments": {
+        "16": {
+          "translation": null,
+          "needs_human": false,
+          "untrusted": false
+        },
+        "17": {
+          "translation": "HOME",
+          "needs_human": false,
+          "untrusted": false
+        }
+      }
+    }
+  },
+  "done_pages": [],
+  "llm_stats": {}
+}

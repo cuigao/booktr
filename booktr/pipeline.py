@@ -446,6 +446,70 @@ def cmd_regenerate(cfg: Config, args) -> None:
     print(f"\n重生成完成: {ok_count}/{len(pages)}")
 
 
+def cmd_reset(cfg: Config, args) -> None:
+    """重置指定页面或段，使下次 translate 重新翻译。
+
+    - 整页重置：segments 清空、status=pending、删除段缓存（全新翻译）
+    - 指定段重置：仅该段 translation=None，保留段结构（只重译该段）
+    """
+    state = tr.State(cfg)
+
+    if args.all:
+        pages = list(state.data.get("pages", {}).keys())
+    else:
+        pages = args.pages
+    if not pages:
+        print("未指定页面")
+        return
+
+    if not args.yes:
+        if input(f"确认重置 {len(pages)} 页？[y/N] ").strip().lower() not in ("y", "yes"):
+            print("已取消")
+            return
+
+    for rel in pages:
+        pstate = state.page(rel)
+        segs = pstate.get("segments", {})
+
+        if args.all_segments:
+            target = list(segs.keys())
+        elif args.segments:
+            target = [str(s) for s in args.segments]
+        else:
+            target = None  # 整页
+
+        if target is None:
+            # 方式 A：整页重置
+            pstate["status"] = "pending"
+            pstate["segments"] = {}
+        else:
+            # 方式 B：只重置指定段（保留段结构）
+            for sid in target:
+                if sid in segs:
+                    segs[sid]["translation"] = None
+                    segs[sid]["needs_human"] = False
+                    segs[sid]["untrusted"] = False
+            if pstate.get("status") in (tr.STATUS["done"], tr.STATUS["review"]):
+                pstate["status"] = "pending"
+
+        # 从 done_pages 移除
+        if rel in state.data.get("done_pages", []):
+            state.data["done_pages"].remove(rel)
+
+        # 方式 A 删除段缓存（重新切分）
+        if target is None:
+            seg_path = os.path.join(cfg.get("segments_dir", default=""),
+                                    rel.replace("/", "__") + ".json")
+            if os.path.exists(seg_path):
+                os.remove(seg_path)
+
+        desc = f" 段 {target}" if target else "（整页）"
+        print(f"  已重置: {rel}{desc}")
+
+    state.save()
+    print(f"\n重置完成，下次 translate 将重译指定内容")
+
+
 def cmd_qa(cfg: Config, args) -> None:
     client = _client(cfg)
     state = tr.State(cfg)
@@ -1099,6 +1163,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("pages", nargs="*", help="页面路径，如 profile/profile.html")
     sp.add_argument("--all", action="store_true", help="重新生成所有已处理页")
     sp.set_defaults(func=cmd_regenerate)
+
+    sp = mk("reset", help="重置指定页面或段，使下次 translate 重新翻译")
+    sp.add_argument("pages", nargs="*", help="页面路径，如 today/today4.html")
+    sp.add_argument("--segments", type=int, nargs="*", help="只重置指定段（方式B），如 --segments 16")
+    sp.add_argument("--all-segments", action="store_true", help="重置该页所有段（保留段结构）")
+    sp.add_argument("--all", action="store_true", help="重置所有页面")
+    sp.add_argument("-y", "--yes", action="store_true", help="跳过确认")
+    sp.set_defaults(func=cmd_reset)
 
     sp = mk("qa", help="一致性 QA pass")
     sp.add_argument("--pages", nargs="*", help="限定检查页面")

@@ -118,6 +118,11 @@ python booktr-cli.py export-log today/today6.html --task tsk_1755432600000  # �
 python booktr-cli.py regenerate profile/profile.html
 python booktr-cli.py regenerate --all  # 重新生成所有已处理页
 
+# 16) 重置指定页面或段，使下次 translate 重新翻译
+python booktr-cli.py reset today/today4.html              # 整页重置（全新翻译）
+python booktr-cli.py reset today/today4.html --segments 16  # 只重置段16（保留其他段）
+python booktr-cli.py reset --all -y                        # 重置所有页面
+
 # 查看进度
 python booktr-cli.py status
 ```
