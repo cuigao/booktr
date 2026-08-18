@@ -748,6 +748,10 @@ def translate_page(
                 seg_state["needs_human"] = False
                 seg_state["untrusted"] = False
                 seg.needs_human = False
+            else:
+                # 该段有重翻译失败的 chunk → 显式保持 needs_human=True（页面 review）
+                seg_state["needs_human"] = True
+                seg.needs_human = True
 
         # 重新计算 review_count 和页面状态
         result["review_count"] = sum(
