@@ -455,6 +455,7 @@ def translate_page(
     conversation_summary = ""  # 摘要接力的摘要
     history_count = 0  # 当前对话中的翻译轮数
     pending_translations: list[str] = []  # 用于摘要的已译段落
+    flagged = []  # 需要页面级重翻译的 chunk
 
     for seg_idx, seg in enumerate(segs, 1):
         sid = str(seg.id)
@@ -582,42 +583,14 @@ def translate_page(
                     notes_mod.add(cfg, rel, int(sid), chk[:500],
                                   f"占位符丢失: {', '.join(still_missing)}", kind="存疑", created_by="llm")
 
-            # ── Auto-Retranslate：需要 review 时自动用重翻译提示词再试 ──
-            auto_rt = cfg.get("llm", "auto_retranslate", default=True)
-            max_rt = cfg.get("llm", "auto_retranslate_attempts", default=1)
-            if auto_rt and max_rt > 0 and (data.get("needs_human") or untrusted):
-                rt_context = _build_retranslate_context(
-                    cfg, rel, seg, segs, state, site_map, plan
-                )
-                rt_still_bad = True
-                for _ in range(max_rt):
-                    rt_sysp = prompts.build_translate_system(
-                        cfg, all_injections, guide, user_rules, focus,
-                        is_retranslation=True
-                    )
-                    rt_conv = [{"role": "system", "content": rt_sysp}]
-                    rt_conv.append({"role": "user",
-                                    "content": prompts.build_retranslate_user(
-                                        cfg, chk, rt_context)})
-                    rt_data = _translate_chunk_with_repair_multi(
-                        cfg, client, rt_conv, rel, sid, chk,
-                        task_id=task_id, context_id=context_id
-                    )
-                    rt_t = (rt_data.get("translation") or "").strip()
-                    rt_still_bad = (
-                        rt_data.get("needs_human")
-                        or rt_data.get("untrusted")
-                        or bool(_check_placeholders(chk, rt_t))
-                    )
-                    if not rt_still_bad:
-                        # 成功：使用新结果
-                        t = rt_t
-                        data = rt_data
-                        untrusted = False
-                        break
-                if rt_still_bad:
-                    # 方案 A：保留新结果并加入 review_queue
-                    t = (data.get("translation") or "").strip()
+            # 收集需要 review 的 chunk（页面级统一重翻译）
+            if data.get("needs_human") or untrusted:
+                flagged.append({
+                    "seg": seg, "sid": sid, "chk": chk,
+                    "chunk_idx": len(translated_chunks),
+                    "translated_chunks": translated_chunks,
+                    "all_injections": all_injections,
+                })
 
             translated_chunks.append(t)
             confidences.append(float(data.get("confidence") or 0.7))
@@ -640,10 +613,6 @@ def translate_page(
                     review_queue.append(
                         _make_review(cfg, rel, sid, seg.text, "glossary_conflict", c)
                     )
-            if data.get("needs_human") or data.get("untrusted"):
-                review_queue.append(
-                    _make_review(cfg, rel, sid, seg.text, "low_confidence", t)
-                )
             if tm_on and t and t != chk:
                 tm_mod.add(cfg, chk, t, rel, seg.id)
             if not data.get("untrusted") and t and chk_plain:
@@ -695,6 +664,77 @@ def translate_page(
             pstate["status"] = STATUS["review"]
         _ev("segment_done", {"sid": sid, "confidence": confidence,
                              "needs_human": needs_human, "review": needs_human})
+
+    # ── 页面级 Auto-Retranslate：主翻译结束后统一重翻译需要 review 的 chunk ──
+    auto_rt = cfg.get("llm", "auto_retranslate", default=True)
+    max_rt = cfg.get("llm", "auto_retranslate_attempts", default=1)
+    if auto_rt and max_rt > 0 and flagged:
+        _ev("auto_retranslate", {"count": len(flagged)})
+        # 按段分组，跟踪每段是否有失败 chunk
+        seg_failed: dict[str, bool] = {}
+        for item in flagged:
+            rt_context = _build_retranslate_context(
+                cfg, rel, item["seg"], segs, state, site_map, plan
+            )
+            rt_still_bad = True
+            for _ in range(max_rt):
+                rt_sysp = prompts.build_translate_system(
+                    cfg, item["all_injections"], guide, user_rules, focus,
+                    is_retranslation=True
+                )
+                rt_conv = [{"role": "system", "content": rt_sysp}]
+                rt_conv.append({"role": "user",
+                                "content": prompts.build_retranslate_user(
+                                    cfg, item["chk"], rt_context)})
+                rt_data = _translate_chunk_with_repair_multi(
+                    cfg, client, rt_conv, rel, item["sid"], item["chk"],
+                    task_id=task_id, context_id=context_id
+                )
+                rt_t = (rt_data.get("translation") or "").strip()
+                rt_still_bad = (
+                    rt_data.get("needs_human")
+                    or rt_data.get("untrusted")
+                    or bool(_check_placeholders(item["chk"], rt_t))
+                )
+                if not rt_still_bad:
+                    # 成功：替换该 chunk 在段译文中的位置
+                    item["translated_chunks"][item["chunk_idx"]] = rt_t
+                    break
+            if rt_still_bad:
+                # 方案 A：保留重翻译结果 + 入 review_queue
+                seg_failed[item["sid"]] = True
+                review_queue.append(
+                    _make_review(cfg, rel, item["sid"], item["seg"].text,
+                                 "low_confidence",
+                                 item["translated_chunks"][item["chunk_idx"]])
+                )
+            else:
+                _ev("chunk_done", {"sid": item["sid"], "chunk_idx": item["chunk_idx"],
+                                   "chunks_total": len(item["translated_chunks"]),
+                                   "confidence": 0.9, "needs_human": False,
+                                   "translation_preview": item["translated_chunks"][item["chunk_idx"]][:40]})
+
+        # 更新受影响段的译文与状态
+        for item in flagged:
+            sid = item["sid"]
+            seg = item["seg"]
+            seg.translation = "".join(item["translated_chunks"])
+            seg_state = pstate.setdefault("segments", {})[sid]
+            seg_state["translation"] = seg.translation
+            if sid not in seg_failed:
+                # 该段所有 flagged chunk 均成功
+                seg_state["needs_human"] = False
+                seg_state["untrusted"] = False
+                seg.needs_human = False
+
+        # 重新计算 review_count 和页面状态
+        result["review_count"] = sum(
+            1 for sv in pstate.get("segments", {}).values() if sv.get("needs_human")
+        )
+        if result["review_count"] > 0:
+            pstate["status"] = STATUS["review"]
+        else:
+            pstate["status"] = STATUS["done"]
 
     _save_segment_index(cfg, rel, segs)
     out_html = seg_mod.reassemble(html, segs)
