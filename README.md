@@ -145,6 +145,8 @@ python booktr-cli.py status
   - `review.auto_regenerate`：review 接受后自动重生成 out 页面（默认 true）
   - `llm.retranslate_context_chars`：重新翻译时前后文字符数（默认 1000）
   - `llm.retranslate_use_summary`：重新翻译时使用页面摘要（默认 true）
+  - `llm.auto_retranslate`：翻译需要 review 时自动用重翻译提示词再试（默认 true）
+  - `llm.auto_retranslate_attempts`：自动重翻译尝试次数（默认 1）
   - `style.refs_path`：风格样例文件（用户自备，接口就绪）
 
 ## 核心机制
@@ -164,6 +166,10 @@ python booktr-cli.py status
   - **页面摘要**：注入页面摘要，提供整体上下文。
   - **全新对话**：重新翻译时创建新对话，不受之前翻译历史影响。
   - **系统提示词强化**：注入"重新翻译任务"规则，强调完整翻译、术语一致、占位符保留。
+- **自动重翻译（auto-retranslate）**：翻译过程中需要 review 的 chunk（低置信度 / needs_human / 格式错误），
+  在**整个页面主翻译结束后**统一用重翻译提示词再试（`auto_retranslate_attempts` 次）。
+  此时全页段均已翻译，前后文上下文完整。成功则采用新译文并清除 review 标记；
+  仍失败则保留结果并进入 review 队列。
 - **LLM 异常防护**：所有 LLM 返回路径均有防护——None 内容检查、API 格式异常捕获、confidence null 防护、`parse_json_response` 空响应处理。
 - **翻译顺序（统一加权模型）**：每页计算一组归一化指标分（`semantic` 层级语义序 / `has_semantic` / `is_index` / `is_orphan` / `hotness` 引用热度 / `depth` / `chrono` 日期 / `volume` 编号 / `nav` 导航位次 / `dfs` 遍历序 / `len` 原文长度），按**加权总分降序**排列。
   - **层级语义序**：递归发现各级索引页（root 的 `index.html`、`today0.html`、`photo0.html`、`rec_idx.html` 等，判定 = 链接覆盖本级成员比例 ≥ `index_threshold`），页面语义分 = 目录链上各级位置的级联，跨目录自然分层、组内按索引链接序连续。
