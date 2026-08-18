@@ -582,6 +582,43 @@ def translate_page(
                     notes_mod.add(cfg, rel, int(sid), chk[:500],
                                   f"占位符丢失: {', '.join(still_missing)}", kind="存疑", created_by="llm")
 
+            # ── Auto-Retranslate：需要 review 时自动用重翻译提示词再试 ──
+            auto_rt = cfg.get("llm", "auto_retranslate", default=True)
+            max_rt = cfg.get("llm", "auto_retranslate_attempts", default=1)
+            if auto_rt and max_rt > 0 and (data.get("needs_human") or untrusted):
+                rt_context = _build_retranslate_context(
+                    cfg, rel, seg, segs, state, site_map, plan
+                )
+                rt_still_bad = True
+                for _ in range(max_rt):
+                    rt_sysp = prompts.build_translate_system(
+                        cfg, all_injections, guide, user_rules, focus,
+                        is_retranslation=True
+                    )
+                    rt_conv = [{"role": "system", "content": rt_sysp}]
+                    rt_conv.append({"role": "user",
+                                    "content": prompts.build_retranslate_user(
+                                        cfg, chk, rt_context)})
+                    rt_data = _translate_chunk_with_repair_multi(
+                        cfg, client, rt_conv, rel, sid, chk,
+                        task_id=task_id, context_id=context_id
+                    )
+                    rt_t = (rt_data.get("translation") or "").strip()
+                    rt_still_bad = (
+                        rt_data.get("needs_human")
+                        or rt_data.get("untrusted")
+                        or bool(_check_placeholders(chk, rt_t))
+                    )
+                    if not rt_still_bad:
+                        # 成功：使用新结果
+                        t = rt_t
+                        data = rt_data
+                        untrusted = False
+                        break
+                if rt_still_bad:
+                    # 方案 A：保留新结果并加入 review_queue
+                    t = (data.get("translation") or "").strip()
+
             translated_chunks.append(t)
             confidences.append(float(data.get("confidence") or 0.7))
             pending_translations.append(t)

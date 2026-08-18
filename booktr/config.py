@@ -33,6 +33,8 @@ DEFAULTS: dict[str, Any] = {
         "summary_enabled": True,  # 摘要接力开关
         "retranslate_context_chars": 1000,  # 重新翻译时前后文字符数
         "retranslate_use_summary": True,  # 重新翻译时使用页面摘要
+        "auto_retranslate": True,  # 需要 review 时自动用重翻译提示词再试
+        "auto_retranslate_attempts": 1,  # 自动重翻译尝试次数
     },
     "planner": {
         "static_first": True,

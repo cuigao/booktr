@@ -20,7 +20,9 @@
     "max_history_segments": 50,
     "summary_enabled": true,
     "retranslate_context_chars": 1000,
-    "retranslate_use_summary": true
+    "retranslate_use_summary": true,
+    "auto_retranslate": true,
+    "auto_retranslate_attempts": 1
   },
   "planner": {
     "static_first": true,
