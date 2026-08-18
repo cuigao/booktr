@@ -140,14 +140,18 @@ class LLMClient:
                     try:
                         content = data["choices"][0]["message"]["content"]
                     except (KeyError, IndexError, TypeError) as e:
+                        last_err = LLMError(f"API 响应格式异常: {e}")
                         raise LLMError(f"API 响应格式异常: {e}")
                     if content is None:
+                        last_err = LLMError("LLM 返回空内容")
                         raise LLMError("LLM 返回空内容")
                     usage = self._record(data)
                     return content, usage
                 last_err = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
             except (requests.RequestException, ValueError) as e:
                 last_err = e
+            except LLMError:
+                pass  # last_err 已在抛出前设置，进入重试循环
             delay = 2 ** attempt
             log.warning("LLM multi 调用失败(%s)，%.1fs 后重试: %s", attempt + 1, delay, last_err)
             time.sleep(delay)

@@ -302,10 +302,12 @@ def _translate_chunk_with_repair_multi(
     temperature = cfg.get("llm", "temperature", default=0.3)
     tag = f"translate_{rel.replace('/', '_')}"
 
-    resp = client.chat_multi(messages, temperature=temperature, tag=tag,
-                             task_id=task_id, context_id=context_id)
+    resp = ""
     for attempt in range(max_repair + 1):
         try:
+            if not resp:
+                resp = client.chat_multi(messages, temperature=temperature, tag=tag,
+                                         task_id=task_id, context_id=context_id)
             data = llm_mod.parse_json_response(resp)
             messages.append({"role": "assistant", "content": resp or ""})
             return {**data, "untrusted": False}
