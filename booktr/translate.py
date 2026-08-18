@@ -640,6 +640,7 @@ def translate_page(
                 conversation = [{"role": "system", "content": sysp}]
                 history_count = 0
                 pending_translations = []
+                retranslate_context = None  # 防止残留，导致下一正常段误判为重翻译段
                 context_seq += 1
                 context_id = f"ctx_{_epoch_ms()}_{page_key}_{context_seq}"
 
@@ -674,9 +675,9 @@ def translate_page(
                 rt_context = _build_retranslate_context(
                     cfg, rel, item["seg"], segs, state, site_map, plan
                 )
-                # 每次 auto-retranslate 使用独立 context_id（利于日志归组）
-                rt_context_seq = context_seq + 1
-                rt_context_id = f"ctx_{_epoch_ms()}_{page_key}_{rt_context_seq}"
+                # 每次 auto-retranslate 使用独立递增的 context_id（利于日志归组）
+                context_seq += 1
+                rt_context_id = f"ctx_{_epoch_ms()}_{page_key}_{context_seq}"
                 rt_still_bad = True
                 for _ in range(max_rt):
                     rt_sysp = prompts.build_translate_system(
