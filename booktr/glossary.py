@@ -134,6 +134,22 @@ def candidates(cfg: Config) -> list[dict]:
     return [it for it in load(cfg) if it.get("status") == "auto-candidate"]
 
 
+def add_term(cfg: Config, src: str, dst: str, category: str = "term",
+             note: str = "", author: str = "user") -> None:
+    """添加词汇表条目，并清理对应的短语记忆条目。"""
+    ok, msg = upsert(cfg, {"src": src, "dst": dst, "category": category,
+                           "note": note, "status": "confirmed"}, author=author)
+    print(f"  {src} → {dst}: {msg}")
+    # 清理短语记忆中的同名条目（词汇表优先，短语记忆旧条目无用）
+    from . import phrases as phrases_mod
+    key = util.normalize_ws(src)
+    data = phrases_mod.load(cfg)
+    if key in data:
+        del data[key]
+        phrases_mod.save(cfg, data)
+        print(f"  已清理短语记忆: {src}")
+
+
 def confirm(cfg: Config, src: str, dst: str | None = None) -> bool:
     items = load(cfg)
     changed = False

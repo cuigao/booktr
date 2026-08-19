@@ -510,6 +510,29 @@ def cmd_reset(cfg: Config, args) -> None:
     print(f"\n重置完成，下次 translate 将重译指定内容")
 
 
+def cmd_add_term(cfg: Config, args) -> None:
+    """向词汇表添加条目，并清理对应的短语记忆。"""
+    if args.file:
+        # 批量导入：从 JSON 文件读取条目列表
+        entries = util.read_json(args.file, [])
+        for e in entries:
+            src = e.get("src", "")
+            dst = e.get("dst", "")
+            if src and dst:
+                gl.add_term(cfg, src, dst,
+                            category=e.get("category", "term"),
+                            note=e.get("note", ""),
+                            author="user")
+        print(f"\n批量导入完成: {len(entries)} 条")
+    elif args.src and args.dst:
+        gl.add_term(cfg, args.src, args.dst,
+                    category=args.category or "term",
+                    note=args.note or "",
+                    author="user")
+    else:
+        print("请指定 src 和 dst，或使用 --file 批量导入")
+
+
 def cmd_qa(cfg: Config, args) -> None:
     client = _client(cfg)
     state = tr.State(cfg)
@@ -1139,6 +1162,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp = mk("extract-terms", help="从语料抽取词汇表候选")
     sp.add_argument("--interactive", action="store_true", help="交互式确认冲突")
     sp.set_defaults(func=cmd_extract_terms)
+
+    sp = mk("add-term", help="向词汇表添加条目，并清理对应短语记忆")
+    sp.add_argument("src", nargs="?", help="原文术语，如 HOME")
+    sp.add_argument("dst", nargs="?", help="译文，如 首页")
+    sp.add_argument("--category", default="term", help="类别（person/song/album/show/place/term/other）")
+    sp.add_argument("--note", default="", help="备注说明")
+    sp.add_argument("--file", default=None, help="从 JSON 文件批量导入条目列表")
+    sp.set_defaults(func=cmd_add_term)
 
     sp = mk("style-extract", help="从 style_refs 提炼风格规则")
     sp.set_defaults(func=cmd_style_extract)
