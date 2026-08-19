@@ -533,6 +533,147 @@ def cmd_add_term(cfg: Config, args) -> None:
         print("请指定 src 和 dst，或使用 --file 批量导入")
 
 
+def rebuild_translation(source: str, translation: str, lookup: dict) -> tuple[str, bool]:
+    """基于词汇表/短语记忆重建段译文。
+
+    按占位符拆分原文和译文，逐块处理：
+    - 原文文本块精确匹配词汇表 → 用 dst + 原文空白重建
+    - 原文文本块不匹配 → 照抄译文对应块
+
+    返回 (新译文, 是否有变更)。
+    """
+    import re as _re
+
+    # 拆分原文和译文为 token 序列
+    src_tokens = _re.split(r'(\[\[P\d+\]\])', source)
+    tr_tokens = _re.split(r'(\[\[P\d+\]\])', translation)
+
+    # 校验占位符顺序一致
+    src_ph = [t for t in src_tokens if _re.match(r'\[\[P\d+\]\]', t)]
+    tr_ph = [t for t in tr_tokens if _re.match(r'\[\[P\d+\]\]', t)]
+    if src_ph != tr_ph:
+        return translation, False  # 占位符不对齐，无法处理
+
+    new_translation = ""
+    src_i, tr_i = 0, 0
+
+    while src_i < len(src_tokens) or tr_i < len(tr_tokens):
+        s = src_tokens[src_i] if src_i < len(src_tokens) else None
+        t = tr_tokens[tr_i] if tr_i < len(tr_tokens) else None
+
+        # 占位符：两边照抄
+        if s and _re.match(r'\[\[P\d+\]\]', s):
+            new_translation += s
+            src_i += 1
+            tr_i += 1
+            continue
+
+        if s is None and t is None:
+            break
+
+        # 文本块：检查原文是否精确匹配词汇表
+        if s is not None:
+            s_core = s.strip()
+            if s_core in lookup:
+                # 命中：用 dst + 原文空白重建
+                s_lead_ws = s[:len(s) - len(s.lstrip())]
+                s_trail_ws = s[len(s.rstrip()):]
+                new_translation += s_lead_ws + lookup[s_core] + s_trail_ws
+                src_i += 1
+                tr_i += 1
+                continue
+
+        # 未命中：照抄译文对应块
+        if t is not None:
+            new_translation += t
+            tr_i += 1
+        # 原文块推进
+        src_i += 1
+
+    changed = new_translation != translation
+    return new_translation, changed
+
+
+def cmd_audit_terms(cfg: Config, args) -> None:
+    """审计已翻译段落，用新词汇表/短语记忆替换精确匹配的部分。"""
+    state = tr.State(cfg)
+    pages = args.pages or [rel for rel, p in state.data.get("pages", {}).items()
+                           if p.get("status") in ("done", "review")]
+
+    # 构建查找表 src -> dst
+    lookup = {}
+    for e in gl.load(cfg):
+        if e.get("read_only"):
+            lookup[e["src"]] = e["dst"]
+    from . import phrases as phrases_mod
+    for ph_src, ph_info in phrases_mod.load(cfg).items():
+        if ph_src not in lookup:
+            lookup[ph_src] = ph_info["dst"]
+
+    if not lookup:
+        print("词汇表和短语记忆为空，无需审计")
+        return
+
+    updated_count = 0
+    updated_pages = set()
+
+    for rel in pages:
+        pstate = state.page(rel)
+        segs = pstate.get("segments", {})
+
+        # 读取段缓存（获取源文本 + 同步更新译文）
+        seg_cache_path = os.path.join(cfg.get("segments_dir", default=""),
+                                      rel.replace("/", "__") + ".json")
+        seg_cache = util.read_json(seg_cache_path, []) if os.path.exists(seg_cache_path) else []
+        # 构建 seg_id -> source text 映射
+        seg_source_map = {str(item.get("id")): item.get("text", "") for item in seg_cache}
+
+        changed = False
+
+        for sid, seg_data in segs.items():
+            source = seg_source_map.get(sid, "")
+            translation = seg_data.get("translation")
+            if not source or not translation:
+                continue
+
+            new_translation, changed_seg = rebuild_translation(source, translation, lookup)
+            if not changed_seg:
+                continue
+
+            if not args.dry_run:
+                # 更新 state.json
+                seg_data["translation"] = new_translation
+                # 不更新 needs_human，留给用户 review
+
+                # 同步更新段缓存（按 id 匹配）
+                for item in seg_cache:
+                    if str(item.get("id")) == sid:
+                        item["translation"] = new_translation
+                        break
+
+                updated_count += 1
+                changed = True
+                print(f"  {rel} 段{sid}: 已更新")
+            else:
+                updated_count += 1
+                changed = True
+                print(f"  {rel} 段{sid}: 将更新")
+
+        # 写回段缓存
+        if not args.dry_run and changed:
+            util.write_json(seg_cache_path, seg_cache)
+
+    if not args.dry_run:
+        state.save()
+        if not args.no_regenerate:
+            for rel in pages:
+                success = review_mod._regenerate_page(cfg, rel)
+                if success:
+                    print(f"  已重生成: {rel}")
+
+    print(f"\n完成: {updated_count} 个段落{'将被' if args.dry_run else '已'}更新")
+
+
 def cmd_qa(cfg: Config, args) -> None:
     client = _client(cfg)
     state = tr.State(cfg)
@@ -1170,6 +1311,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--note", default="", help="备注说明")
     sp.add_argument("--file", default=None, help="从 JSON 文件批量导入条目列表")
     sp.set_defaults(func=cmd_add_term)
+
+    sp = mk("audit-terms", help="审计已翻译段落，用新词汇表/短语记忆替换精确匹配的部分")
+    sp.add_argument("pages", nargs="*", help="限定审计的页面")
+    sp.add_argument("--all", action="store_true", help="审计所有已翻译页面")
+    sp.add_argument("--dry-run", action="store_true", help="只显示不修改")
+    sp.add_argument("--no-regenerate", action="store_true", help="不重新生成 out")
+    sp.set_defaults(func=cmd_audit_terms)
 
     sp = mk("style-extract", help="从 style_refs 提炼风格规则")
     sp.set_defaults(func=cmd_style_extract)

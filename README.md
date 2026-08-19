@@ -125,6 +125,14 @@ python booktr-cli.py reset --all -y                        # 重置所有页面
 
 # 查看进度
 python booktr-cli.py status
+
+# 添加词汇表条目
+python booktr-cli.py add-term HOME 首页 --note "导航入口"
+
+# 审计已翻译段落，用新词汇表/短语记忆替换
+python booktr-cli.py audit-terms                    # 审计所有已翻译页面
+python booktr-cli.py audit-terms today/today4.html  # 审计指定页面
+python booktr-cli.py audit-terms --dry-run          # 只显示不修改
 ```
 
 `python booktr-cli.py <cmd>` 与 `python -m booktr <cmd>`（需在 `src/` 下）等效。所有子命令**幂等**、基于 `work/state.json`（相对数据根）断点续跑。
