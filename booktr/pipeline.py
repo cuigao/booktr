@@ -1249,9 +1249,114 @@ def _format_call_markdown(call_idx: int, log: dict, prev_msg_len: int) -> tuple[
     return lines, new_msg_len if not is_clean else prev_msg_len
 
 
+def _context_reason(logs: list[dict]) -> str:
+    """从 context 的日志 tag 推断该对话段的切换原因。"""
+    import re as _re
+    for l in logs:
+        tag = l.get("tag", "")
+        if "summarize_conv" in tag:
+            return "摘要接力后新对话"
+        if "repair" in tag:
+            return "repair 插入"
+        if "retranslate" in tag or "is_retranslation" in str(l.get("system", "")):
+            return "重译"
+    return ""
+
+
+def _format_assistant_content(response: str) -> list[str]:
+    """格式化 assistant 内容：合法 JSON 先列解析字段，再列原始 JSON；否则原样。"""
+    import json as _json
+    lines = []
+    parsed = None
+    if response:
+        try:
+            parsed = _json.loads(response) if response.strip().startswith("{") else None
+        except (ValueError, _json.JSONDecodeError):
+            parsed = None
+    if parsed and isinstance(parsed, dict):
+        if "translation" in parsed:
+            lines.append("译文：")
+            lines.append(str(parsed.get("translation", "")))
+            lines.append("")
+        meta = []
+        if parsed.get("confidence") is not None:
+            meta.append(f"confidence={parsed['confidence']}")
+        if parsed.get("needs_human"):
+            meta.append("needs_human")
+        if parsed.get("glossary_conflicts"):
+            meta.append(f"conflicts={parsed['glossary_conflicts']}")
+        if parsed.get("notes"):
+            meta.append(f"notes={parsed['notes']}")
+        if meta:
+            lines.append(" | ".join(meta))
+            lines.append("")
+        lines.append("```json")
+        lines.append(_json.dumps(parsed, ensure_ascii=False, indent=2))
+        lines.append("```")
+    elif response:
+        lines.append(response)
+    return lines
+
+
+def _format_appendix(task_groups: list[list[dict]]) -> list[str]:
+    """渲染全局对话序列附录（按时间顺序，含 repair/重译）。
+
+    每个 context 取 messages 最多的 log（该 context 的最终完整对话），
+    渲染其 messages 为 system/user/assistant 序列。多 context 用 --- 分隔并标注原因。
+    """
+    lines = []
+    for task_idx, task_logs in enumerate(task_groups, 1):
+        ctx_groups = _group_logs_by_context(task_logs)
+        lines.append(f"### 任务 #{task_idx}")
+        lines.append("")
+        for ctx_idx, ctx_logs in enumerate(ctx_groups, 1):
+            ctx_logs.sort(key=lambda x: x.get("ts", ""))
+            ctx_id = ctx_logs[0].get("context_id", "")
+            reason = _context_reason(ctx_logs)
+            label = f"对话段 {ctx_idx}"
+            if ctx_id:
+                label += f"（{ctx_id}）"
+            if reason:
+                label += f" — {reason}"
+            lines.append(f"#### {label}")
+            lines.append("")
+
+            # 取 messages 最多的 log（该 context 最终完整对话）
+            max_log = max(ctx_logs, key=lambda x: len(x.get("messages", [])))
+            messages = max_log.get("messages", [])
+            if messages:
+                for msg in messages:
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    lines.append(f"### {role}")
+                    if role == "assistant":
+                        lines.extend(_format_assistant_content(content))
+                    else:
+                        lines.append(content)
+                    lines.append("")
+            else:
+                # 旧日志回退：system/user/response
+                if max_log.get("system"):
+                    lines.append("### system")
+                    lines.append(max_log["system"])
+                    lines.append("")
+                if max_log.get("user"):
+                    lines.append("### user")
+                    lines.append(max_log["user"])
+                    lines.append("")
+                if max_log.get("response"):
+                    lines.append("### assistant")
+                    lines.extend(_format_assistant_content(max_log["response"]))
+                    lines.append("")
+            lines.append("---")
+            lines.append("")
+    return lines
+
+
 def export_page_log(cfg: Config, page: str, max_sessions: int | None = None,
                     output_path: str | None = None,
-                    task_id: str | None = None) -> str | None:
+                    task_id: str | None = None,
+                    no_messages: bool = False) -> str | None:
     """导出指定页面的 LLM 对话日志为 Markdown。
 
     Args:
@@ -1259,6 +1364,7 @@ def export_page_log(cfg: Config, page: str, max_sessions: int | None = None,
         max_sessions: 最多导出最近 N 个翻译任务（None=全部）
         output_path: 输出路径（None=自动）
         task_id: 指定 task_id 导出（支持前缀匹配，None=全部）
+        no_messages: 关闭末尾的完整对话序列附录（主日志不变）
 
     Returns:
         输出文件路径，无日志时返回 None
@@ -1304,6 +1410,14 @@ def export_page_log(cfg: Config, page: str, max_sessions: int | None = None,
                 call_lines, prev_msg_len = _format_call_markdown(call_idx, log, prev_msg_len)
                 lines.extend(call_lines)
 
+    # 附录：完整对话序列（按时间顺序，含 repair/重译）
+    if not no_messages:
+        lines.append("")
+        lines.append("---")
+        lines.append("## 附录：完整对话序列（按时间顺序，含 repair/重译）")
+        lines.append("")
+        lines.extend(_format_appendix(task_groups))
+
     # 写入文件
     if output_path:
         out_path = output_path
@@ -1322,7 +1436,8 @@ def cmd_export_log(cfg: Config, args) -> None:
     """导出指定页面的完整 LLM 对话日志为人类可读的 Markdown。"""
     out_path = export_page_log(cfg, args.page, max_sessions=args.sessions,
                                output_path=args.output,
-                               task_id=args.task)
+                               task_id=args.task,
+                               no_messages=args.no_messages)
     if out_path:
         print(f"对话日志已导出: {out_path}")
     else:
@@ -1465,6 +1580,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="最多导出最近 N 个翻译任务（默认全部）")
     sp.add_argument("-t", "--task", default=None,
                     help="指定 task_id 导出（支持前缀匹配）")
+    sp.add_argument("--no-messages", action="store_true",
+                    help="关闭末尾的完整对话序列附录（主日志不变）")
     sp.set_defaults(func=cmd_export_log)
 
     sp = mk("fix", help="修复无法解码的输入文件（输出到 fix 目录，不改原始文件）")
