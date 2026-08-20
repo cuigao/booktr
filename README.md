@@ -177,6 +177,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   省略号（…）、破折号（――）、智能引号（""''）保持原样。
 - **占位符**：段内内联标签（`<img>/<font>/<a>…`）转为 `[[P0]]` 占位符交给 LLM，译文必须原样保留，拼接时还原。相邻 inline 标签（含纯空白分隔）合并为单个占位符，减少 LLM 困惑。短语记忆命中后从原始 chunk 恢复占位符。
 - **解析自愈**：LLM 输出非法 JSON 时自动重试（最多 `max_repair` 次），每次携带具体错误信息让 LLM 修正；占位符丢失时触发额外 repair；兜底清理去除 `|TEXT|`/JSON 残渣。
+- **JSON 机械修复**：解析失败时按序用机械修复做后处理（`ESCAPE_VALUE_STRINGS` 值字符串转义覆盖未转义引号/裸换行，`CLOSE_ARRAY` 按已知 key 先验补全缺 `]`），成功且含 `translation` key 则附加 `repaired: true` + `repair_methods` 规范字段；仍失败才触发 LLM repair。该信息持久化到段状态（`state.json`）与段缓存（`work/segments/*.json`），并在 export-log 中标注 `⚠ 修复` 及头部汇总，便于追溯与改进修复逻辑。
 - **多轮对话翻译**：页面内所有段落共享同一对话上下文，LLM 能保持术语与风格一致性。
   - **摘要接力**：达到 `max_history_segments`（默认 50）后自动生成摘要，重建对话继续翻译。
   - **推荐译法注入**：system prompt 不含词条，仅含全局规则（全角保留、占位符、风格、输出格式）。

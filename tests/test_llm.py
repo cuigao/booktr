@@ -84,3 +84,53 @@ def test_repair_escapes_value_quotes():
     out = llm.repair_value_strings(s)
     data = json.loads(out)
     assert data["translation"] == '他说"真的"吗'
+
+
+# ── 数组括号闭合修复（CLOSE_ARRAY）────────────────────────────────────
+
+
+def test_parse_missing_array_close():
+    # notes 数组缺闭合 ]，needs_human 被吞进数组
+    resp = ('{"translation": "译文", "confidence": 0.92, "glossary_conflicts": [], '
+            '"notes": ["备注兼差", "needs_human": false}')
+    data = llm.parse_json_response(resp)
+    assert data["repaired"] is True
+    assert data["repair_methods"] == [llm.REPAIR_METHOD_ESCAPE, llm.REPAIR_METHOD_CLOSE_ARRAY]
+    assert data["needs_human"] is False
+    assert data["notes"] == ["备注兼差"]
+
+
+def test_parse_missing_close_multiline():
+    # 多行缩进 + 缺 ]（notes 数组未闭合，needs_human 被吞入）
+    resp = ('{"translation": "x", "confidence": 0.9,\n'
+            '  "notes": ["note one",\n'
+            '  "needs_human": false}')
+    data = llm.parse_json_response(resp)
+    assert data["repaired"] is True
+    assert llm.REPAIR_METHOD_CLOSE_ARRAY in data["repair_methods"]
+    assert data["needs_human"] is False
+
+
+def test_repair_array_closure_balanced_noop():
+    # 括号平衡的合法数组不触发补 ]
+    legal = '{"translation": "x", "notes": ["a", "b"], "needs_human": false}'
+    assert llm.repair_array_closure(legal) is None
+    data = llm.parse_json_response(legal)
+    assert "repaired" not in data
+
+
+def test_parse_escape_fallback_when_block_extraction_fails():
+    """_extract_balanced_json 因值内未转义引号返回 None 时，用完整文本兜底修复。"""
+    resp = ('{"translation": "收到"ＯＫ"的回复", "confidence": 0.95, '
+            '"glossary_conflicts": [], "notes": [], "needs_human": false}')
+    data = llm.parse_json_response(resp)
+    assert data["repaired"] is True
+    assert data["repair_methods"] == [llm.REPAIR_METHOD_ESCAPE]
+    assert "ＯＫ" in data["translation"]
+
+
+def test_repair_method_order_escape_then_close():
+    """方法顺序：先值转义，后补数组闭合。"""
+    resp = ('{"translation": "甲"乙", "notes": ["丙", "needs_human": false}')
+    data = llm.parse_json_response(resp)
+    assert data["repair_methods"] == [llm.REPAIR_METHOD_ESCAPE, llm.REPAIR_METHOD_CLOSE_ARRAY]

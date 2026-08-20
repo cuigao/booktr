@@ -26,6 +26,13 @@ class LLMError(RuntimeError):
 
 # JSON 机械修复方法（parse_json_response 后处理），规范字段 repair_methods 的取值。
 REPAIR_METHOD_ESCAPE = "ESCAPE_VALUE_STRINGS"  # 值字符串转义（未转义引号 / 裸换行）
+REPAIR_METHOD_CLOSE_ARRAY = "CLOSE_ARRAY"  # 数组括号闭合修复（缺 ]，已知 key 先验补全）
+
+# 数组闭合修复时用于定位"数组被提前截断"的已知结构 key（已知的先验）。
+# 这些 key 出现在数组元素结束后本应闭合数组的位置，却被 LLM 直接写成了字符串元素。
+_ARRAY_KNOWN_KEYS = (
+    "needs_human", "confidence", "glossary_conflicts", "notes", "translation",
+)
 
 
 class LLMClient:
@@ -379,6 +386,73 @@ def repair_value_strings(text: str) -> str | None:
     return "".join(out)
 
 
+def repair_array_closure(text: str) -> str | None:
+    """对数组括号不平衡（缺 `]`）做保守修复，返回修复后文本；无可补返回 None。
+
+    触发条件：数组未闭合（`[` 数 > `]` 数），且**数组内部**（括号深度 ≥1）最后一个
+    元素结束后紧跟一个已知结构 key（needs_human/confidence/glossary_conflicts/notes/
+    translation）。说明 LLM 把该 key 误写成了数组元素，应在它之前补 `]` 闭合数组。
+
+    只匹配"处于数组深度 ≥1 且恰好跳回对象层"的位置，避免把对象层正常
+    `translation 值 → confidence key` 的过渡误判为数组缺 `]`。
+
+    已知缺陷（保守门控）：仅凭括号不平衡 + 已知 key 先验判定。若某数组确实未闭合，
+    但其最后一个元素值恰好是已知 key 名（如 notes 里正常写了 "notes"），可能误补。
+    该概率极低，当前接受；后续可加更严格的结构判定。
+    """
+    import re as _re
+
+    if text.count("[") <= text.count("]"):
+        return None
+    # 状态机：跟踪数组深度；在数组内（depth>=1）检测 `", <ws> "KNOWN_KEY"` 的结束引号位置
+    keys = set(_ARRAY_KNOWN_KEYS)
+    n = len(text)
+    i = 0
+    arr_depth = 0
+    in_str = False
+    esc = False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                # 字符串结束：判断这是否是"数组元素结束引号"
+                in_str = False
+                j = i + 1
+                while j < n and text[j].isspace():
+                    j += 1
+                if j < n and text[j] == ",":
+                    # 逗号后可能是下一个数组元素字符串，或已知 key（结构）
+                    k = j + 1
+                    while k < n and text[k].isspace():
+                        k += 1
+                    if k < n and text[k] == '"':
+                        # 提取引号内的 key 名
+                        k2 = k + 1
+                        start_key = k2
+                        while k2 < n and text[k2] != '"':
+                            k2 += 1
+                        key_name = text[start_key:k2]
+                        if arr_depth >= 1 and key_name in keys:
+                            # 数组内元素结束 → 已知 key：补 ] 于逗号后
+                            close_pos = j  # 逗号位置
+                            return text[:close_pos] + "]" + text[close_pos:]
+            i += 1
+            continue
+        # 结构层
+        if ch == '"':
+            in_str = True
+        elif ch == "[":
+            arr_depth += 1
+        elif ch == "]":
+            arr_depth -= 1
+        i += 1
+    return None
+
+
 def parse_json_response(text: str) -> dict:
     """从 LLM 输出中提取 JSON（容忍 markdown 围栏与前后缀）。
 
@@ -403,17 +477,36 @@ def parse_json_response(text: str) -> dict:
         try:
             data = json.loads(block)
             if isinstance(data, dict):
-                return data
+                return data  # 合法 JSON，无修复标记
         except json.JSONDecodeError:
             pass
-        # 机械修复：值字符串转义
-        repaired = repair_value_strings(block)
-        try:
-            data = json.loads(repaired)
-            if isinstance(data, dict) and "translation" in data:
-                data["repaired"] = True
-                data["repair_methods"] = [REPAIR_METHOD_ESCAPE]
-                return data
-        except json.JSONDecodeError:
-            pass
+    # 修复候选：优先 block；block 提取失败（如值内未转义引号使 in_str 翻转）则用完整文本
+    candidates = [block] if block else [text]
+    for base in candidates:
+        # 方法1：值字符串转义（未转义引号/裸换行）
+        data = _try_repair(base, lambda s: repair_value_strings(s),
+                           [REPAIR_METHOD_ESCAPE])
+        if data is not None:
+            return data
+        # 方法2：值转义后再补数组闭合 ]（Case1/2：需先转义值内引号才能看清数组边界）
+        data = _try_repair(base, lambda s: repair_array_closure(repair_value_strings(s)),
+                           [REPAIR_METHOD_ESCAPE, REPAIR_METHOD_CLOSE_ARRAY])
+        if data is not None:
+            return data
     raise LLMError(f"无法解析 LLM JSON 输出: {text[:300]}")
+
+
+def _try_repair(base: str, repair_fn, methods: list[str]) -> dict | None:
+    """对 base 应用修复函数，成功且含 translation key 则附加修复规范字段返回。"""
+    repaired = repair_fn(base)
+    if not repaired:
+        return None
+    try:
+        data = json.loads(repaired)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(data, dict) and "translation" in data:
+        data["repaired"] = True
+        data["repair_methods"] = list(methods)
+        return data
+    return None
