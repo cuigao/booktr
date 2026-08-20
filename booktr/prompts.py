@@ -124,7 +124,8 @@ def build_translate_user(
     term_hints: str = "",
 ) -> str:
     tgt = cfg.get("lang", "target", default="zh-Hans")
-    parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt}。"]
+    tgt_name = lang_name(tgt)
+    parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt_name}。"]
     if term_hints:
         parts.append(term_hints)
     if page_ctx:
@@ -160,7 +161,8 @@ def build_translate_user_first(
 ) -> str:
     """多轮对话首条消息：携带 page_ctx + 可选的前文翻译摘要 + 推荐译法。"""
     tgt = cfg.get("lang", "target", default="zh-Hans")
-    parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt}。"]
+    tgt_name = lang_name(tgt)
+    parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt_name}。"]
     if term_hints:
         parts.append(term_hints)
     if summary:
@@ -194,7 +196,8 @@ def build_translate_user_subsequent(cfg, src_text: str, term_hints: str = "") ->
 def build_retranslate_user(cfg, src_text: str, context: dict) -> str:
     """重新翻译时的用户消息（带上下文窗口）。"""
     tgt = cfg.get("lang", "target", default="zh-Hans")
-    parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt}。"]
+    tgt_name = lang_name(tgt)
+    parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt_name}。"]
 
     if context.get("page_ctx"):
         parts.append(f"## 页面上下文\n{context['page_ctx']}")
@@ -252,8 +255,9 @@ def build_glossary_extract_user(text: str) -> str:
 
 def build_summary_system(cfg) -> str:
     tgt = cfg.get("lang", "target", default="zh-Hans")
+    tgt_name = lang_name(tgt)
     return (
-        f"你是一名网站内容分析师。请用{tgt}概括给定页面内容，用于后续翻译的上下文参考。\n"
+        f"你是一名网站内容分析师。请用{tgt_name}概括给定页面内容，用于后续翻译的上下文参考。\n"
         "输出 JSON：{\"summary\": \"不超过200字的概要\", "
         "\"entities\": [\"出现的重要专名/人名/事件\"], "
         "\"content_type\": \"日记|介绍|推荐|通告|索引|其他\"}\n"
@@ -267,11 +271,12 @@ def build_summary_user(src_text: str) -> str:
 
 def build_style_guide_system(cfg) -> str:
     tgt = cfg.get("lang", "target", default="zh-Hans")
+    tgt_name = lang_name(tgt)
     return (
-        f"你是一名翻译风格分析师。下面给出若干组\"{_srcname(cfg)}原文 — {tgt}参考译文\"对照。\n"
+        f"你是一名翻译风格分析师。下面给出若干组\"{_srcname(cfg)}原文 — {tgt_name}参考译文\"对照。\n"
         "请提炼出稳定、可复用的翻译风格规则（人称与称谓、语气、句式长短倾向、"
         "术语处理、句末语气词、标点习惯等），供后续翻译参考。\n"
-        f"输出为纯文本规则列表（每行一条，使用{tgt}），不要 JSON。"
+        f"输出为纯文本规则列表（每行一条，使用{tgt_name}），不要 JSON。"
     )
 
 
@@ -307,10 +312,11 @@ def build_qa_user(src_text: str, dst_text: str, glossary: list[dict]) -> str:
 
 def build_translator_note_system(cfg) -> str:
     tgt = cfg.get("lang", "target", default="zh-Hans")
+    tgt_name = lang_name(tgt)
     return (
         f"你是网站研究的译者注作者。基于给定页面的译文与全站摘要，发现值得向读者交代的"
         f"前后文关联、创作背景、历史考据或趣味细节。\n"
-        f"输出 JSON：{{\"notes\": [{{\"content\": \"{tgt}的译者注内容\", "
+        f"输出 JSON：{{\"notes\": [{{\"content\": \"{tgt_name}的译者注内容\", "
         f"\"related_pages\": [\"关联页面路径\"], \"type\": "
         f"\"前文呼应|创作背景|历史考据|趣味细节|其他\"}}]}}\n"
         "只输出 JSON。没有可写的就返回空数组。"
@@ -327,6 +333,7 @@ def build_translator_note_user(page_rel: str, translated: str, summaries: dict) 
 
 def build_survey_system(cfg) -> str:
     tgt = cfg.get("lang", "target", default="zh-Hans")
+    tgt_name = lang_name(tgt)
     return (
         f"你是网站结构分析师。分析全站页面清单与标题，判断每页的主题、类型与页面间可能存在的"
         f"语义关联（即使没有显式超链接）。\n"
@@ -334,7 +341,7 @@ def build_survey_system(cfg) -> str:
         f"\"content_type\": \"...\", \"priority\": 0到1}}], "
         f"\"relations\": [{{\"from\": \"页面A\", \"to\": \"页面B\", "
         f"\"reason\": \"关联原因\"}}]}}\n"
-        f"全部用{tgt}表达。只输出 JSON。"
+        f"全部用{tgt_name}表达。只输出 JSON。"
     )
 
 
