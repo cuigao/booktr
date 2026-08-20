@@ -438,9 +438,8 @@ def translate_page(
     max_history = cfg.get("llm", "max_history_segments", default=50)
     summary_on = cfg.get("llm", "summary_enabled", default=True)
 
-    # 构建 system prompt（整页共享，含全页词汇表）
-    all_gl = gl.load(cfg)
-    sysp = prompts.build_translate_system(cfg, all_gl, guide, user_rules, focus)
+    # 构建 system prompt（整页共享，仅含全局规则；词条推荐译法注入 user prompt）
+    sysp = prompts.build_translate_system(cfg, [], guide, user_rules, focus)
 
     result = {"status": "done", "skipped": False, "segments_total": len(segs), "review_count": 0}
 
@@ -524,19 +523,14 @@ def translate_page(
                 history_count += 1
                 continue
 
-            # 3. 注入相关条目 + LLM 翻译
+            # 3. 检索相关条目 + 构建推荐译法（注入 user prompt，而非 system）
             gl_items = gl.relevant(cfg, chk)  # 词汇表相关（含 read_only）
             ph_items = phrases_mod.relevant(cfg, chk)  # 短语记忆相关
             all_injections = gl_items + ph_items
+            term_hints = prompts.format_term_hints(all_injections) if all_injections else ""
 
-            # 更新 system prompt 中的注入内容（重新翻译时添加重翻译规则）
+            # 重新翻译模式标记（system prompt 仅追加重翻译规则，不含词条）
             is_retranslation = retranslate_context is not None
-            if all_injections or is_retranslation:
-                sysp = prompts.build_translate_system(
-                    cfg, all_injections, guide, user_rules, focus,
-                    is_retranslation=is_retranslation
-                )
-                conversation[0] = {"role": "system", "content": sysp}
 
             tm_hits = tm_mod.lookup(cfg, chk) if tm_on else []
             ex_refs = styles_mod.retrieve_exemplars(cfg, chk) if exemplar_on else []
@@ -555,9 +549,10 @@ def translate_page(
                     usr = prompts.build_translate_user_first(
                         cfg, chk, page_ctx, chk_prior, ex_refs, tm_hits,
                         summary=conversation_summary,
+                        term_hints=term_hints,
                     )
             else:
-                usr = prompts.build_translate_user_subsequent(cfg, chk)
+                usr = prompts.build_translate_user_subsequent(cfg, chk, term_hints=term_hints)
 
             # 注入短语记忆跳过的翻译到待翻译文本之前
             if skipped_phrases:
@@ -689,7 +684,7 @@ def translate_page(
                 rt_still_bad = True
                 for _ in range(max_rt):
                     rt_sysp = prompts.build_translate_system(
-                        cfg, item["all_injections"], guide, user_rules, focus,
+                        cfg, [], guide, user_rules, focus,
                         is_retranslation=True
                     )
                     rt_conv = [{"role": "system", "content": rt_sysp}]

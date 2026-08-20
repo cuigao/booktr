@@ -53,15 +53,19 @@ def lookup(cfg: Config, text: str) -> str | None:
 
 
 def relevant(cfg: Config, text: str, limit: int = 10) -> list[dict]:
-    """返回与给定文本相关的短语记忆条目（子串匹配）。"""
+    """返回与给定文本相关的短语记忆条目（宽松子串匹配，忽略大小写/空白）。"""
     data = load(cfg)
     if not data:
         return []
+    norm_text = util.normalize_ws(text).lower()
     scored = []
     for src, info in data.items():
         if not src:
             continue
-        if src in text or text in src:
+        norm_src = util.normalize_ws(src).lower()
+        if not norm_src:
+            continue
+        if norm_src in norm_text:
             scored.append({"src": src, "dst": info["dst"],
                            "usage": info.get("usage", 0), "source": "phrase"})
     scored.sort(key=lambda x: x["usage"], reverse=True)

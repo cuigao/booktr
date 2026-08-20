@@ -97,17 +97,26 @@ def merge_candidates(cfg: Config, candidates: list[dict]) -> list[dict]:
     return conflicts
 
 
+def _normalize_match(text: str) -> str:
+    """宽松匹配归一化：去空白 + 小写。"""
+    return util.normalize_ws(text).lower()
+
+
 def relevant(cfg: Config, text: str, limit: int = 30) -> list[dict]:
-    """返回与给定文本相关的词汇表条目（按出现次数与长度打分）。"""
+    """返回与给定文本相关的词汇表条目（宽松子串匹配，忽略大小写/空白）。"""
     items = load(cfg)
     if not items:
         return []
+    norm_text = _normalize_match(text)
     scored = []
     for it in items:
         src = it.get("src", "")
         if not src:
             continue
-        cnt = len(re.findall(re.escape(src), text))
+        norm_src = _normalize_match(src)
+        if not norm_src:
+            continue
+        cnt = norm_text.count(norm_src)
         if cnt > 0:
             scored.append((cnt * len(src), it))
     scored.sort(key=lambda x: x[0], reverse=True)

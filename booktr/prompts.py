@@ -73,25 +73,6 @@ def build_translate_system(
         "- 译文中必须保留原文的所有 [[Px]] 占位符（如 [[P0]]、[[P1]]），"
         "它们是 HTML 标签的替代标记，翻译后需原样还原",
     ]
-    if glossary:
-        gl_lines = []
-        for g in glossary:
-            src = g.get("src", "")
-            dst = g.get("dst", "")
-            source = g.get("source", "")
-            if source == "phrase":
-                # 短语记忆条目
-                gl_lines.append(f"- {src} → {dst} [参考译法]")
-            elif g.get("read_only"):
-                # 词汇表 confirmed 条目
-                note = f"（{g.get('note', '')}）" if g.get("note") else ""
-                gl_lines.append(f"- {src} → {dst}{note} [固定译法]")
-            else:
-                # 词汇表 auto-candidate 条目
-                note = f"（{g.get('note', '')}）" if g.get("note") else ""
-                cat = f" [{g.get('category', '')}]" if g.get("category") else ""
-                gl_lines.append(f"- {src} → {dst}{note}{cat}")
-        parts.append("## 词汇表（必须遵循，翻译专名时优先使用）\n" + "\n".join(gl_lines))
     if style_guide:
         parts.append(f"## 风格指南\n{style_guide}")
     if focus:
@@ -109,6 +90,24 @@ def build_translate_system(
     return "\n\n".join(parts)
 
 
+def format_term_hints(items: list[dict]) -> str:
+    """将词汇表/短语记忆条目格式化为 user prompt 中的推荐译法。
+
+    词汇表和短语记忆统一提示为"推荐翻译译文"，由 LLM 自行裁定在长句中的用法。
+    """
+    if not items:
+        return ""
+    lines = []
+    for it in items:
+        src = it.get("src", "")
+        dst = it.get("dst", "")
+        if src and dst:
+            lines.append(f"- {src} → {dst}")
+    if not lines:
+        return ""
+    return "## 推荐翻译译文（供参考，请结合上下文采用合适的译法）\n" + "\n".join(lines)
+
+
 def build_translate_user(
     cfg,
     src_text: str,
@@ -116,9 +115,12 @@ def build_translate_user(
     prior_ctx: str,
     exemplars: list[dict],
     tm_hits: list[dict],
+    term_hints: str = "",
 ) -> str:
     tgt = cfg.get("lang", "target", default="zh-Hans")
     parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt}。"]
+    if term_hints:
+        parts.append(term_hints)
     if page_ctx:
         parts.append(f"## 当前页面上下文\n{page_ctx}")
     if prior_ctx:
@@ -148,10 +150,13 @@ def build_translate_user_first(
     exemplars: list[dict],
     tm_hits: list[dict],
     summary: str = "",
+    term_hints: str = "",
 ) -> str:
-    """多轮对话首条消息：携带 page_ctx + 可选的前文翻译摘要。"""
+    """多轮对话首条消息：携带 page_ctx + 可选的前文翻译摘要 + 推荐译法。"""
     tgt = cfg.get("lang", "target", default="zh-Hans")
     parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt}。"]
+    if term_hints:
+        parts.append(term_hints)
     if summary:
         parts.append(f"## 前文翻译摘要（保持术语与风格一致）\n{summary}")
     if page_ctx:
@@ -171,9 +176,13 @@ def build_translate_user_first(
     return "\n\n".join(parts)
 
 
-def build_translate_user_subsequent(cfg, src_text: str) -> str:
-    """多轮对话后续消息：仅携带待翻译文本。"""
-    return f"### 待翻译文本\n\n{src_text}"
+def build_translate_user_subsequent(cfg, src_text: str, term_hints: str = "") -> str:
+    """多轮对话后续消息：携带待翻译文本 + 可选推荐译法。"""
+    parts = []
+    if term_hints:
+        parts.append(term_hints)
+    parts.append(f"### 待翻译文本\n\n{src_text}")
+    return "\n\n".join(parts)
 
 
 def build_retranslate_user(cfg, src_text: str, context: dict) -> str:
