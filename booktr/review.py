@@ -135,6 +135,7 @@ def interactive_review(cfg: Config, prompt: str = None, max_items: int = 0) -> i
                 pstate["status"] = STATUS["pending"]
             if it["page"] in state.data.get("done_pages", []):
                 state.data["done_pages"].remove(it["page"])
+            state.save()  # 立即持久化，避免被后续统一保存覆盖丢失
             changed_pages.add(it["page"])
         elif act == "s":
             it["status"] = "skipped"
