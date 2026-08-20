@@ -24,6 +24,10 @@ class LLMError(RuntimeError):
     pass
 
 
+# JSON 机械修复方法（parse_json_response 后处理），规范字段 repair_methods 的取值。
+REPAIR_METHOD_ESCAPE = "ESCAPE_VALUE_STRINGS"  # 值字符串转义（未转义引号 / 裸换行）
+
+
 class LLMClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -319,11 +323,69 @@ def _extract_balanced_json(text: str) -> str | None:
     return None
 
 
+def repair_value_strings(text: str) -> str | None:
+    """对已知 key 值字符串做机械转义修复，修复后重新解析失败返回 None。
+
+    覆盖两类常见 LLM JSON 错误：
+    - 字符串值内未转义的 `"`（93%）
+    - 字符串值内裸换行 / 控制字符（7%）
+
+    单遍状态机：只对"值字符串内部"的裸引号/控制字符转义，结构层不变。
+    对已合法 JSON 近似恒等（合法 JSON 的值内不会出现后跟文本的裸引号）。
+    """
+    out = []
+    i = 0
+    n = len(text)
+    in_str = False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if ch == "\\":
+                out.append(ch)
+                if i + 1 < n:
+                    out.append(text[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if ch == '"':
+                # 看下一非空白字符判断是否结束引号
+                j = i + 1
+                while j < n and text[j].isspace():
+                    j += 1
+                nxt = text[j] if j < n else ""
+                if nxt in (",", ":", "}", "]", ""):
+                    out.append(ch)  # 结构结束引号，保留并退出字符串
+                    in_str = False
+                else:
+                    out.append("\\\"")  # 值内裸引号，转义
+                i += 1
+                continue
+            if ord(ch) < 0x20:
+                out.append("\\n")  # 裸控制字符 → 转义为 \n
+                i += 1
+                continue
+            out.append(ch)
+            i += 1
+            continue
+        # 结构层
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def parse_json_response(text: str) -> dict:
     """从 LLM 输出中提取 JSON（容忍 markdown 围栏与前后缀）。
 
     用平衡花括号匹配提取完整 JSON 对象，避免抓到半截/嵌套错块。
-    解析失败抛 LLMError（调用方据此自愈重试）。
+    解析失败时先做值字符串机械修复（repair_value_strings），
+    修复成功且含 translation key 则附加 repaired/repair_methods 规范字段；
+    修复也失败则抛 LLMError（调用方据此自愈重试）。
     """
     if text is None:
         raise LLMError("LLM 响应为空")
@@ -341,6 +403,16 @@ def parse_json_response(text: str) -> dict:
         try:
             data = json.loads(block)
             if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+        # 机械修复：值字符串转义
+        repaired = repair_value_strings(block)
+        try:
+            data = json.loads(repaired)
+            if isinstance(data, dict) and "translation" in data:
+                data["repaired"] = True
+                data["repair_methods"] = [REPAIR_METHOD_ESCAPE]
                 return data
         except json.JSONDecodeError:
             pass

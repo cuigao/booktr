@@ -1169,12 +1169,18 @@ def _format_call_markdown(call_idx: int, log: dict, prev_msg_len: int) -> tuple[
     is_repair = "repair" in tag
     is_clean = ok and not is_repair
     parsed = None
-    if is_clean and response:
-        try:
-            parsed = json.loads(response) if response.startswith("{") else None
-            is_clean = parsed is not None and "translation" in parsed
-        except (json.JSONDecodeError, ValueError):
-            is_clean = False
+    # 优先用日志已存的 parsed（可能含机械修复信息），否则裸解析
+    stored_parsed = log.get("parsed")
+    if is_clean and (stored_parsed or response):
+        if isinstance(stored_parsed, dict) and "translation" in stored_parsed:
+            parsed = stored_parsed
+            is_clean = True
+        elif response:
+            try:
+                parsed = json.loads(response) if response.startswith("{") else None
+                is_clean = parsed is not None and "translation" in parsed
+            except (json.JSONDecodeError, ValueError):
+                is_clean = False
 
     if is_clean and parsed:
         # ═══ Clean 模式：原文/译文 + JSON ═══
@@ -1182,8 +1188,12 @@ def _format_call_markdown(call_idx: int, log: dict, prev_msg_len: int) -> tuple[
         translation = parsed.get("translation", "")
         confidence = parsed.get("confidence")
         conf_str = f" | conf={confidence:.2f}" if confidence is not None else ""
+        repaired_flag = ""
+        if parsed.get("repaired"):
+            methods = "、".join(parsed.get("repair_methods", []) or [])
+            repaired_flag = f" | ⚠ 修复（{methods}）"
 
-        lines.append(f"### 原文{conf_str}")
+        lines.append(f"### 原文{conf_str}{repaired_flag}")
         lines.append("---")
         lines.append(src_text)
         lines.append("")
@@ -1263,38 +1273,56 @@ def _context_reason(logs: list[dict]) -> str:
     return ""
 
 
-def _format_assistant_content(response: str) -> list[str]:
-    """格式化 assistant 内容：合法 JSON 先列解析字段，再列原始 JSON；否则原样。"""
+def _format_assistant_content(response: str, parsed: dict | None = None) -> list[str]:
+    """格式化 assistant 内容（附录用）。
+
+    - 若原始响应非法 JSON 但可机械修复：列修复译文 + ⚠修复标注，再列原始 JSON（未修复原文）。
+    - 原始响应合法 JSON：列译文 + 格式化 JSON。
+    - 完全无法解析：纯文本原样展示。
+    """
     import json as _json
+    from . import llm as _llm
     lines = []
-    parsed = None
-    if response:
+    fixed = None
+    if parsed and isinstance(parsed, dict) and "translation" in parsed:
+        fixed = parsed
+    elif response:
         try:
-            parsed = _json.loads(response) if response.strip().startswith("{") else None
-        except (ValueError, _json.JSONDecodeError):
-            parsed = None
-    if parsed and isinstance(parsed, dict):
-        if "translation" in parsed:
+            fixed = _llm.parse_json_response(response)  # 含机械修复
+        except _llm.LLMError:
+            fixed = None
+    if fixed and "translation" in fixed:
+        repaired = fixed.get("repaired")
+        if repaired:
+            methods = "、".join(fixed.get("repair_methods", []) or [])
+            lines.append(f"译文（⚠ 修复 {methods}）：")
+        else:
             lines.append("译文：")
-            lines.append(str(parsed.get("translation", "")))
-            lines.append("")
+        lines.append(str(fixed.get("translation", "")))
+        lines.append("")
         meta = []
-        if parsed.get("confidence") is not None:
-            meta.append(f"confidence={parsed['confidence']}")
-        if parsed.get("needs_human"):
+        if fixed.get("confidence") is not None:
+            meta.append(f"confidence={fixed['confidence']}")
+        if fixed.get("needs_human"):
             meta.append("needs_human")
-        if parsed.get("glossary_conflicts"):
-            meta.append(f"conflicts={parsed['glossary_conflicts']}")
-        if parsed.get("notes"):
-            meta.append(f"notes={parsed['notes']}")
         if meta:
             lines.append(" | ".join(meta))
             lines.append("")
-        lines.append("```json")
-        lines.append(_json.dumps(parsed, ensure_ascii=False, indent=2))
-        lines.append("```")
-    elif response:
-        lines.append(response)
+    # 原始响应（完整未更改，便于检视）
+    if response:
+        lines.append("原始响应：")
+        raw_ok = False
+        try:
+            raw_data = _json.loads(response) if response.strip().startswith("{") else None
+            raw_ok = isinstance(raw_data, dict)
+        except (ValueError, _json.JSONDecodeError):
+            raw_ok = False
+        if raw_ok:
+            lines.append("```json")
+            lines.append(_json.dumps(raw_data, ensure_ascii=False, indent=2))
+            lines.append("```")
+        else:
+            lines.append(response)  # 非法 JSON（如未转义引号）→ 纯文本原样
     return lines
 
 
@@ -1383,11 +1411,20 @@ def export_page_log(cfg: Config, page: str, max_sessions: int | None = None,
     if max_sessions and len(task_groups) > max_sessions:
         task_groups = task_groups[-max_sessions:]
 
+    # 统计机械修复的调用
+    repaired_calls = sum(
+        1 for l in all_logs
+        if isinstance(l.get("parsed"), dict) and l["parsed"].get("repaired")
+    )
+
     lines = [
         f"# LLM 对话日志：{page}",
         f"共 {len(task_groups)} 次翻译任务，{len(all_logs)} 条调用记录",
         "",
     ]
+    if repaired_calls:
+        lines.append(f"> 其中 {repaired_calls} 条调用经过机械修复（⚠ 修复），见各调用标注。")
+        lines.append("")
 
     for task_idx, task_logs in enumerate(task_groups, 1):
         task_id = task_logs[0].get("task_id", "")

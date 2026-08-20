@@ -36,6 +36,8 @@ class Segment:
     flags: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     source_text: str = ""  # 未替换占位符的原文（用于溯源）
+    repaired: bool = False  # 该段经过 JSON 机械修复
+    repair_methods: list[str] = field(default_factory=list)  # 修复方法（可追溯）
 
     def to_dict(self) -> dict:
         return asdict(self)

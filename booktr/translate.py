@@ -485,6 +485,8 @@ def translate_page(
         untrusted = False
         collected_notes = []
         skipped_phrases = []  # 短语记忆跳过的翻译，注入到下一条 user message
+        seg_repaired = False
+        seg_repair_methods: list[str] = []
 
         # 重新翻译模式：构建上下文窗口 + 新对话（仅 review 删除的段）
         retranslate_context = None
@@ -593,12 +595,19 @@ def translate_page(
                     "translated_chunks": translated_chunks,
                     "confidences": confidences,
                     "all_injections": all_injections,
+                    "repair_methods": list(seg_repair_methods),
+                    "repaired": seg_repaired,
                 })
 
             translated_chunks.append(t)
             confidences.append(float(data.get("confidence") or 0.7))
             pending_translations.append(t)
             history_count += 1
+            if data.get("repaired"):
+                seg_repaired = True
+                for mth in data.get("repair_methods") or []:
+                    if mth not in seg_repair_methods:
+                        seg_repair_methods.append(mth)
             _ev("chunk_done", {"sid": sid, "chunk_idx": len(translated_chunks),
                                "chunks_total": len(chunks), "confidence": data.get("confidence", 0.7),
                                "needs_human": data.get("needs_human", False),
@@ -654,15 +663,20 @@ def translate_page(
         seg.translation = translation
         seg.confidence = confidence
         seg.needs_human = needs_human
+        seg.repaired = seg_repaired
+        seg.repair_methods = list(seg_repair_methods)
         for note in collected_notes:
             notes_mod.add(cfg, rel, seg.id, seg.text[:500], note, kind="翻译说明", created_by="llm")
 
-        pstate.setdefault("segments", {})[sid] = {
+        seg_state = pstate.setdefault("segments", {})[sid] = {
             "translation": translation,
             "confidence": confidence,
             "needs_human": needs_human,
             "untrusted": untrusted,
         }
+        if seg_repaired:
+            seg_state["repaired"] = True
+            seg_state["repair_methods"] = list(seg_repair_methods)
         if needs_human:
             result["review_count"] += 1
             pstate["status"] = STATUS["review"]
@@ -707,6 +721,12 @@ def translate_page(
                         # 成功：替换该 chunk 译文 + confidence
                         item["translated_chunks"][item["chunk_idx"]] = rt_t
                         item["confidences"][item["chunk_idx"]] = float(rt_data.get("confidence") or 0.9)
+                        # 记录 auto-retranslate 结果的机械修复
+                        if rt_data.get("repaired"):
+                            item["repaired"] = True
+                            for mth in rt_data.get("repair_methods") or []:
+                                if mth not in item["repair_methods"]:
+                                    item["repair_methods"].append(mth)
                         # 清理该段已入队的 glossary_conflict 条目（重翻译解决了冲突）
                         review_queue[:] = [
                             rq for rq in review_queue
@@ -746,9 +766,14 @@ def translate_page(
             seg = item["seg"]
             seg.translation = "".join(item["translated_chunks"])
             seg.confidence = min(item["confidences"]) if item["confidences"] else None
+            seg.repaired = item.get("repaired", False)
+            seg.repair_methods = list(item.get("repair_methods", []))
             seg_state = pstate.setdefault("segments", {})[sid]
             seg_state["translation"] = seg.translation
             seg_state["confidence"] = seg.confidence
+            if seg.repaired:
+                seg_state["repaired"] = True
+                seg_state["repair_methods"] = list(seg.repair_methods)
             if sid not in seg_failed:
                 # 该段所有 flagged chunk 均成功
                 seg_state["needs_human"] = False

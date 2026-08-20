@@ -138,6 +138,29 @@ def test_translate_page_placeholder_repair(tmp_cfg, tmp_path):
     assert fake.calls > 0
 
 
+def test_translate_page_persists_repaired(tmp_cfg, tmp_path):
+    import json as _json
+    write_sample_site(tmp_path)
+    # 返回含未转义引号的坏 JSON → 触发机械修复
+    bad_resp = ('{"translation": "他说\u201c真棒\u201d然后说"真的"走了", '
+                '"confidence": 0.9, "glossary_conflicts": [], '
+                '"notes": [], "needs_human": false}')
+    fake = FakeLLM(responder=lambda u: bad_resp)
+    state = tr.State(tmp_cfg)
+
+    tr.translate_page(tmp_cfg, fake, "page1.html", state, {}, {}, [])
+
+    # 段状态持久化了 repaired
+    st = tr.State(tmp_cfg)
+    found = False
+    for sid, seg in st.page("page1.html").get("segments", {}).items():
+        if seg.get("repaired"):
+            assert seg.get("repair_methods") == ["ESCAPE_VALUE_STRINGS"]
+            found = True
+            break
+    assert found
+
+
 def _extract_identity(user):
     from conftest import _extract_text
     return _extract_text(user)

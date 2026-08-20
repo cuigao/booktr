@@ -39,7 +39,20 @@ def test_assistant_json_parsed_then_raw():
 
 def test_assistant_non_json_raw():
     lines = _format_assistant_content("纯文本响应")
-    assert lines == ["纯文本响应"]
+    assert "原始响应：" in lines
+    assert "纯文本响应" in lines
+
+
+def test_assistant_content_repair_shows_fixed_and_raw():
+    # 未转义引号的坏 JSON：显示修复译文 + 原始未修复响应
+    bad = '{"translation": "他说\u201c真棒\u201d然后说"真的"走了", "confidence": 0.9, "glossary_conflicts": [], "notes": [], "needs_human": false}'
+    lines = _format_assistant_content(bad)
+    text = "\n".join(lines)
+    assert "译文（⚠ 修复 ESCAPE_VALUE_STRINGS）：" in text
+    assert "然后说\"真的\"走了" in text  # 修复后译文保留引号（未删除）
+    assert "原始响应：" in text
+    # 原始非法 JSON 以纯文本原样展示
+    assert '说"真的"走了' in text
 
 
 # ── _format_appendix ───────────────────────────────────────────────────
