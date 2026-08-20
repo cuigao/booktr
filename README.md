@@ -147,7 +147,7 @@ python booktr-cli.py audit-terms --dry-run          # 只显示不修改
   - `source_dir` 站点镜像目录（如 `love.life.coocan.jp`，相对数据根；**或填完整绝对路径指向 src 之外**）
   - `output_dir` 输出镜像目录（默认 `out`）
   - `work_dir` 中间数据目录（默认 `work`）
-  - `lang.source/target` 源/目标语言代码（默认 `ja` → `zh-Hans`）
+  - `lang.source/target` 源/目标语言代码（默认 `ja` → `zh-Hans`）；所有 prompt 通过 `lang_name()` 映射为人类可读名称（`zh-Hans` → "简体中文"），配置代码与提示词一致
   - `llm.provider`：`mock`（离线测试）或 `openai-compatible`（真实 API）
   - `llm.base_url/model/api_key_env`：OpenAI 兼容服务接入参数
   - `llm.max_repair`：解析失败自愈重试次数（默认 3）
@@ -173,7 +173,11 @@ python booktr-cli.py audit-terms --dry-run          # 只显示不修改
 - **解析自愈**：LLM 输出非法 JSON 时自动重试（最多 `max_repair` 次），每次携带具体错误信息让 LLM 修正；占位符丢失时触发额外 repair；兜底清理去除 `|TEXT|`/JSON 残渣。
 - **多轮对话翻译**：页面内所有段落共享同一对话上下文，LLM 能保持术语与风格一致性。
   - **摘要接力**：达到 `max_history_segments`（默认 50）后自动生成摘要，重建对话继续翻译。
-  - **短语记忆注入**：被短语记忆跳过的翻译结果注入到下一条 user message，保持 LLM 上下文。
+  - **推荐译法注入**：system prompt 不含词条，仅含全局规则（全角保留、占位符、风格、输出格式）。
+    词汇表/短语记忆词条在翻译时经宽松匹配（忽略大小写/空白）检索当前 chunk 中出现者，
+    注入到**该 chunk 的 user message** 作为"推荐翻译译文"，由 LLM 自行裁定在长句中的用法。
+    有 note 的条目标注使用场景（如「导航入口」），避免将 HOME 等词在其他语境误翻译；
+    短语型内容（短 chunk 精确匹配）已通过机械替换实现，无需 LLM。
 - **重新翻译**：删除 review 条目后，该段落标记为 pending，下次 translate 时自动重新翻译。
   - **上下文窗口**：重新翻译时提供前文/后文已翻译内容（总 `retranslate_context_chars`，每侧一半），让 LLM 看到完整的"上-中-下"结构。
   - **页面摘要**：注入页面摘要，提供整体上下文。
@@ -200,17 +204,29 @@ python booktr-cli.py audit-terms --dry-run          # 只显示不修改
 
 | 工具 | 说明 | 配置 |
 |---|---|---|
-| 词汇表 | 人工预置 + `extract-terms` LLM 自动抽取候选（需确认）；confirmed 条目默认 `read_only=true`，机械替换时跳过 LLM | `glossary.path` |
+| 词汇表 | 人工预置 + `extract-terms` LLM 自动抽取候选（需确认）；confirmed 默认 `read_only=true`（短 chunk 精确机械替换，跳过 LLM）；长句经宽松匹配注入 user prompt 作推荐译法 | `glossary.path` |
 | 翻译记忆 TM | 双语片段缓存，跨页复用 | `tm.enabled` |
-| 短语记忆 | 导航短语精确匹配复用；自动学习，写入前检查 glossary read_only 防覆盖 | `phrases.max_len` |
+| 短语记忆 | 导航短语精确匹配复用；自动学习；长句经宽松匹配注入 user prompt 作推荐译法 | `phrases.max_len` |
 | 风格指南 | `style-extract` 从对照样例提炼规则注入 | `style.rules_enabled` |
 | 风格锚定 | 字符 n-gram 相似度检索 top-k 样例 few-shot 注入 | `style.exemplar_enabled` |
 | 上下文包 | 前 N 篇日记摘要 | `planner.context_window` |
-| 一致性 QA | 校验术语一致与 HTML 安全 | `qa.deep_llm_check` |
+| 一致性 QA | 对已译页做体检：本地规则（占位符完整性=高危、术语一致=中危）+ LLM 深度语义检查（`qa.deep_llm_check`）；问题以 `qa_*` 原因写入审核队列供人工确认，不自动触发重译 | `qa.deep_llm_check` |
+| 词汇/短语审计 | `audit-terms` 用新词汇表/短语记忆重建已译段（按占位符边界精确匹配），同步 state+段缓存并重生成 out | `audit-terms` |
 | 译者注 | 跨页关联/趣味发现 → 外部 JSON | `annotate` |
 | Session ID | 页面翻译任务标识（task_id）+ 多轮对话标识（context_id） | 自动生成，写入 LLM 日志 |
 
 优先级：**词汇表 > 风格样例 > 风格规则**。
+
+### 一致性 QA（`qa`）
+
+`python booktr-cli.py qa` 对已翻译完成的页面做一致性体检，问题分两类来源：
+
+- **本地规则检查**（无 LLM 开销，逐段执行）：
+  - **HTML 安全（高危）**：译文占位符数量与原文不一致（`[[P0]]` 等），说明内联标签被 LLM 删除/改动，会破坏原站结构。
+  - **术语一致（中危）**：原文含已确认词汇表术语但译文未含其标准译文。
+- **LLM 深度检查**（`qa.deep_llm_check`，默认 true）：把整页原文+译文（各截断 6000 字符）交 LLM（temperature 0.2）做语义层面审查，补充误译、术语使用不当、上下文不一致等问题。
+
+问题生成 `work/qa_report.json`（统计总问题/高危数），并逐一以 `reason: "qa_high" / "qa_mid"` 写入 `work/review_queue.json` 审核队列供人工确认。QA 条目（`qa_*` 原因）在 review 中仅 `[a]` 标记已处理，**不改变页面翻译状态**——即 QA 只提示核对，不自动触发重新翻译。
 
 ## LLM 接入
 
