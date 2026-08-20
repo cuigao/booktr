@@ -139,8 +139,9 @@ def build_translation_context(cfg: Config, rel: str, chk: str, page_ctx: str) ->
 
 def summarize_page(cfg: Config, client, rel: str) -> dict:
     """生成页面摘要供上下文包使用。"""
-    raw = open(_src_path(cfg, rel), "rb").read()
-    html, _ = util.decode_html(raw)
+    from .crawler import decode_page
+
+    html, _ = decode_page(cfg, rel)
     segs = seg_mod.split_segments(html, cfg)
     text = "\n".join(s.text for s in segs if s.kind == "text")
     if not text.strip():
@@ -423,9 +424,10 @@ def translate_page(
     if pstate.get("status") == STATUS["done"]:
         return {"status": "done", "skipped": True, "segments_total": len(pstate.get("segments", {}))}
 
-    raw = open(_src_path(cfg, rel), "rb").read()
-    html, _ = util.decode_html(raw)
-    segs = seg_mod.segments_for_page(cfg, rel)
+    from .crawler import decode_page
+
+    html, html_enc = decode_page(cfg, rel)
+    segs = seg_mod.segments_for_page(cfg, rel, html=html, encoding=html_enc)
     text_segs = [s for s in segs if s.kind == "text"]
     total_chars = sum(len(s.text) for s in text_segs)
     _ev("plan", {"segments": len(text_segs), "total_chars": total_chars, "rel": rel})
@@ -820,12 +822,13 @@ def _save_segment_index(cfg: Config, rel: str, segs) -> None:
         cfg.get("segments_dir", default=""), rel.replace("/", "__") + ".json"
     )
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    encoding = ""
     data = []
     for s in segs:
         d = s.to_dict()
         d["page"] = rel
         data.append(d)
-    util.write_json(path, data)
+    util.write_json(path, {"encoding": encoding, "segments": data})
 
 
 def _src_path(cfg: Config, rel: str) -> str:

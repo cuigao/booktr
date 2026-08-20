@@ -100,13 +100,17 @@ def scan_site(cfg: Config, force: bool = False) -> dict:
 
     src = cfg.source_dir
     pages: dict[str, Page] = {}
+    encoding_failed: list[str] = []
     for f in glob.glob(os.path.join(src, "**", "*"), recursive=True):
         if not os.path.isfile(f):
             continue
         rel = os.path.relpath(f, src).replace("\\", "/")
         if _HTML_RE.search(rel):
-            pages[rel] = _scan_html(cfg, f, rel)
-    _enrich_dates_from_indexes(pages, src)
+            try:
+                pages[rel] = _scan_html(cfg, f, rel)
+            except util.EncodingError:
+                encoding_failed.append(rel)
+    _enrich_dates_from_indexes(cfg, pages)
     _compute_derived(pages)
     # 非 html 文件登记（复制用）
     assets = []
@@ -122,6 +126,7 @@ def scan_site(cfg: Config, force: bool = False) -> dict:
         "total_assets": len(assets),
         "assets": sorted(assets),
         "pages": {k: asdict(v) for k, v in pages.items()},
+        "encoding_failed": sorted(encoding_failed),
     }
     util.write_json(out_path, result)
     return result
@@ -129,7 +134,8 @@ def scan_site(cfg: Config, force: bool = False) -> dict:
 
 def _scan_html(cfg: Config, path: str, rel: str) -> Page:
     raw = open(path, "rb").read()
-    decoded, enc = util.decode_html(raw)
+    lang = cfg.get("lang", "source", default="ja")
+    decoded, enc = util.decode_html(raw, lang)
     title = _extract_title(decoded)
     date, date_note = _date_from_comment(decoded)
     links_out, links_ext = _extract_links(decoded, os.path.dirname(rel))
@@ -160,19 +166,21 @@ def _date_from_comment(decoded: str) -> tuple[str | None, str]:
     return None, ""
 
 
-def _enrich_dates_from_indexes(pages: dict[str, Page], src: str) -> None:
+def _enrich_dates_from_indexes(cfg: Config, pages: dict[str, Page]) -> None:
     """从索引页（today0.html/photo0.html）的链接文本中提取日期，补全日记页。
 
     页面注释不一定带日期（尤其早期），但索引页列出了每篇的发布日。
     """
+    src = cfg.source_dir
+    lang = cfg.get("lang", "source", default="ja")
     for index_rel, subdir in (("today/today0.html", "today/"), ("photo/photo0.html", "photo/")):
         idx = pages.get(index_rel)
         if not idx:
             continue
         path = os.path.join(src, index_rel.replace("/", os.sep))
         try:
-            decoded, _ = util.decode_html(open(path, "rb").read())
-        except OSError:
+            decoded, _ = util.decode_html(open(path, "rb").read(), lang)
+        except (OSError, util.EncodingError):
             continue
         for m in re.finditer(
             r'<a[^>]+href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>', decoded, re.I | re.S
@@ -274,3 +282,44 @@ def _extract_text_len(decoded: str) -> int:
 
 def resolve_local_path(cfg: Config, page_rel: str) -> str:
     return os.path.join(cfg.source_dir, page_rel.replace("/", os.sep))
+
+
+def cached_encoding(cfg: Config, rel: str) -> str | None:
+    """从 site_map 取该页缓存的编码；无缓存返回 None。"""
+    from . import planner
+
+    try:
+        sm = planner.load_site_map(cfg)
+    except RuntimeError:
+        return None
+    page = sm.get("pages", {}).get(rel)
+    if not page:
+        return None
+    return page.get("encoding")
+
+
+def decode_page(cfg: Config, rel: str, raw: bytes | None = None,
+                strict: bool = True) -> tuple[str, str]:
+    """统一读取并解码源页面。
+
+    优先用 site_map 缓存的编码解码；缓存失效（解码失败）则回退全套语言感知探测。
+    strict=True 无法解码抛 EncodingError；strict=False 用 errors='replace' 修复。
+    返回 (解码后文本, 编码)。
+    """
+    from . import util
+
+    if raw is None:
+        with open(resolve_local_path(cfg, rel), "rb") as f:
+            raw = f.read()
+    lang = cfg.get("lang", "source", default="ja")
+
+    cached = cached_encoding(cfg, rel)
+    if cached:
+        try:
+            return raw.decode(cached), cached
+        except (UnicodeDecodeError, LookupError):
+            pass  # 缓存编码失效 → 回退全套探测
+
+    if strict:
+        return util.decode_html(raw, lang)
+    return util.decode_html_loose(raw, lang)

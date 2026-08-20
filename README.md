@@ -133,6 +133,11 @@ python booktr-cli.py add-term HOME 首页 --note "导航入口"
 python booktr-cli.py audit-terms                    # 审计所有已翻译页面
 python booktr-cli.py audit-terms today/today4.html  # 审计指定页面
 python booktr-cli.py audit-terms --dry-run          # 只显示不修改
+
+# 修复无法解码的输入文件（输出到 fix 目录，不改原始文件）
+python booktr-cli.py fix                    # 修复无法解码的 html → data/fix/
+python booktr-cli.py fix --dry-run          # 仅列出需修复文件
+python booktr-cli.py fix --all              # 复制全部文件，fix 目录可直接作新源
 ```
 
 `python booktr-cli.py <cmd>` 与 `python -m booktr <cmd>`（需在 `src/` 下）等效。所有子命令**幂等**、基于 `work/state.json`（相对数据根）断点续跑。
@@ -165,7 +170,8 @@ python booktr-cli.py audit-terms --dry-run          # 只显示不修改
 ## 核心机制
 
 - **逐段拼接**：在原始解码文本上定位每个可翻译文字段的字符偏移，翻译后原位拼回。除被替换的文字外，标签、注释、`tppabs` 属性、空白等字节完全不变，保证"完全相同样式"。段索引（`work/segments/*.json`）记录 `页面/段ID/源偏移/译文/引文`，为译者注与未来的浏览器插件提供锚点。
-- **编码**：逐文件探测（Shift-JIS 优先，失败回退 UTF-8）；输出统一 UTF-8 并在 `<head>` 补/改 `<meta charset>`（中文无法在 Shift-JIS 编码，这是唯一必要改动）。
+- **编码**：逐文件探测，候选优先级为 `<meta charset>` 声明 → **源语言常见编码列表**（`lang.source`，如 `ja`→`cp932/euc_jp/iso2022_jp`、`zh-Hans`→`gbk`、`zh-Hant`→`big5` 等；未预设语言回退 `utf-8`）→ `utf-8` 兜底。全部候选均无法严格解码时抛 `EncodingError`（拒绝，不静默替换），scan 跳过该页并汇总 `encoding_failed`，提示运行 `fix`。scan 探测到的编码缓存进 site_map（`pages[rel].encoding`），后续流程优先复用缓存编码解码。输出统一 UTF-8 并在 `<head>` 补/改 `<meta charset>`（这是唯一必要改动）。
+- **编码修复（`fix` 命令）**：`booktr fix` 遍历源目录，对无法严格解码的 html 用 `errors='replace'` 修复为 UTF-8 输出到 `fix` 目录（默认 `<data_dir>/fix`，保持目录结构），**不修改原始文件**；`--dry-run` 仅列出需修复文件；`--all` 额外复制全部文件（资源与正常 html），使 fix 目录可直接作为新源。用户审核后手动合并回源目录。
 - **全角字符保留**：保留原文中的全角写法——全角英文字母、全角数字（０-９）、
   全角符号（！？～・＆＊＝＋＜＞等）保持全角不转半角；几何符号（●○■）、
   省略号（…）、破折号（――）、智能引号（""''）保持原样。

@@ -258,26 +258,39 @@ def _contains_cjk(text: str) -> bool:
     return bool(re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", text))
 
 
-def segments_for_page(cfg: Config, rel: str) -> list[Segment]:
-    """读取/生成某页的段列表，并缓存到 work/segments/。"""
+def segments_for_page(cfg: Config, rel: str, html: str | None = None,
+                      encoding: str | None = None) -> list[Segment]:
+    """读取/生成某页的段列表，并缓存到 work/segments/。
+
+    兼容两种缓存格式：
+      - 新版：{"encoding": 编码, "segments": [...]}
+      - 旧版：[...]（纯段列表，无编码）
+    若传入已解码的 html，则跳过内部读取/解码（复用同一次解码，避免重复探测）。
+    """
     seg_path = os.path.join(cfg.get("segments_dir", default=""), rel.replace("/", "__") + ".json")
     if os.path.exists(seg_path):
         data = util.read_json(seg_path, [])
+        seg_list = data.get("segments", data) if isinstance(data, dict) else data
         field_names = {f.name for f in Segment.__dataclass_fields__.values()}
         out = []
-        for d in data:
+        for d in seg_list:
             if not isinstance(d, dict):
                 continue
             clean = {k: v for k, v in d.items() if k in field_names}
             out.append(Segment(**clean))
-        return out
+        if out:
+            return out
     # 重新切分
-    from .crawler import resolve_local_path
-    raw = open(resolve_local_path(cfg, rel), "rb").read()
-    decoded, _ = util.decode_html(raw)
-    segs = split_segments(decoded, cfg)
+    if html is None:
+        from .crawler import decode_page
+
+        html, encoding = decode_page(cfg, rel)
+    segs = split_segments(html, cfg)
     os.makedirs(os.path.dirname(seg_path) or ".", exist_ok=True)
-    util.write_json(seg_path, [s.to_dict() for s in segs])
+    util.write_json(seg_path, {
+        "encoding": encoding or "",
+        "segments": [s.to_dict() for s in segs],
+    })
     return segs
 
 

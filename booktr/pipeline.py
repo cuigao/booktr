@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 
@@ -24,6 +25,12 @@ def cmd_scan(cfg: Config, args) -> None:
     secs = Counter(p["section"] for p in sm["pages"].values())
     for k, v in secs.most_common():
         print(f"  {k or '(root)'}: {v}")
+    failed = sm.get("encoding_failed", [])
+    if failed:
+        print(f"\n⚠ 无法解码的页面（{len(failed)} 个），已跳过扫描：")
+        for rel in failed:
+            print(f"  - {rel}")
+        print("请运行 `booktr fix` 查看/修复这些文件（输出到 fix 目录，不改原始文件）。")
 
 
 def _prompt(label: str, default: str = "") -> str:
@@ -185,8 +192,7 @@ def cmd_extract_terms(cfg: Config, args) -> None:
     sysp = prompts.build_glossary_extract_system(cfg)
     all_candidates = []
     for rel in pages:
-        raw = open(os.path.join(cfg.source_dir, rel.replace("/", os.sep)), "rb").read()
-        html, _ = util.decode_html(raw)
+        html, _ = crawler.decode_page(cfg, rel)
         segs = seg_mod.split_segments(html, cfg)
         text = "\n".join(s.text for s in segs if s.kind == "text")
         if not text.strip():
@@ -243,9 +249,7 @@ def rebuild_processed_output(cfg: Config) -> int:
         segs = seg_mod.segments_for_page(cfg, rel)
         if not segs or not any(s.translation for s in segs):
             continue
-        from .crawler import resolve_local_path
-        raw = open(resolve_local_path(cfg, rel), "rb").read()
-        html, _ = util.decode_html(raw)
+        html, _ = crawler.decode_page(cfg, rel)
         out_html = seg_mod.reassemble(html, segs)
         seg_mod.write_page_output(cfg, rel, out_html)
         rebuilt += 1
@@ -624,7 +628,8 @@ def cmd_audit_terms(cfg: Config, args) -> None:
         # 读取段缓存（获取源文本 + 同步更新译文）
         seg_cache_path = os.path.join(cfg.get("segments_dir", default=""),
                                       rel.replace("/", "__") + ".json")
-        seg_cache = util.read_json(seg_cache_path, []) if os.path.exists(seg_cache_path) else []
+        raw_cache = util.read_json(seg_cache_path, []) if os.path.exists(seg_cache_path) else []
+        seg_cache = raw_cache.get("segments", raw_cache) if isinstance(raw_cache, dict) else raw_cache
         # 构建 seg_id -> source text 映射
         seg_source_map = {str(item.get("id")): item.get("text", "") for item in seg_cache}
 
@@ -659,9 +664,9 @@ def cmd_audit_terms(cfg: Config, args) -> None:
                 changed = True
                 print(f"  {rel} 段{sid}: 将更新")
 
-        # 写回段缓存
+        # 写回段缓存（保留 dict 包装的 encoding 字段）
         if not args.dry_run and changed:
-            util.write_json(seg_cache_path, seg_cache)
+            util.write_json(seg_cache_path, raw_cache if isinstance(raw_cache, dict) else seg_cache)
 
     if not args.dry_run:
         state.save()
@@ -713,6 +718,79 @@ def cmd_annotate(cfg: Config, args) -> None:
         total += n
         print(f"  {rel}: +{n} 条译者注")
     print(f"译者注总计：{len(annotator.load(cfg))} 条（新增 {total}）")
+
+
+def cmd_fix(cfg: Config, args) -> None:
+    """修复无法解码的输入文件，输出到 fix 目录（不改原始文件）。
+
+    遍历源目录所有文件：
+    - 无法严格解码的 html → 用 errors='replace' 修复为 UTF-8 写入 fix 目录
+    - 其余文件：默认不复制；`--all` 时全部复制（含资源与正常 html），使 fix 目录可直接作源
+    """
+    import shutil
+
+    from . import util as _util
+    from .crawler import resolve_local_path
+    from .segments import _ensure_charset
+
+    out_dir = args.out or os.path.join(cfg.data_dir, "fix")
+    lang = cfg.get("lang", "source", default="ja")
+    html_re = re.compile(r"\.(html?|htm)$", re.IGNORECASE)
+
+    # 遍历源目录全部文件
+    files = []
+    for root, _dirs, fnames in os.walk(cfg.source_dir):
+        for fn in fnames:
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, cfg.source_dir).replace("\\", "/")
+            files.append(rel)
+    files.sort()
+
+    needs_fix = []
+    for rel in files:
+        if not html_re.search(rel):
+            continue
+        raw = open(resolve_local_path(cfg, rel), "rb").read()
+        try:
+            _util.decode_html(raw, lang)  # 严格：能解码则无需修复
+        except _util.EncodingError:
+            needs_fix.append(rel)
+
+    if args.dry_run:
+        if needs_fix:
+            print(f"需要修复的文件（{len(needs_fix)} 个）：")
+            for rel in needs_fix:
+                print(f"  - {rel}")
+        else:
+            print("没有需要修复的文件。")
+        return
+
+    fixed = 0
+    copied = 0
+    for rel in files:
+        src = resolve_local_path(cfg, rel)
+        dst = os.path.join(out_dir, rel.replace("/", os.sep))
+        os.makedirs(os.path.dirname(dst) or out_dir, exist_ok=True)
+        if html_re.search(rel) and rel in needs_fix:
+            # 修复：宽松解码为 UTF-8 文本并写入
+            raw = open(src, "rb").read()
+            text, _enc = _util.decode_html_loose(raw, lang)
+            fixed_text = _ensure_charset(text)
+            with open(dst, "w", encoding="utf-8", newline="") as f:
+                f.write(fixed_text)
+            fixed += 1
+        elif args.all:
+            # 复制原样（含正常 html 与全部资源）
+            shutil.copyfile(src, dst)
+            copied += 1
+
+    print(f"修复 {fixed} 个文件 → {out_dir}")
+    if args.all:
+        print(f"复制其他 {copied} 个文件（fix 目录可直接作为新源）")
+    else:
+        print("（用 --all 可复制全部文件，使 fix 目录直接作为新源）")
+    if needs_fix:
+        print("请审核 fix 目录中的修复结果，确认后再手动合并回源目录（程序不修改原始文件）。")
 
 
 def cmd_status(cfg: Config, args) -> None:
@@ -1388,6 +1466,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-t", "--task", default=None,
                     help="指定 task_id 导出（支持前缀匹配）")
     sp.set_defaults(func=cmd_export_log)
+
+    sp = mk("fix", help="修复无法解码的输入文件（输出到 fix 目录，不改原始文件）")
+    sp.add_argument("--all", action="store_true",
+                    help="复制全部文件（含资源与正常 html）到 fix 目录，可直接作新源")
+    sp.add_argument("--out", default=None, help="fix 输出目录（默认 <data_dir>/fix）")
+    sp.add_argument("--dry-run", action="store_true", help="仅列出需修复文件，不输出")
+    sp.set_defaults(func=cmd_fix)
 
     return p
 

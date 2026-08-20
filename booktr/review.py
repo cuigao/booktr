@@ -28,18 +28,17 @@ def enqueue(cfg: Config, item: dict) -> None:
 def _regenerate_page(cfg: Config, rel: str) -> bool:
     """从段索引离线重组指定页面的译文并写回 out。返回是否成功。"""
     from .segments import segments_for_page, reassemble, write_page_output
-    from .crawler import resolve_local_path
+    from .crawler import decode_page
 
     try:
         segs = segments_for_page(cfg, rel)
         if not segs or not any(s.translation for s in segs):
             return False
-        raw = open(resolve_local_path(cfg, rel), "rb").read()
-        html, _ = util.decode_html(raw)
+        html, _ = decode_page(cfg, rel)
         out_html = reassemble(html, segs)
         write_page_output(cfg, rel, out_html)
         return True
-    except (OSError, ValueError):
+    except (OSError, ValueError, util.EncodingError):
         return False
 
 

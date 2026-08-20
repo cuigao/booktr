@@ -85,7 +85,7 @@ def test_decode_html_cp932(tmp_path):
     p = tmp_path / "a.html"
     p.write_bytes("<TITLE>岡崎律子</TITLE>".encode("cp932"))
     raw = p.read_bytes()
-    text, enc = util.decode_html(raw)
+    text, enc = util.decode_html(raw, "ja")
     assert enc == "cp932"
     assert "岡崎律子" in text
 
@@ -94,9 +94,33 @@ def test_decode_html_utf8(tmp_path):
     p = tmp_path / "b.html"
     p.write_bytes("<meta charset=\"utf-8\"><TITLE>岡崎律子</TITLE>".encode("utf-8"))
     raw = p.read_bytes()
-    text, enc = util.decode_html(raw)
+    text, enc = util.decode_html(raw, "ja")
     assert enc == "utf-8"
     assert "岡崎律子" in text
+
+
+def test_decode_html_requires_lang(tmp_path):
+    p = tmp_path / "c.html"
+    p.write_bytes("<TITLE>x</TITLE>".encode("utf-8"))
+    raw = p.read_bytes()
+    with pytest.raises(TypeError):
+        util.decode_html(raw)
+
+
+def test_decode_html_undecodable_raises(tmp_path):
+    # 用无效字节序列构造无法以任何候选编码解码的文件
+    p = tmp_path / "d.html"
+    data = b"\x81\x00" * 100
+    p.write_bytes(data)
+    with pytest.raises(util.EncodingError):
+        util.decode_html(p.read_bytes(), "ja")
+
+
+def test_decode_html_loose_fallback(tmp_path):
+    p = tmp_path / "e.html"
+    p.write_bytes(b"\xff\xfe\x80\x81bad")
+    text, _ = util.decode_html_loose(p.read_bytes(), "ja")
+    assert isinstance(text, str)
 
 
 def test_ngram_dice():

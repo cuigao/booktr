@@ -9,38 +9,89 @@ from typing import Any
 
 _JAP_CHAR = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]")
 
+_META_CHARSET_RE = re.compile(
+    rb"<meta[^>]+charset\s*=\s*[\"']?\s*([A-Za-z0-9_\-]+)", re.IGNORECASE
+)
+
+
+class EncodingError(RuntimeError):
+    """无法识别页面编码（所有候选编码均无法严格解码）。"""
+
+
+# 语言 → 常见编码候选（早期网站常见），硬编码。候选顺序即尝试优先级。
+LANG_ENCODINGS: dict[str, list[str]] = {
+    # cp932 即微软 Shift-JIS 扩展，比严格 shift_jis 更宽容，兼容更多日文老站
+    "ja": ["cp932", "euc_jp", "iso2022_jp"],
+    "zh-Hans": ["gbk", "gb2312"],
+    "zh-Hant": ["big5"],
+    "zh": ["gbk", "big5"],
+    "ko": ["euc_kr", "cp949"],
+    "ru": ["cp1251", "koi8_r"],
+    "en": ["cp1252", "iso8859-1"],
+}
+
+# 未预设语言的合理回退列表（utf-8 兜底在最前，现代站点通用）。
+DEFAULT_ENCODINGS: list[str] = ["utf-8", "cp1252", "latin1"]
+
 
 def count_japanese(text: str) -> int:
     return len(_JAP_CHAR.findall(text))
 
 
-def detect_encoding(raw: bytes, declared: str | None = None) -> str:
-    """探测文件编码。
+def _encoding_candidates(declared: str | None, lang: str) -> list[str]:
+    """构造编码候选列表：meta 声明优先 → 语言常见编码 → utf-8 兜底。"""
+    cands: list[str] = []
+    if declared:
+        cands.append(declared)
+    cands.extend(LANG_ENCODINGS.get(lang, DEFAULT_ENCODINGS))
+    if "utf-8" not in cands:
+        cands.append("utf-8")
+    # 去重保序
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in cands:
+        lc = c.lower()
+        if lc not in seen:
+            seen.add(lc)
+            out.append(c)
+    return out
 
-    优先按 <meta charset> 声明的编码尝试；否则优先 Shift-JIS(cp932)，
-    若严格解码失败则回退 UTF-8。
+
+def detect_encoding(raw: bytes, declared: str | None, lang: str) -> str | None:
+    """按候选优先级尝试严格解码，返回能解码的编码；全部失败返回 None。
+
+    候选顺序：<meta charset> 声明 → 语言常见编码 → utf-8 兜底。
     """
-    declared = (declared or "").lower()
-    for cand in (declared, "cp932", "utf-8"):
-        if not cand:
-            continue
+    for cand in _encoding_candidates(declared, lang):
         try:
             raw.decode(cand)
             return cand
         except (UnicodeDecodeError, LookupError):
             continue
-    return "cp932"
+    return None
 
 
-def decode_html(raw: bytes) -> tuple[str, str]:
-    """返回 (文本, 编码)。"""
+def decode_html(raw: bytes, lang: str) -> tuple[str, str]:
+    """严格解码，返回 (文本, 编码)。无法解码抛 EncodingError（不静默替换）。"""
     declared = None
-    m = re.search(
-        rb"<meta[^>]+charset\s*=\s*[\"']?\s*([A-Za-z0-9_\-]+)", raw, re.IGNORECASE
-    )
+    m = _META_CHARSET_RE.search(raw)
     if m:
         declared = m.group(1).decode("ascii", errors="ignore")
-    enc = detect_encoding(raw, declared)
+    enc = detect_encoding(raw, declared, lang)
+    if enc is None:
+        raise EncodingError(
+            f"无法识别编码（lang={lang}，候选={_encoding_candidates(declared, lang)}）"
+        )
+    return raw.decode(enc), enc
+
+
+def decode_html_loose(raw: bytes, lang: str) -> tuple[str, str]:
+    """宽松解码（errors='replace'），用于 fix 工具修复坏文件。无法解码时兜底 utf-8。"""
+    declared = None
+    m = _META_CHARSET_RE.search(raw)
+    if m:
+        declared = m.group(1).decode("ascii", errors="ignore")
+    enc = detect_encoding(raw, declared, lang) or "utf-8"
     return raw.decode(enc, errors="replace"), enc
 
 
