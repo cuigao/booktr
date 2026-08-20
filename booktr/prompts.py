@@ -94,18 +94,24 @@ def format_term_hints(items: list[dict]) -> str:
     """将词汇表/短语记忆条目格式化为 user prompt 中的推荐译法。
 
     词汇表和短语记忆统一提示为"推荐翻译译文"，由 LLM 自行裁定在长句中的用法。
+    有 note 的条目逐条标注使用场景；无 note 的条目不标注（标题统一说明）。
     """
     if not items:
         return ""
-    lines = []
+    lines = [
+        "## 推荐翻译译文（供参考，请结合上下文采用合适的译法）",
+        "未注明使用场景的条目为通用短语/术语译法，请按原文语境酌情采用。",
+    ]
     for it in items:
         src = it.get("src", "")
         dst = it.get("dst", "")
-        if src and dst:
-            lines.append(f"- {src} → {dst}")
-    if not lines:
-        return ""
-    return "## 推荐翻译译文（供参考，请结合上下文采用合适的译法）\n" + "\n".join(lines)
+        if not src or not dst:
+            continue
+        lines.append(f"- {src} → {dst}")
+        note = it.get("note", "")
+        if note:
+            lines.append(f"  └ 使用场景：{note}")
+    return "\n".join(lines)
 
 
 def build_translate_user(
