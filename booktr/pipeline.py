@@ -681,6 +681,11 @@ def cmd_audit_terms(cfg: Config, args) -> None:
 
 def cmd_qa(cfg: Config, args) -> None:
     client = _client(cfg)
+    # 覆盖 deep_llm_check 配置开关（仅内存，不持久化）
+    if args.no_deep:
+        cfg.set(False, "qa", "deep_llm_check")
+    elif args.with_deep:
+        cfg.set(True, "qa", "deep_llm_check")
     state = tr.State(cfg)
     done_pages = state.data.get("done_pages", [])
     if args.pages:
@@ -1588,6 +1593,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = mk("qa", help="一致性 QA pass")
     sp.add_argument("--pages", nargs="*", help="限定检查页面")
+    deep_group = sp.add_mutually_exclusive_group()
+    deep_group.add_argument("--no-deep", action="store_true",
+                            help="仅本地规则，跳过 LLM 深度检查（覆盖配置）")
+    deep_group.add_argument("--with-deep", action="store_true",
+                            help="强制启用 LLM 深度检查（覆盖配置）")
     sp.set_defaults(func=cmd_qa)
 
     sp = mk("annotate", help="生成译者注")
