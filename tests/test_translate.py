@@ -29,6 +29,16 @@ def test_check_placeholders_ok():
     assert tr._check_placeholders("[[P0]]a[[P1]]", "[[P0]]b[[P1]]") == []
 
 
+def test_check_placeholders_duplicate():
+    # 原文 1 个 [[P0]]，译文 2 个 → 检测重复
+    assert tr._check_placeholders("[[P0]]a", "[[P0]]a[[P0]]") == ["[[P0]]"]
+
+
+def test_check_placeholders_duplicate_mixed():
+    # 缺失 + 重复同时存在
+    assert tr._check_placeholders("[[P0]]a[[P1]]", "[[P0]]a[[P0]]") == ["[[P0]]", "[[P1]]"]
+
+
 def test_restore_placeholders_leading_trailing():
     out = tr._restore_placeholders_from_src("[[P0]]本文[[P1]]", "译文")
     assert out == "[[P0]]译文[[P1]]"

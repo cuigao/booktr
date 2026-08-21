@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from collections import Counter
 
 from . import glossary as gl
 from . import llm as llm_mod
@@ -196,15 +197,21 @@ def _cleanup_fallback(resp: str) -> str:
 def _check_placeholders(src_text: str, translation: str) -> list[str]:
     """检查译文占位符与原文的一致性，返回异常列表。
 
-    检测两类异常：
+    检测三类异常：
     - 缺失：原文有但译文缺的 [[Px]]
     - 多余：译文凭空多出的 [[Px]]（原文无）
+    - 重复：译文比原文多出的 [[Px]]（数量不一致）
     """
-    src_ph = set(re.findall(r'\[\[P\d+\]\]', src_text))
-    dst_ph = set(re.findall(r'\[\[P\d+\]\]', translation))
-    missing = src_ph - dst_ph
-    extra = dst_ph - src_ph
-    return sorted(missing | extra)
+    src_ph = Counter(re.findall(r'\[\[P\d+\]\]', src_text))
+    dst_ph = Counter(re.findall(r'\[\[P\d+\]\]', translation))
+    issues = []
+    for p in src_ph:
+        if dst_ph[p] < src_ph[p]:
+            issues.append(p)  # 缺失
+    for p in dst_ph:
+        if dst_ph[p] > src_ph.get(p, 0):
+            issues.append(p)  # 多余 / 重复
+    return sorted(set(issues))
 
 
 def _restore_placeholders_from_src(src_text: str, plain_translation: str) -> str:
