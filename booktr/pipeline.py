@@ -1362,6 +1362,11 @@ def _format_appendix(task_groups: list[list[dict]]) -> list[str]:
                     else:
                         lines.append(content)
                     lines.append("")
+                # 若 messages 以 user 结尾且该 log 有 response（assistant 回复未入 messages），补上
+                if messages[-1].get("role") == "user" and max_log.get("response"):
+                    lines.append("### assistant")
+                    lines.extend(_format_assistant_content(max_log["response"]))
+                    lines.append("")
             else:
                 # 旧日志回退：system/user/response
                 if max_log.get("system"):

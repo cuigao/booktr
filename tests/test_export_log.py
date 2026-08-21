@@ -84,6 +84,41 @@ def test_appendix_single_context_linear():
     assert "对话段 2" not in text
 
 
+def test_appendix_appends_assistant_reply_when_messages_end_with_user():
+    # messages 以 user 结尾（请求历史），response 含 assistant 回复 → 附录应补 assistant
+    ctx = "ctx_1"
+    tid = "tsk_1"
+    logs = [
+        _log("translate_p.html", "2026-01-01T00:00:00", tid, ctx,
+             [_msg("system", "SYS"), _msg("user", "U1")],
+             response=json.dumps({"translation": "T1", "confidence": 0.9})),
+    ]
+    lines = _format_appendix([logs])
+    text = "\n".join(lines)
+    # 附录末尾应出现 assistant 回复（译文 T1）
+    assert "### assistant" in text
+    assert "T1" in text
+    # 最后一条 assistant 在 user 之后
+    assert text.rindex("### user") < text.rindex("### assistant")
+
+
+def test_appendix_no_assistant_when_response_empty():
+    # response 为空（失败日志）→ 不补 assistant，保持以 user 结尾
+    ctx = "ctx_1"
+    tid = "tsk_1"
+    logs = [
+        _log("translate_p.html", "2026-01-01T00:00:00", tid, ctx,
+             [_msg("system", "SYS"), _msg("user", "U1")],
+             response=""),
+    ]
+    lines = _format_appendix([logs])
+    text = "\n".join(lines)
+    # 无 assistant 回复
+    assert "### assistant" not in text
+    # user 之后没有 assistant（最后一个角色是 user）
+    assert text.rindex("### user") > text.rfind("### assistant")
+
+
 def test_appendix_multi_context_separated():
     # 两个 context（摘要接力）→ 横线分隔 + 原因标注
     tid = "tsk_1"
