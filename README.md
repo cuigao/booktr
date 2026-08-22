@@ -172,7 +172,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 - **逐段拼接**：在原始解码文本上定位每个可翻译文字段的字符偏移，翻译后原位拼回。除被替换的文字外，标签、注释、`tppabs` 属性、空白等字节完全不变，保证"完全相同样式"。段索引（`work/segments/*.json`）记录 `页面/段ID/源偏移/译文/引文`，为译者注与未来的浏览器插件提供锚点。
 - **编码**：逐文件探测，候选优先级为 `<meta charset>` 声明 → **源语言常见编码列表**（`lang.source`，如 `ja`→`cp932/euc_jp/iso2022_jp`、`zh-Hans`→`gbk`、`zh-Hant`→`big5` 等；未预设语言回退 `utf-8`）→ `utf-8` 兜底。全部候选均无法严格解码时抛 `EncodingError`（拒绝，不静默替换），scan 跳过该页并汇总 `encoding_failed`，提示运行 `fix`。scan 探测到的编码缓存进 site_map（`pages[rel].encoding`），后续流程优先复用缓存编码解码。输出统一 UTF-8 并在 `<head>` 补/改 `<meta charset>`（这是唯一必要改动）。
 - **编码修复（`fix` 命令）**：`booktr fix` 遍历源目录，对无法严格解码的 html 用 `errors='replace'` 修复为 UTF-8 输出到 `fix` 目录（默认 `<data_dir>/fix`，保持目录结构），**不修改原始文件**；`--dry-run` 仅列出需修复文件；`--all` 额外复制全部文件（资源与正常 html），使 fix 目录可直接作为新源。用户审核后手动合并回源目录。
-- **全角字符保留**：全角写法保留（全角英文字母、全角数字、全角符号保持全角；几何符号、省略号、破折号、智能引号保持原样）是**站点特定规则**，经 `user_rules` 注入 system prompt（本模板默认含该规则；可改、可删）。
+- **全角字符保留**：全角写法保留（全角英文字母、全角数字、全角符号保持全角；几何符号、省略号、破折号、智能引号保持原样）是**站点特定规则**，经 `user_rules` 注入 system prompt（本模板默认含该规则；可改、可删）。人名保留原形、英文/拉丁字母不翻译同为 `user_rules` 可配置项（默认已含）。`user_rules` 小节带有优先级声明，冲突时以用户规则为准。
 - **占位符**：段内内联标签（`<img>/<font>/<a>…`）转为 `[[P0]]` 占位符交给 LLM，译文必须原样保留，拼接时还原。相邻 inline 标签（含纯空白分隔）合并为单个占位符，减少 LLM 困惑。短语记忆命中后从原始 chunk 恢复占位符。
 - **解析自愈**：LLM 输出非法 JSON 时自动重试（最多 `max_repair` 次），每次携带具体错误信息让 LLM 修正；占位符丢失时触发额外 repair；兜底清理去除 `|TEXT|`/JSON 残渣。
 - **JSON 机械修复**：解析失败时按序用机械修复做后处理（`ESCAPE_VALUE_STRINGS` 值字符串转义覆盖未转义引号/裸换行，`CLOSE_ARRAY` 按已知 key 先验补全缺 `]`），成功且含 `translation` key 则附加 `repaired: true` + `repair_methods` 规范字段；仍失败才触发 LLM repair。该信息持久化到段状态（`state.json`）与段缓存（`work/segments/*.json`），并在 export-log 中标注 `⚠ 修复` 及头部汇总，便于追溯与改进修复逻辑。

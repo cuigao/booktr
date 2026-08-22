@@ -261,3 +261,13 @@ def test_retranslate_rules_refer_user_rules(tmp_cfg):
     )
     assert "用户附加规则仍然适用" in sysp
     assert "保留全角写法" not in sysp
+
+
+def test_user_rules_priority_line(tmp_cfg):
+    """system 的『用户附加规则』小节含优先级声明。"""
+    from booktr import prompts
+    sysp = prompts.build_translate_system(
+        tmp_cfg, [], "", "全角规则", "", is_retranslation=False
+    )
+    assert "（如有冲突，以本条用户附加规则为准）" in sysp
+    assert "全角规则" in sysp

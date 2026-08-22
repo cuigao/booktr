@@ -68,12 +68,13 @@ def build_translate_system(
         "- 输出严格为 JSON，只输出 JSON 本身，不要任何额外文字或 markdown 围栏",
         "- 输出 JSON 时，字符串内的双引号必须转义为 \\\"，换行必须转义为 \\n；"
         "翻译/notes 中引用话语的引号需写为 \\\"，不能原样裸引号",
-        f"- 英文/拉丁字母不翻译；人名保留原形；其余{src_name}内容翻译为{tgt_name}",
         "- 译文中必须保留原文的所有 [[Px]] 占位符（如 [[P0]]、[[P1]]），"
         "它们是 HTML 标签的替代标记，翻译后需原样还原",
     ]
     if user_rules:
-        parts.append(f"## 用户附加规则\n{user_rules}")
+        parts.append(
+            "## 用户附加规则\n（如有冲突，以本条用户附加规则为准）\n" + user_rules
+        )
     if style_guide:
         parts.append(f"## 风格指南\n{style_guide}")
     if focus:
