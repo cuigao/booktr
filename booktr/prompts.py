@@ -44,7 +44,7 @@ def _build_retranslate_rules(src_name: str, tgt_name: str) -> str:
         f"- 完整翻译为{tgt_name}，不要保留任何原文\n"
         "- 保持与前文/后文的术语和风格一致\n"
         "- 保留所有 [[Px]] 占位符\n"
-        "- 保留全角写法（全角字母/数字/符号）、人名原形等规则仍然适用"
+        "- 用户附加规则仍然适用"
     )
 
 
@@ -68,19 +68,16 @@ def build_translate_system(
         "- 输出严格为 JSON，只输出 JSON 本身，不要任何额外文字或 markdown 围栏",
         "- 输出 JSON 时，字符串内的双引号必须转义为 \\\"，换行必须转义为 \\n；"
         "翻译/notes 中引用话语的引号需写为 \\\"，不能原样裸引号",
-        "- 保留原文中的全角写法：全角英文字母（Ａ-Ｚ, ａ-ｚ）、全角数字（０-９）、"
-        "全角符号（！？～・＆＊＝＋＜＞等）保持全角不转半角，与 CJK 字符混排时全角形式融合更好；"
-        "几何符号（●○■）、省略号（…）、破折号（――）、智能引号（\u201c\u201d\u2018\u2019）保持原样；"
-        f"英文/拉丁字母不翻译；人名保留原形；其余{src_name}内容翻译为{tgt_name}",
+        f"- 英文/拉丁字母不翻译；人名保留原形；其余{src_name}内容翻译为{tgt_name}",
         "- 译文中必须保留原文的所有 [[Px]] 占位符（如 [[P0]]、[[P1]]），"
         "它们是 HTML 标签的替代标记，翻译后需原样还原",
     ]
+    if user_rules:
+        parts.append(f"## 用户附加规则\n{user_rules}")
     if style_guide:
         parts.append(f"## 风格指南\n{style_guide}")
     if focus:
         parts.append(f"## 译者关注点\n{focus}")
-    if user_rules:
-        parts.append(f"## 用户附加规则\n{user_rules}")
     parts.append(
         "## 输出格式\n"
         '返回 JSON：{"translation": "译文", "confidence": 0到1, '
