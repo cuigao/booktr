@@ -563,7 +563,9 @@ def translate_page(
                         term_hints=term_hints,
                     )
             else:
-                usr = prompts.build_translate_user_subsequent(cfg, chk, term_hints=term_hints)
+                usr = prompts.build_translate_user_subsequent(
+                    cfg, chk, term_hints=term_hints, tm_hits=tm_hits
+                )
 
             # 注入短语记忆跳过的翻译到待翻译文本之前
             if skipped_phrases:

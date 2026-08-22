@@ -176,6 +176,26 @@ def _extract_identity(user):
     return _extract_text(user)
 
 
+# ── 后续消息 TM 命中注入 ─────────────────────────────────────────────
+
+
+def test_build_translate_user_subsequent_tm_hits(tmp_cfg):
+    from booktr import prompts
+    usr = prompts.build_translate_user_subsequent(
+        tmp_cfg, "こんにちは", tm_hits=[{"src": "こんにちは", "dst": "你好"}]
+    )
+    assert "翻译记忆命中" in usr
+    assert "こんにちは → 你好" in usr
+    assert "### 待翻译文本" in usr
+
+
+def test_build_translate_user_subsequent_no_tm(tmp_cfg):
+    from booktr import prompts
+    usr = prompts.build_translate_user_subsequent(tmp_cfg, "こんにちは")
+    assert "翻译记忆命中" not in usr
+    assert "### 待翻译文本" in usr
+
+
 # ── 相邻上下文截断 ─────────────────────────────────────────────────────
 
 

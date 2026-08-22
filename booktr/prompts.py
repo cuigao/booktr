@@ -186,11 +186,16 @@ def build_translate_user_first(
     return "\n\n".join(parts)
 
 
-def build_translate_user_subsequent(cfg, src_text: str, term_hints: str = "") -> str:
-    """多轮对话后续消息：携带待翻译文本 + 可选推荐译法。"""
+def build_translate_user_subsequent(
+    cfg, src_text: str, term_hints: str = "", tm_hits: list[dict] | None = None
+) -> str:
+    """多轮对话后续消息：携带待翻译文本 + 可选推荐译法 + 翻译记忆命中。"""
     parts = []
     if term_hints:
         parts.append(term_hints)
+    if tm_hits:
+        tm_lines = [f"{h['src']} → {h['dst']}" for h in tm_hits]
+        parts.append("## 翻译记忆命中（可参考，但优先词汇表）\n" + "\n".join(tm_lines))
     parts.append(f"### 待翻译文本\n\n{src_text}")
     return "\n\n".join(parts)
 
