@@ -122,7 +122,9 @@ def cmd_init(cfg: Config, args) -> None:
     if llm["provider"] == "openai-compatible":
         llm["base_url"] = _prompt("base_url", str(llm.get("base_url", "https://api.openai.com/v1")))
         llm["model"] = _prompt("model", str(llm.get("model", "gpt-4o-mini")))
-        llm["api_key_env"] = _prompt("API key 环境变量名", str(llm.get("api_key_env", "BOOKTR_API_KEY")))
+        raw_key = _prompt("API key（留空则无需 key；否则直接写入 config）", "").strip()
+        llm["api_key"] = raw_key
+        llm["api_key_required"] = bool(raw_key)
 
     print("\n-- 增强工具（true/false）--")
     planner = data.setdefault("planner", {})

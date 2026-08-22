@@ -43,7 +43,9 @@ class LLMClient:
         self.base_url = llm.get("base_url", "https://api.openai.com/v1").rstrip("/")
         self.model = llm.get("model", "gpt-4o-mini")
         api_env = llm.get("api_key_env", "BOOKTR_API_KEY")
-        self.api_key = os.environ.get(api_env, "")
+        # 优先级：config 直接值 api_key > 环境变量 api_key_env
+        self.api_key = llm.get("api_key") or os.environ.get(api_env, "")
+        self.api_key_required = bool(llm.get("api_key_required", True))
         self.temperature = llm.get("temperature", 0.3)
         self.max_tokens = llm.get("max_tokens", 4096)
         self.timeout = llm.get("timeout", 120)
@@ -63,9 +65,10 @@ class LLMClient:
             self._log(tag, system, user, resp, ok=True,
                       duration_ms=(time.monotonic() - t0) * 1000)
             return resp
-        if not self.api_key:
-            err = (f"未设置 API key（环境变量 {self.cfg.get('llm','api_key_env',default='BOOKTR_API_KEY')}）。"
-                   "或在 data/config.json 将 llm.provider 设为 mock 进行离线测试。")
+        if self.api_key_required and not self.api_key:
+            err = (f"未设置 API key（可在 config.json 的 llm.api_key 直接填写，"
+                   f"或设置环境变量 {self.cfg.get('llm','api_key_env',default='BOOKTR_API_KEY')}；"
+                   "本地免 key 服务可将 llm.api_key_required 设为 false）。")
             self._log(tag, system, user, "", ok=False, error=err,
                       duration_ms=(time.monotonic() - t0) * 1000)
             raise LLMError(err)
@@ -104,9 +107,10 @@ class LLMClient:
                       resp, ok=True, duration_ms=(time.monotonic() - t0) * 1000,
                       messages=messages, task_id=task_id, context_id=context_id)
             return resp
-        if not self.api_key:
-            err = (f"未设置 API key（环境变量 {self.cfg.get('llm','api_key_env',default='BOOKTR_API_KEY')}）。"
-                   "或在 data/config.json 将 llm.provider 设为 mock 进行离线测试。")
+        if self.api_key_required and not self.api_key:
+            err = (f"未设置 API key（可在 config.json 的 llm.api_key 直接填写，"
+                   f"或设置环境变量 {self.cfg.get('llm','api_key_env',default='BOOKTR_API_KEY')}；"
+                   "本地免 key 服务可将 llm.api_key_required 设为 false）。")
             self._log(tag, system, f"[{len(messages)} msgs]", "",
                       ok=False, error=err,
                       duration_ms=(time.monotonic() - t0) * 1000,
@@ -136,10 +140,9 @@ class LLMClient:
         }
         if self.max_tokens:
             body["max_tokens"] = self.max_tokens
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         url = self.base_url + "/chat/completions"
         last_err: Exception | None = None
         for attempt in range(self.max_retries + 1):
@@ -180,10 +183,9 @@ class LLMClient:
         }
         if self.max_tokens:
             body["max_tokens"] = self.max_tokens
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         url = self.base_url + "/chat/completions"
         last_err: Exception | None = None
         retries = 0

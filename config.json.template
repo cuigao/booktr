@@ -11,6 +11,8 @@
     "base_url": "https://api.openai.com/v1",
     "model": "gpt-4o-mini",
     "api_key_env": "BOOKTR_API_KEY",
+    "api_key": "",
+    "api_key_required": true,
     "temperature": 0.3,
     "max_tokens": 4096,
     "timeout": 120,

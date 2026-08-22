@@ -10,6 +10,51 @@ from booktr import llm
 from booktr.llm import REPAIR_METHOD_ESCAPE
 
 
+# ── api_key 解析与 required 开关 ──────────────────────────────────────
+
+
+def _make_cfg(llm_dict, data_dir):
+    from booktr.config import Config
+    import tempfile, os
+    return Config(root=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                  data_dir=data_dir, data={"llm": llm_dict})
+
+
+def test_api_key_priority_config_over_env(tmp_path, monkeypatch):
+    """config 的 llm.api_key 直接值优先于环境变量。"""
+    monkeypatch.setenv("TEST_KEY_ENV", "ENV_KEY")
+    cfg = _make_cfg({"provider": "openai-compatible",
+                     "api_key_env": "TEST_KEY_ENV",
+                     "api_key": "CONFIG_KEY"}, str(tmp_path))
+    client = llm.LLMClient(cfg)
+    assert client.api_key == "CONFIG_KEY"
+
+
+def test_api_key_env_fallback(tmp_path, monkeypatch):
+    """未填 config.api_key 时回退环境变量。"""
+    monkeypatch.setenv("TEST_KEY_ENV", "ENV_KEY")
+    cfg = _make_cfg({"provider": "openai-compatible",
+                     "api_key_env": "TEST_KEY_ENV"}, str(tmp_path))
+    client = llm.LLMClient(cfg)
+    assert client.api_key == "ENV_KEY"
+
+
+def test_api_key_required_default_true(tmp_path):
+    """默认 api_key_required=True。"""
+    cfg = _make_cfg({"provider": "openai-compatible"}, str(tmp_path))
+    assert llm.LLMClient(cfg).api_key_required is True
+
+
+def test_api_key_required_false_skips_check(tmp_path, monkeypatch):
+    """api_key_required=False 且空 key 时不抛 LLMError（本地 ollama 免 key）。"""
+    monkeypatch.delenv("BOOKTR_API_KEY", raising=False)
+    cfg = _make_cfg({"provider": "openai-compatible",
+                     "api_key_required": False}, str(tmp_path))
+    client = llm.LLMClient(cfg)
+    assert client.api_key_required is False
+    assert client.api_key == ""
+
+
 # ── parse_json_response：合法 JSON ──────────────────────────────────────
 
 

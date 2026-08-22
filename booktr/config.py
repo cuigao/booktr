@@ -23,6 +23,8 @@ DEFAULTS: dict[str, Any] = {
         "base_url": "https://api.openai.com/v1",
         "model": "gpt-4o-mini",
         "api_key_env": "BOOKTR_API_KEY",
+        "api_key": "",  # 直接写入的 key（优先级高于 api_key_env）；留空则用环境变量
+        "api_key_required": True,  # 是否需要 key；本地免 key 服务（如 ollama）设为 false
         "temperature": 0.3,
         "max_tokens": 4096,
         "timeout": 120,

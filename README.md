@@ -154,7 +154,8 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   - `work_dir` 中间数据目录（默认 `work`）
   - `lang.source/target` 源/目标语言代码（默认 `ja` → `zh-Hans`）；所有 prompt 通过 `lang_name()` 映射为人类可读名称（`zh-Hans` → "简体中文"），配置代码与提示词一致
   - `llm.provider`：`mock`（离线测试）或 `openai-compatible`（真实 API）
-  - `llm.base_url/model/api_key_env`：OpenAI 兼容服务接入参数
+  - `llm.base_url/model`：OpenAI 兼容服务接入参数
+  - `llm.api_key` / `llm.api_key_env` / `llm.api_key_required`：API key 提供方式（见下）
   - `llm.max_repair`：解析失败自愈重试次数（默认 3）
   - `llm.max_history_segments`：多轮对话保留历史段落数（默认 50）
   - `llm.summary_enabled`：摘要接力开关（默认 true）
@@ -236,7 +237,10 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 ## LLM 接入
 
 - `llm.provider: "mock"`：离线运行，返回确定性结果，用于验证管线与数据结构（无需 API key）。
-- `llm.provider: "openai-compatible"`：通过 `base_url + api_key_env` 接入任意兼容服务（OpenAI / OpenRouter / vLLM / Ollama / LM Studio 等）。需设置 `base_url` 对应的环境变量（默认 `BOOKTR_API_KEY`）。
+- `llm.provider: "openai-compatible"`：接入任意兼容服务（OpenAI / OpenRouter / vLLM / Ollama / LM Studio 等）。API key 提供方式（优先级从高到低）：
+  - `llm.api_key`：**直接写入 config**（init 时输入即写入此项）。
+  - `llm.api_key_env`：环境变量名（默认 `BOOKTR_API_KEY`），从环境读取。
+  - 本地免 key 服务（如 Ollama）：设 `llm.api_key_required: false`，空 key 也可请求（请求头省略 `Authorization`）。
 
 ## 数据文件
 
