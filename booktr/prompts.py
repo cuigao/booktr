@@ -113,41 +113,6 @@ def format_term_hints(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_translate_user(
-    cfg,
-    src_text: str,
-    page_ctx: str,
-    prior_ctx: str,
-    exemplars: list[dict],
-    tm_hits: list[dict],
-    term_hints: str = "",
-) -> str:
-    tgt = cfg.get("lang", "target", default="zh-Hans")
-    tgt_name = lang_name(tgt)
-    parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt_name}。"]
-    if term_hints:
-        parts.append(term_hints)
-    if page_ctx:
-        parts.append(f"## 当前页面上下文\n{page_ctx}")
-    if prior_ctx:
-        parts.append(f"## 前文上下文（保持叙事与术语一致）\n{prior_ctx}")
-    if tm_hits:
-        tm_lines = []
-        for h in tm_hits:
-            tm_lines.append(f"{h['src']} → {h['dst']}")
-        parts.append("## 翻译记忆命中（可参考，但优先词汇表）\n" + "\n".join(tm_lines))
-    if exemplars:
-        ex_lines = []
-        for e in exemplars:
-            ex_lines.append(f"原文：{e['src']}\n参考译文：{e['dst']}")
-        parts.append(
-            "## 风格参照样例（仅模仿其风格与措辞倾向，勿照抄内容）\n"
-            + "\n\n".join(ex_lines)
-        )
-    parts.append("### 待翻译文本\n\n" + src_text)
-    return "\n\n".join(parts)
-
-
 def build_translate_user_first(
     cfg,
     src_text: str,
