@@ -10,7 +10,7 @@ def _path(cfg: Config) -> str:
 
 
 def add(cfg: Config, src: str, dst: str, page: str, segment_id: int | None) -> None:
-    if not src or not dst or src == dst:
+    if not src or not dst or util.normalize_ws(src) == util.normalize_ws(dst):
         return
     # 规范化：压缩空白，作为键
     key = util.normalize_ws(src)

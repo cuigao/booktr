@@ -219,3 +219,45 @@ def test_get_adjacent_translations(tmp_cfg, tmp_path):
     # 截断生效（总量不超过 max_chars）
     assert len(before) <= 10
     assert len(after) <= 10
+
+
+# ── TM 写入守卫（规范化比较）────────────────────────────────────────
+
+
+def test_tm_add_skips_normalized_identical(tmp_cfg):
+    """规范化后 src==dst（仅空白差异）不写入 TM。"""
+    from booktr import tm as tm_mod
+    # 模拟 Photo 类：src 带前导 \n，dst 无，规范化后相同
+    tm_mod.add(tmp_cfg, "\n[[P0]] [Photo / X] [[P1]]", "[[P0]] [Photo / X] [[P1]]",
+               "today/today1.html", 2)
+    assert tm_mod.size(tmp_cfg) == 0
+
+
+def test_tm_add_keeps_real_translation(tmp_cfg):
+    """真正翻译（规范化后不同）写入 TM。"""
+    from booktr import tm as tm_mod
+    tm_mod.add(tmp_cfg, "こんにちは", "你好", "today/today1.html", 2)
+    assert tm_mod.size(tmp_cfg) == 1
+
+
+# ── 用户附加规则注入 ────────────────────────────────────────────────
+
+
+def test_system_prompt_injects_user_rules(tmp_cfg):
+    """user_rules 内容注入 system prompt 的『用户附加规则』小节。"""
+    from booktr import prompts
+    sysp = prompts.build_translate_system(
+        tmp_cfg, [], "", "保留全角写法", "", is_retranslation=False
+    )
+    assert "## 用户附加规则" in sysp
+    assert "保留全角写法" in sysp
+
+
+def test_retranslate_rules_refer_user_rules(tmp_cfg):
+    """重译规则表达『用户附加规则仍然适用』，不强调全角/人名。"""
+    from booktr import prompts
+    sysp = prompts.build_translate_system(
+        tmp_cfg, [], "", "", "", is_retranslation=True
+    )
+    assert "用户附加规则仍然适用" in sysp
+    assert "保留全角写法" not in sysp

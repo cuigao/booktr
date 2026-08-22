@@ -634,7 +634,7 @@ def translate_page(
                     review_queue.append(
                         _make_review(cfg, rel, sid, seg.text, "glossary_conflict", c)
                     )
-            if tm_on and t and t != chk:
+            if tm_on and t and util.normalize_ws(t) != util.normalize_ws(chk):
                 tm_mod.add(cfg, chk, t, rel, seg.id)
             if not data.get("untrusted") and t and chk_plain:
                 # 占位符只在首或尾的 chunk 才记录短语记忆
