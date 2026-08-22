@@ -81,8 +81,14 @@ def process_inbox(cfg: Config, state: State) -> None:
     state.save()
 
 
-def build_context(cfg: Config, site_map: dict, plan: dict, rel: str) -> tuple[str, str, str]:
-    """构建 (页面上下文, 前文上下文, 用户规则)。"""
+def build_context(cfg: Config, site_map: dict, plan: dict, rel: str,
+                  client=None) -> tuple[str, str, str]:
+    """构建 (页面上下文, 前文上下文, 用户规则)。
+
+    client 提供时对缺失摘要的关联页惰性生成（乱序交叉引用提前建摘要）；
+    否则仅读取已有摘要（纯函数）。
+    """
+    _summary = (lambda r: _ensure_summary(cfg, client, r)) if client else (lambda r: _get_page_summary(cfg, r))
     page_meta = site_map.get("pages", {}).get(rel, {})
     page_ctx = ""
     if page_meta:
@@ -98,18 +104,35 @@ def build_context(cfg: Config, site_map: dict, plan: dict, rel: str) -> tuple[st
         page_ctx = "；".join(bits)
 
     prior_ctx = ""
-    window = cfg.get("planner", "context_window", default=5)
-    if plan and window > 0:
+    prevs: list[str] = []
+    ctx_cfg = cfg.get("planner", "context", default={})
+    n1 = int(ctx_cfg.get("plan_predecessors", 5))
+    if plan and n1 > 0:
         order = plan.get("order", [])
         if rel in order:
             idx = order.index(rel)
-            prevs = order[max(0, idx - window) : idx]
+            prevs = order[max(0, idx - n1) : idx]
             lines = []
             for pr in prevs:
-                s = _get_page_summary(cfg, pr)
+                s = _summary(pr)
                 if s:
                     lines.append(f"- {pr}: {s}")
             prior_ctx = "\n".join(lines)
+
+    # 时间前导（去重 N1 后，前 N2 篇）
+    time_rels = _time_predecessors(cfg, site_map, plan, rel)
+    time_rels = [r for r in time_rels if r not in prevs]
+    time_ctx = _format_related_section("时间相关页面", time_rels, cfg, _summary)
+
+    # 链接前导（去重 N1+N2 后，前 N3 篇）
+    link_rels = _link_predecessors(cfg, site_map, plan, rel)
+    seen = set(prevs) | set(time_rels)
+    link_rels = [r for r in link_rels if r not in seen]
+    link_ctx = _format_related_section("链接相关页面", link_rels, cfg, _summary)
+
+    # 拼接：plan 前 N1 → 时间 → 链接（朴素 → 物理 → 语义）
+    related = [prior_ctx, time_ctx, link_ctx]
+    prior_ctx = "\n\n".join(x for x in related if x)
 
     user_rules = cfg.get("user_rules", default="") or ""
     # 用户注入的笔记并入用户规则（优先）
@@ -356,6 +379,119 @@ def _get_page_summary(cfg: Config, rel: str) -> str:
     return data.get("summary", "")
 
 
+def _ensure_summary(cfg: Config, client, rel: str) -> str:
+    """惰性生成页面摘要：已存在则复用，否则生成并保存。返回摘要文本。"""
+    summary_path = os.path.join(cfg.get("summaries", "dir", default="work/summaries"),
+                                rel.replace("/", "__") + ".json")
+    if os.path.exists(summary_path):
+        data = util.read_json(summary_path, {})
+        return data.get("summary", "")
+    try:
+        data = summarize_page(cfg, client, rel)
+    except llm_mod.LLMError:
+        return ""
+    return data.get("summary", "")
+
+
+def _path_hops(a: str, b: str) -> int:
+    """相对路径跳数：公共前缀深度之外的总段数。同目录（含文件名）为 2。"""
+    pa, pb = a.split("/"), b.split("/")
+    common = 0
+    for x, y in zip(pa, pb):
+        if x == y:
+            common += 1
+        else:
+            break
+    return len(pa) + len(pb) - 2 * common
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def _norm_desc(v: float, lo: float, hi: float) -> float:
+    """归一化到 [0,1]，越大越优：v=lo → 1.0，v=hi → 0.0。超出钳位。"""
+    if hi <= lo:
+        return 1.0
+    return _clamp((hi - v) / (hi - lo), 0.0, 1.0)
+
+
+def _date_float(d: str | None) -> float | None:
+    if not d:
+        return None
+    try:
+        y, m, dd = d.split("-")
+        return int(y) * 10000 + int(m) * 100 + int(dd)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _link_predecessors(cfg: Config, site_map: dict, plan: dict, rel: str) -> list[str]:
+    """链接前导：链接到 rel 的内容页，按权重（跳数强 + plan 距离）排序取 top-k。"""
+    ctx = cfg.get("planner", "context", default={})
+    k = int(ctx.get("link_predecessors", 3))
+    if k <= 0:
+        return []
+    pages = site_map.get("pages", {})
+    order = plan.get("order", []) if plan else []
+    rel_idx = order.index(rel) if rel in order else -1
+    hops_w = float(ctx.get("link_hops_weight", 3.0))
+    plan_w = float(ctx.get("link_plan_weight", 1.0))
+    hops_min = float(ctx.get("hops_min", 2))
+    hops_max = float(ctx.get("hops_max", 8))
+    pd_min = float(ctx.get("plan_dist_min", 1))
+    pd_max = float(ctx.get("plan_dist_max", 128))
+    # 索引/导航页不作为链接前导来源
+    index_kinds = {"index"}
+    scored = []
+    for src, p in pages.items():
+        if p.get("kind") in index_kinds:
+            continue
+        if rel not in p.get("links_out", []):
+            continue
+        hops = _path_hops(src, rel)
+        dist = abs(rel_idx - order.index(src)) if rel_idx >= 0 and src in order else pd_max
+        w = hops_w * _norm_desc(hops, hops_min, hops_max) + plan_w * _norm_desc(dist, pd_min, pd_max)
+        scored.append((w, src))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [s for _, s in scored[:k]]
+
+
+def _time_predecessors(cfg: Config, site_map: dict, plan: dict, rel: str) -> list[str]:
+    """时间前导：date 早于 rel 的页，按日期降序（最近优先）取 top-k。"""
+    ctx = cfg.get("planner", "context", default={})
+    k = int(ctx.get("time_predecessors", 3))
+    if k <= 0:
+        return []
+    pages = site_map.get("pages", {})
+    order = plan.get("order", []) if plan else []
+    cur = _date_float(pages.get(rel, {}).get("date"))
+    if cur is None:
+        return []
+    cands = []
+    for r in order:
+        d = _date_float(pages.get(r, {}).get("date"))
+        if d is not None and d < cur:
+            cands.append((d, r))
+    cands.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in cands[:k]]
+
+
+def _format_related_section(title: str, rels: list[str], cfg: Config,
+                            summary_fn=None) -> str:
+    """把关联页摘要格式化为独立小节。summary_fn 缺省用 _get_page_summary。"""
+    if summary_fn is None:
+        summary_fn = lambda r: _get_page_summary(cfg, r)
+    lines = []
+    for r in rels:
+        s = summary_fn(r)
+        if s:
+            lines.append(f"- {r}: {s}")
+    if not lines:
+        return ""
+    return f"## {title}\n" + "\n".join(lines)
+
+
 def _get_adjacent_translations(cfg: Config, seg, segs: list, state, rel: str,
                                max_chars: int) -> tuple[str, str]:
     """获取待翻译段落的前后文已翻译内容。"""
@@ -439,7 +575,7 @@ def translate_page(
     total_chars = sum(len(s.text) for s in text_segs)
     _ev("plan", {"segments": len(text_segs), "total_chars": total_chars, "rel": rel})
 
-    page_ctx, prior_ctx, user_rules = build_context(cfg, site_map, plan, rel)
+    page_ctx, prior_ctx, user_rules = build_context(cfg, site_map, plan, rel, client=client)
     guide = styles_mod.load_guide(cfg) if cfg.get("style", "rules_enabled", default=True) else ""
     focus = cfg.get("translators_notes", "focus", default="")
     tm_on = cfg.get("tm", "enabled", default=True)

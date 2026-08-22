@@ -271,3 +271,101 @@ def test_user_rules_priority_line(tmp_cfg):
     )
     assert "（如有冲突，以本条用户附加规则为准）" in sysp
     assert "全角规则" in sysp
+
+
+# ── 链接/时间前导 ─────────────────────────────────────────────────────
+
+
+def _mk_site_map():
+    """构造合成 site_map：today 系列 + photo 系列 + 链接关系。"""
+    pages = {
+        "today/today1.html": {"kind": "diary", "date": "1996-10-01", "links_out": []},
+        "today/today2.html": {"kind": "diary", "date": "1996-11-01", "links_out": ["today/manbow.html"]},
+        "today/today3.html": {"kind": "diary", "date": "1996-12-10", "links_out": []},
+        "today/manbow.html": {"kind": "special", "date": None, "links_out": []},
+        "photo/photo1.html": {"kind": "photo_diary", "date": "1997-06-17", "links_out": []},
+        "index.html": {"kind": "index", "date": "2004-04-28", "links_out": []},
+    }
+    return {"pages": pages}
+
+
+def _mk_plan():
+    return {"order": ["index.html", "today/today1.html", "today/today2.html",
+                      "today/today3.html", "today/manbow.html", "photo/photo1.html"]}
+
+
+def _ctx_cfg(tmp_cfg, **kw):
+    """返回带非零前导数量的 cfg（覆盖 conftest 的 0 默认）。"""
+    ctx = {"plan_predecessors": 5, "time_predecessors": 3, "link_predecessors": 3}
+    ctx.update(kw)
+    tmp_cfg.data.setdefault("planner", {})["context"] = ctx
+    return tmp_cfg
+
+
+def test_link_predecessors_finds_backlink(tmp_cfg):
+    """链接前导：manbow 被 today2 链接，应返回 today2。"""
+    sm = _mk_site_map()
+    plan = _mk_plan()
+    rels = tr._link_predecessors(_ctx_cfg(tmp_cfg), sm, plan, "today/manbow.html")
+    assert "today/today2.html" in rels
+
+
+def test_link_predecessors_excludes_index(tmp_cfg):
+    """链接前导排除索引/导航页。"""
+    sm = _mk_site_map()
+    plan = _mk_plan()
+    # index 链接到 today1，但 index 是索引页，不应作为前导
+    sm["pages"]["index.html"]["links_out"] = ["today/today1.html"]
+    rels = tr._link_predecessors(_ctx_cfg(tmp_cfg), sm, plan, "today/today1.html")
+    assert "index.html" not in rels
+
+
+def test_time_predecessors_chronological(tmp_cfg):
+    """时间前导：date 早于当前页，按日期降序。"""
+    sm = _mk_site_map()
+    plan = _mk_plan()
+    rels = tr._time_predecessors(_ctx_cfg(tmp_cfg), sm, plan, "photo/photo1.html")
+    # photo1 date=1997-06-17，早于它的有 today1/2/3
+    assert "today/today3.html" in rels
+    assert "today/today2.html" in rels
+    assert "today/today1.html" in rels
+    # 无日期页（manbow）不作为时间前导
+    assert "today/manbow.html" not in rels
+
+
+def test_time_predecessors_no_date(tmp_cfg):
+    """无日期的当前页无时间前导。"""
+    sm = _mk_site_map()
+    plan = _mk_plan()
+    rels = tr._time_predecessors(_ctx_cfg(tmp_cfg), sm, plan, "today/manbow.html")
+    assert rels == []
+
+
+def test_path_hops():
+    assert tr._path_hops("today/today2.html", "today/manbow.html") == 2
+    assert tr._path_hops("today/today2.html", "photo/photo1.html") == 4
+
+
+def test_norm_desc():
+    assert tr._norm_desc(2, 2, 8) == 1.0
+    assert tr._norm_desc(8, 2, 8) == 0.0
+    assert tr._norm_desc(5, 2, 8) == 0.5
+    assert tr._norm_desc(0, 2, 8) == 1.0  # 钳位
+    assert tr._norm_desc(10, 2, 8) == 0.0  # 钳位
+
+
+def test_build_context_related_sections(tmp_cfg):
+    """build_context 注入时间/链接相关页面小节（去重）。"""
+    sm = _mk_site_map()
+    plan = _mk_plan()
+    _ctx_cfg(tmp_cfg)
+    # 为关联页写摘要
+    sdir = os.path.join(tmp_cfg.data_dir, "work", "summaries")
+    os.makedirs(sdir, exist_ok=True)
+    for rel, text in [("today/today2.html", "today2摘要"), ("today/today3.html", "today3摘要")]:
+        with open(os.path.join(sdir, rel.replace("/", "__") + ".json"), "w", encoding="utf-8") as f:
+            json.dump({"summary": text}, f, ensure_ascii=False)
+    page_ctx, prior_ctx, _ = tr.build_context(tmp_cfg, sm, plan, "today/manbow.html")
+    # manbow 的 plan 前导（N1=5）已含 today2/today3，摘要应注入
+    assert "today2摘要" in prior_ctx
+    assert "today3摘要" in prior_ctx

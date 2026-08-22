@@ -215,7 +215,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 | 短语记忆 | 导航短语精确匹配复用；自动学习；长句经宽松匹配注入 user prompt 作推荐译法 | `phrases.max_len` |
 | 风格指南 | `style-extract` 从对照样例提炼规则注入 | `style.rules_enabled` |
 | 风格锚定 | 字符 n-gram 相似度检索 top-k 样例 few-shot 注入 | `style.exemplar_enabled` |
-| 上下文包 | 前 N 篇日记摘要 | `planner.context_window` |
+| 上下文包 | plan 前 N1 篇 + 时间前导 N2 + 链接前导 N3 摘要（逐级去重） | `planner.context` |
 | 一致性 QA | 对已译页做体检：本地规则（占位符完整性=高危、术语一致=中危）+ LLM 深度语义检查（`qa.deep_llm_check`）；问题以 `qa_*` 原因写入审核队列供人工确认，不自动触发重译 | `qa.deep_llm_check` |
 | 词汇/短语审计 | `audit-terms` 用新词汇表/短语记忆重建已译段（按占位符边界精确匹配），同步 state+段缓存并重生成 out | `audit-terms` |
 | 译者注 | 跨页关联/趣味发现 → 外部 JSON | `annotate` |

@@ -29,7 +29,7 @@ def _default_data() -> dict:
         "style": {"rules_enabled": False, "exemplar_enabled": False},
         "tm": {"enabled": False},
         "llm_logs": {"dir": "work/llm_logs", "auto_export": False},
-        "planner": {"context_window": 0},
+        "planner": {"context": {"plan_predecessors": 0, "time_predecessors": 0, "link_predecessors": 0}},
     }
 
 

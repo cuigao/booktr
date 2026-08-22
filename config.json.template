@@ -29,7 +29,18 @@
   "planner": {
     "static_first": true,
     "diary_chronological": true,
-    "context_window": 5,
+    "context": {
+      "plan_predecessors": 5,
+      "time_predecessors": 3,
+      "link_predecessors": 3,
+      "link_hops_weight": 3.0,
+      "link_plan_weight": 1.0,
+      "hops_min": 2,
+      "hops_max": 8,
+      "plan_dist_min": 1,
+      "plan_dist_max": 128,
+      "max_chars": 1500
+    },
     "survey_enabled": false,
     "summarize": true,
     "weights": {

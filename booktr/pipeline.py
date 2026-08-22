@@ -128,7 +128,10 @@ def cmd_init(cfg: Config, args) -> None:
 
     print("\n-- 增强工具（true/false）--")
     planner = data.setdefault("planner", {})
-    planner["context_window"] = int(_prompt("前文上下文窗口（日记页数）", str(planner.get("context_window", 5))))
+    ctx = planner.setdefault("context", {})
+    ctx["plan_predecessors"] = int(_prompt("前文上下文：plan 前导数量（N1）", str(ctx.get("plan_predecessors", 5))))
+    ctx["time_predecessors"] = int(_prompt("时间前导数量（N2）", str(ctx.get("time_predecessors", 3))))
+    ctx["link_predecessors"] = int(_prompt("链接前导数量（N3）", str(ctx.get("link_predecessors", 3))))
     style = data.setdefault("style", {})
     style["rules_enabled"] = _prompt("风格指南注入", str(style.get("rules_enabled", True))) not in ("false", "False", "0", "")
     style["exemplar_enabled"] = _prompt("风格样例 few-shot", str(style.get("exemplar_enabled", True))) not in ("false", "False", "0", "")

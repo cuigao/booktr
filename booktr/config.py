@@ -41,7 +41,16 @@ DEFAULTS: dict[str, Any] = {
     "planner": {
         "static_first": True,
         "diary_chronological": True,
-        "context_window": 5,
+        "context": {
+            "plan_predecessors": 5,  # N1：plan 前 N 篇摘要
+            "time_predecessors": 3,  # N2：时间前导 top-k
+            "link_predecessors": 3,  # N3：链接前导 top-k
+            "link_hops_weight": 3.0,  # 跳数权重（强，同目录优先）
+            "link_plan_weight": 1.0,  # plan 序号差权重
+            "hops_min": 2, "hops_max": 8,  # 跳数归一化范围
+            "plan_dist_min": 1, "plan_dist_max": 128,  # plan_dist 归一化范围
+            "max_chars": 1500,  # 相关页摘要总字符上限
+        },
         "survey_enabled": False,
         "summarize": True,
         "weights": {
