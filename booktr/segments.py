@@ -47,8 +47,177 @@ def _placeholder(ph_open: str, ph_close: str, idx: int) -> str:
     return f"{ph_open}{idx}{ph_close}"
 
 
+_WS_RUN_RE = re.compile(r"[\s\u3000]+|&(?:nbsp|#160|#32);", re.I)
+
+# 段间骨架标记块（Q）额外包含的特殊标签（其内容不翻译，整体作边界）
+_Q_ATOMIC = {"script", "style", "title"}
+
+
+def _tokenize(html: str) -> list[tuple[str, int, int]]:
+    """把 HTML 扫描为 (kind, start, end) span：tag / comment / decl / ws / text。
+
+    script/style/title 整个元素作为单个 tag span（内容不参与翻译）。
+    ws 含半角空白、换行、\u3000 与 nbsp 实体。
+    """
+    tokens: list[tuple[str, int, int]] = []
+    i = 0
+    n = len(html)
+    while i < n:
+        m = _TAG_RE.match(html, i)
+        if m:
+            if m.group("comment") is not None:
+                tokens.append(("comment", i, m.end()))
+                i = m.end()
+                continue
+            if m.group("decl") is not None:
+                tokens.append(("decl", i, m.end()))
+                i = m.end()
+                continue
+            token = m.group(0)
+            tagname, is_end, _sc = _parse_tag(token)
+            if tagname in _Q_ATOMIC:
+                close = re.search(rf"</{tagname}\s*>", html[m.end():], re.I)
+                end = m.end() + close.end() if close else n
+                tokens.append(("tag", i, end))
+                i = end
+                continue
+            tokens.append(("tag", i, m.end()))
+            i = m.end()
+            continue
+        # 文本/空白段，直到下一个标签
+        nxt = _TAG_RE.search(html, i)
+        j = nxt.start() if nxt else n
+        k = i
+        while k < j:
+            wm = _WS_RUN_RE.match(html, k)
+            if wm and wm.start() == k:
+                tokens.append(("ws", k, wm.end()))
+                k = wm.end()
+            else:
+                s = k
+                while k < j:
+                    wm2 = _WS_RUN_RE.match(html, k)
+                    if wm2 and wm2.start() == k:
+                        break
+                    k += 1
+                tokens.append(("text", s, k))
+        i = j
+    return tokens
+
+
+def _pre_ranges(html: str) -> list[tuple[int, int]]:
+    """定位 <pre>...</pre> 范围（含内部换行升格区域）。"""
+    ranges = []
+    for m in re.finditer(r"<pre[^>]*>(.*?)</pre>", html, re.I | re.S):
+        ranges.append((m.start(), m.end()))
+    return ranges
+
+
+def _build_blocks(
+    tokens: list[tuple[str, int, int]], html: str, block_tags: set[str],
+    pre_ranges: list[tuple[int, int]],
+) -> list[dict]:
+    """合并标签块并分类 Q/P。
+
+    每个块 = 连续「标签 + 邻接空白」（含 &nbsp;），向两侧吸收紧邻空白；
+    相邻块间无 text 则合并。分类：含 block 标签/注释/声明 → Q（段间骨架）；
+    仅 inline → P（段内占位符）。<pre> 内的换行空白块单独升格：
+    单一 \\n → P，连续换行（中间即使有空白）→ Q。
+    """
+    n = len(tokens)
+    ws_adjacent = [False] * n
+    for idx, (k, _s, _e) in enumerate(tokens):
+        if k == "ws":
+            ws_adjacent[idx] = (
+                (idx > 0 and tokens[idx - 1][0] != "text")
+                or (idx + 1 < n and tokens[idx + 1][0] != "text")
+            )
+
+    blocks: list[dict] = []
+    i = 0
+    while i < n:
+        k, s, e = tokens[i]
+        if k in ("tag", "comment", "decl"):
+            bs, be = s, e
+            tag_kinds = [k]
+            # 左向吸收所有连续 ws（含 &nbsp;），直至遇到非 ws
+            j = i - 1
+            while j >= 0 and tokens[j][0] == "ws":
+                bs = tokens[j][1]
+                j -= 1
+            i += 1
+            while i < n:
+                k2, s2, e2 = tokens[i]
+                if k2 in ("tag", "comment", "decl"):
+                    tag_kinds.append(k2)
+                    be = e2
+                    i += 1
+                elif k2 == "ws" and ws_adjacent[i]:
+                    be = e2
+                    i += 1
+                else:
+                    break
+            blocks.append({
+                "start": bs, "end": be, "tag_kinds": tag_kinds,
+                "raw": html[bs:be], "pre_newline": None,
+            })
+        else:
+            i += 1
+
+    # <pre> 内的换行空白块升格（未被子标签块吸收的独立换行）
+    covered = set()
+    for b in blocks:
+        for idx, (k, s, e) in enumerate(tokens):
+            if k == "ws" and s >= b["start"] and e <= b["end"]:
+                covered.add(idx)
+    for idx, (k, s, e) in enumerate(tokens):
+        if k != "ws" or idx in covered:
+            continue
+        in_pre = any(s >= ps and e <= pe for ps, pe in pre_ranges)
+        if not in_pre:
+            continue
+        ws_text = html[s:e]
+        nl_count = ws_text.count("\n")
+        if nl_count <= 0:
+            continue
+        blocks.append({
+            "start": s, "end": e, "tag_kinds": ["ws"],
+            "raw": ws_text, "pre_newline": "Q" if nl_count >= 2 else "P",
+        })
+
+    # 分类 Q/P
+    q_tags = block_tags | _Q_ATOMIC
+    for b in blocks:
+        if b["pre_newline"] is not None:
+            b["is_q"] = (b["pre_newline"] == "Q")
+            continue
+        b["is_q"] = False
+        for k in b["tag_kinds"]:
+            if k in ("comment", "decl"):
+                b["is_q"] = True
+                break
+            if k == "tag":
+                pass
+        if b["is_q"]:
+            continue
+        for tag_match in _TAG_RE.finditer(b["raw"]):
+            token = tag_match.group(0)
+            if tag_match.group("tag"):
+                tn, _ie, _sc = _parse_tag(token)
+                if tn in q_tags:
+                    b["is_q"] = True
+                    break
+    return blocks
+
+
 def split_segments(html: str, cfg: Config) -> list[Segment]:
-    """将 HTML 文本切分为可翻译段，含字符偏移。"""
+    """将 HTML 文本切分为可翻译段，含字符偏移。
+
+    Q/P 标签块模型：
+      - Q = 段间骨架（block 标签/注释/声明/script/style/title，不进 LLM）
+      - P = 段内占位符（inline 标签 + 邻接空白，进 LLM）
+      - 段文本首尾绝无空白与标签（start/end 收缩到正文边界）。
+    """
     block_tags = set(cfg.get("segments", "block_tags", default=[]))
     ph_open = cfg.get("segments", "placeholder_open", default="⟪")
     ph_close = cfg.get("segments", "placeholder_close", default="⟫")
@@ -58,7 +227,6 @@ def split_segments(html: str, cfg: Config) -> list[Segment]:
 
     segments: list[Segment] = []
     seg_id = [0]
-    body = html
     title_text = _extract_head_title(html)
     if title_text is not None and translate_title and title_text.strip():
         t_start = html.find(title_text)
@@ -70,126 +238,102 @@ def split_segments(html: str, cfg: Config) -> list[Segment]:
         if s:
             segments.append(s)
 
-    # 遍历标签，收集文本 token
-    pos = 0
-    # 当前累积文本段：文本块与内联标签的混合
-    cur_chunks: list[tuple[str, int, int]] = []  # (kind, start, end)
-    in_script_style = False
+    tokens = _tokenize(html)
+    pre_ranges = _pre_ranges(html)
+    blocks = _build_blocks(tokens, html, block_tags, pre_ranges)
 
-    def flush() -> None:
-        nonlocal cur_chunks
-        if not cur_chunks:
+    # 生成扁平 item 流：Q / P / TEXT / WS（去重，按 start 升序）
+    items: list[tuple[str, int, int, str]] = []
+    cursor = 0
+    covered: set[int] = set()
+    for b in sorted(blocks, key=lambda x: x["start"]):
+        for idx, (k, s, e) in enumerate(tokens):
+            if k in ("tag", "comment", "decl", "ws") and s >= b["start"] and e <= b["end"]:
+                covered.add(idx)
+    for idx, (k, s, e) in enumerate(tokens):
+        if idx in covered:
+            continue
+        if k == "text":
+            items.append(("TEXT", s, e, html[s:e]))
+        else:
+            items.append(("WS", s, e, html[s:e]))
+    for b in sorted(blocks, key=lambda x: x["start"]):
+        items.append(("Q" if b["is_q"] else "P", b["start"], b["end"], b["raw"]))
+    items.sort(key=lambda x: (x[1], x[2]))
+
+    # 判定每个 WS 是否"内部"（前有 text/占位符 且 后有 text）→ 保留进段；否则骨架
+    n_items = len(items)
+    is_internal_ws = [False] * n_items
+    for idx in range(n_items):
+        if items[idx][0] != "WS":
+            continue
+        before_text = False
+        after_text = False
+        for j in range(idx - 1, -1, -1):
+            if items[j][0] in ("TEXT", "P"):
+                before_text = True
+                break
+            if items[j][0] == "Q":
+                break
+        for j in range(idx + 1, n_items):
+            if items[j][0] in ("TEXT", "P"):
+                after_text = True
+                break
+            if items[j][0] == "Q":
+                break
+        is_internal_ws[idx] = before_text and after_text
+
+    # 按 Q 切段：段 = 文本 + 段中 P + 内部 WS；首尾无空白无标签
+    cur_text: list[str] = []
+    cur_ph: dict[str, str] = {}
+    ph_idx = [0]
+    cur_start: int | None = None
+    cur_end: int | None = None
+    cur_src: list[str] = []
+
+    def flush_seg() -> None:
+        nonlocal cur_text, cur_ph, cur_start, cur_end, cur_src
+        if cur_start is None:
+            cur_text, cur_ph, cur_src = [], {}, []
             return
-        # 无实质文字内容则丢弃
-        text_joined = "".join(html[c[1] : c[2]] for c in cur_chunks if c[0] == "text")
-        if not any(ch.strip() for ch in text_joined):
-            cur_chunks = []
-            return
-        # 构造带占位符的文本（相邻 inline 标签合并为一个占位符，跳过纯空白）
-        ph_map: dict[str, str] = {}
-        out_parts: list[str] = []
-        ph_idx = [0]
-        start = cur_chunks[0][1]
-        end = cur_chunks[-1][2]
-        i = 0
-        nchunks = len(cur_chunks)
-        while i < nchunks:
-            kind, s, e = cur_chunks[i]
-            if kind == "text":
-                out_parts.append(html[s:e])
-                i += 1
-            else:
-                # 合并连续的 tag 块（跳过纯空白 text chunk）
-                tag_start = s
-                tag_end = e
-                i += 1
-                while i < nchunks:
-                    if cur_chunks[i][0] == "tag":
-                        tag_end = cur_chunks[i][2]
-                        i += 1
-                    elif cur_chunks[i][0] == "text":
-                        # 纯空白跳过，继续合并 tag
-                        if not html[cur_chunks[i][1]:cur_chunks[i][2]].strip():
-                            i += 1
-                            continue
-                        break
-                    else:
-                        break
-                token = _placeholder(ph_open, ph_close, ph_idx[0])
-                ph_idx[0] += 1
-                ph_map[token] = html[tag_start:tag_end]
-                out_parts.append(token)
-        display = "".join(out_parts)
+        display = "".join(cur_text)
         if len(display.strip()) < min_len:
-            cur_chunks = []
+            cur_text, cur_ph, cur_src, cur_start, cur_end = [], {}, [], None, None
             return
         seg = _make_segment(
-            seg_id, kind="text", text=display, start=start, end=end,
-            placeholders=ph_map, cfg=cfg, source_text=text_joined,
+            seg_id, kind="text", text=display, start=cur_start, end=cur_end,
+            placeholders=dict(cur_ph), cfg=cfg, source_text="".join(cur_src),
         )
         if seg:
             segments.append(seg)
-        cur_chunks = []
+        cur_text, cur_ph, cur_src, cur_start, cur_end = [], {}, [], None, None
 
-    # 主体扫描
-    i = 0
-    n = len(html)
-    in_tag_until = -1
-    while i < n:
-        m = _TAG_RE.match(html, i)
-        if m:
-            token = m.group(0)
-            if m.group("comment") is not None:
-                # 注释强制分段边界
-                flush()
-            elif m.group("decl") is not None:
-                pass
-            elif m.group("tag") is not None:
-                tagname, is_end, self_closing = _parse_tag(token)
-                if tagname in ("script", "style"):
-                    flush()
-                    # 跳过脚本/样式内容到闭合标签
-                    m_end = re.search(rf"</{tagname}\s*>", html[i:], re.I)
-                    if not m_end:
-                        end = n
-                    else:
-                        end = i + m_end.end()
-                    i = end
-                    continue
-                if tagname == "title" and not is_end:
-                    # title 内容由 head_title 段单独处理，主循环跳过
-                    m_end = re.search(r"</title\s*>", html[i:], re.I)
-                    if not m_end:
-                        end = n
-                    else:
-                        end = i + m_end.end()
-                    i = end
-                    continue
-                if is_end:
-                    if tagname in block_tags:
-                        flush()
-                    else:
-                        # 内联闭合标签也作为占位符保留，避免被段替换覆盖
-                        cur_chunks.append(("tag", i, i + len(token)))
-                else:
-                    if tagname in block_tags:
-                        flush()
-                    elif self_closing:
-                        # 自闭合内联标签（如 <img>）加入当前段为占位符
-                        cur_chunks.append(("tag", i, i + len(token)))
-                    else:
-                        # 普通内联开标签
-                        cur_chunks.append(("tag", i, i + len(token)))
-            i = m.end()
-        else:
-            # 文本 token
-            nxt = _TAG_RE.search(html, i)
-            j = nxt.start() if nxt else n
-            chunk = html[i:j]
-            if chunk:
-                cur_chunks.append(("text", i, j))
-            i = j
-    flush()
+    for idx, (kind, s, e, raw) in enumerate(items):
+        if kind == "Q":
+            flush_seg()
+        elif kind == "P":
+            if cur_start is not None:
+                token = _placeholder(ph_open, ph_close, ph_idx[0])
+                ph_idx[0] += 1
+                cur_ph[token] = raw
+                cur_text.append(token)
+                cur_src.append(raw)
+                cur_end = e
+            else:
+                pass  # 段首 P → 骨架（天然保留）
+        elif kind == "TEXT":
+            if cur_start is None:
+                cur_start = s
+            cur_end = e
+            cur_text.append(raw)
+            cur_src.append(raw)
+        elif kind == "WS":
+            if is_internal_ws[idx] and cur_start is not None:
+                cur_text.append(raw)
+                cur_src.append(raw)
+                cur_end = e
+            # 否则骨架
+    flush_seg()
 
     # 属性段（alt/title 属性值）
     if translate_alt or translate_title:
@@ -297,12 +441,16 @@ def segments_for_page(cfg: Config, rel: str, html: str | None = None,
 
 
 def reassemble(html: str, segments: list[Segment]) -> str:
-    """将翻译结果拼回原文。按 start 倒序替换，避免偏移失效。"""
+    """将翻译结果拼回原文。按 start 倒序替换，避免偏移失效。
+
+    收译文先去首尾全角/半角空白（含 &nbsp;），再还原占位符。
+    """
     out = html
     for seg in sorted(segments, key=lambda s: s.start, reverse=True):
         if seg.translation is None:
             continue
-        replacement = _restore_placeholders(seg.translation, seg.placeholders)
+        t = re.sub(r"^[\s\u3000]+|[\s\u3000]+$", "", seg.translation)
+        replacement = _restore_placeholders(t, seg.placeholders)
         out = out[: seg.start] + replacement + out[seg.end :]
     return out
 
