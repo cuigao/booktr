@@ -532,7 +532,13 @@ def cmd_reset(cfg: Config, args) -> None:
 
     - 整页重置：segments 清空、status=pending、删除段缓存（全新翻译）
     - 指定段重置：仅该段 translation=None，保留段结构（只重译该段）
+
+    同时清理对应范围的翻译记忆（TM）与翻译笔记（notes），避免重译时旧译文/旧
+    说明经检索注入形成自我锚定；`--keep-tm` / `--keep-notes` 可分别关闭。
     """
+    from . import notes as notes_mod
+    from . import tm as tm_mod
+
     state = tr.State(cfg)
 
     if args.all:
@@ -543,21 +549,56 @@ def cmd_reset(cfg: Config, args) -> None:
         print("未指定页面")
         return
 
-    if not args.yes:
-        if input(f"确认重置 {len(pages)} 页？[y/N] ").strip().lower() not in ("y", "yes"):
-            print("已取消")
-            return
+    keep_tm = getattr(args, "keep_tm", False)
+    keep_notes = getattr(args, "keep_notes", False)
 
+    # 逐页解析目标段，并预览将清理的 TM/notes 条数
+    plans = []
+    print(f"将重置 {len(pages)} 页：")
     for rel in pages:
         pstate = state.page(rel)
         segs = pstate.get("segments", {})
-
         if args.all_segments:
             target = list(segs.keys())
         elif args.segments:
             target = [str(s) for s in args.segments]
         else:
             target = None  # 整页
+
+        if target is None:
+            n_tm = 0 if keep_tm else tm_mod.purge_page(cfg, rel, dry_run=True)
+            n_notes = 0 if keep_notes else notes_mod.purge_page(cfg, rel, dry_run=True)
+            desc = "（整页）"
+        else:
+            n_tm = 0 if keep_tm else tm_mod.purge_segments(cfg, rel, target, dry_run=True)
+            n_notes = 0 if keep_notes else notes_mod.purge_segments(cfg, rel, target, dry_run=True)
+            desc = f" 段 {target}"
+        tm_txt = "保留" if keep_tm else f"{n_tm} 条"
+        notes_txt = "保留" if keep_notes else f"{n_notes} 条"
+        print(f"  {rel}{desc}  翻译记忆 {tm_txt}、翻译笔记 {notes_txt}")
+        plans.append((rel, target, n_tm, n_notes))
+
+    if not args.yes:
+        if input(f"确认重置 {len(pages)} 页？[y/N] ").strip().lower() not in ("y", "yes"):
+            print("已取消")
+            return
+
+    total_tm = total_notes = 0
+    for rel, target, _n_tm, _n_notes in plans:
+        pstate = state.page(rel)
+        segs = pstate.get("segments", {})
+
+        # 清理 TM / notes（预览已算过条数，实际执行）
+        if target is None:
+            if not keep_tm:
+                total_tm += tm_mod.purge_page(cfg, rel)
+            if not keep_notes:
+                total_notes += notes_mod.purge_page(cfg, rel)
+        else:
+            if not keep_tm:
+                total_tm += tm_mod.purge_segments(cfg, rel, target)
+            if not keep_notes:
+                total_notes += notes_mod.purge_segments(cfg, rel, target)
 
         if target is None:
             # 方式 A：整页重置
@@ -588,6 +629,8 @@ def cmd_reset(cfg: Config, args) -> None:
         print(f"  已重置: {rel}{desc}")
 
     state.save()
+    if total_tm or total_notes:
+        print(f"已清理翻译记忆: {total_tm} 条 / 翻译笔记: {total_notes} 条")
     print(f"\n重置完成，下次 translate 将重译指定内容")
 
 
@@ -1707,11 +1750,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--all", action="store_true", help="重新生成所有已处理页")
     sp.set_defaults(func=cmd_regenerate)
 
-    sp = mk("reset", help="重置指定页面或段，使下次 translate 重新翻译")
+    sp = mk("reset", help="重置指定页面或段，使下次 translate 重新翻译（并清理对应 TM/笔记）")
     sp.add_argument("pages", nargs="*", help="页面路径，如 today/today4.html")
     sp.add_argument("--segments", type=int, nargs="*", help="只重置指定段（方式B），如 --segments 16")
     sp.add_argument("--all-segments", action="store_true", help="重置该页所有段（保留段结构）")
     sp.add_argument("--all", action="store_true", help="重置所有页面")
+    sp.add_argument("--keep-tm", action="store_true", help="不清理翻译记忆（TM）")
+    sp.add_argument("--keep-notes", action="store_true", help="不清理翻译笔记（notes）")
     sp.add_argument("-y", "--yes", action="store_true", help="跳过确认")
     sp.set_defaults(func=cmd_reset)
 

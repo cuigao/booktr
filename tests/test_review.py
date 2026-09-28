@@ -82,6 +82,54 @@ def test_review_confirm_adds_glossary(tmp_cfg, tmp_path):
     assert any(it["src"] == "アルバム" for it in items)
 
 
+def test_review_delete_purges_tm_and_notes(tmp_cfg, tmp_path):
+    from booktr import notes as notes_mod
+    from booktr import tm as tm_mod
+    from booktr import util
+
+    _disable_auto_regenerate(tmp_cfg)
+    state, sid = _make_translated_page(tmp_cfg, tmp_path)
+    state.page("page1.html")["status"] = "review"
+    state.save()
+    util.append_jsonl(tm_mod._path(tmp_cfg),
+                      {"key": "k", "src": "原文", "dst": "旧译",
+                       "page": "page1.html", "segment_id": int(sid), "usage_count": 1})
+    notes_mod.add(tmp_cfg, "page1.html", int(sid), "q", "旧说明")
+    review_mod.save_queue(tmp_cfg, _queue(tmp_cfg, "page1.html", sid, "low_confidence"))
+
+    review_mod.interactive_review(tmp_cfg, prompt="d", max_items=1)
+
+    recs = util.read_jsonl(tm_mod._path(tmp_cfg))
+    assert not any(r["page"] == "page1.html" and str(r["segment_id"]) == str(sid) for r in recs)
+    ns = notes_mod.all_notes(tmp_cfg)
+    assert not any(n.get("page") == "page1.html" and str(n.get("segment_id")) == str(sid) for n in ns)
+    assert review_mod.load_queue(tmp_cfg)[0]["status"] == "deleted"
+
+
+def test_review_delete_declined_skips(tmp_cfg, tmp_path):
+    from booktr import notes as notes_mod
+    from booktr import tm as tm_mod
+    from booktr import util
+
+    _disable_auto_regenerate(tmp_cfg)
+    state, sid = _make_translated_page(tmp_cfg, tmp_path)
+    state.page("page1.html")["status"] = "review"
+    state.save()
+    util.append_jsonl(tm_mod._path(tmp_cfg),
+                      {"key": "k", "src": "原文", "dst": "旧译",
+                       "page": "page1.html", "segment_id": int(sid), "usage_count": 1})
+    review_mod.save_queue(tmp_cfg, _queue(tmp_cfg, "page1.html", sid, "low_confidence"))
+
+    review_mod.interactive_review(tmp_cfg, prompt="d", confirm="n", max_items=1)
+
+    assert review_mod.load_queue(tmp_cfg)[0]["status"] == "skipped"
+    # TM 未被清理
+    assert any(r["page"] == "page1.html" for r in util.read_jsonl(tm_mod._path(tmp_cfg)))
+    # 段译文保留、页面仍 review
+    st = tr.State(tmp_cfg)
+    assert st.page("page1.html")["segments"][str(sid)]["translation"] is not None
+
+
 def test_review_skip(tmp_cfg, tmp_path):
     _disable_auto_regenerate(tmp_cfg)
     state, sid = _make_translated_page(tmp_cfg, tmp_path)

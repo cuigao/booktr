@@ -90,6 +90,45 @@ def purge_keywords(cfg: Config, keywords: list[str]) -> int:
     return removed
 
 
+def purge_segments(cfg: Config, page: str, segment_ids, dry_run: bool = False) -> int:
+    """清理指定页面若干段的翻译笔记。返回（将）删除条数。
+
+    仅匹配 page 非空且 segment_id 相等的笔记，故用户注入笔记（page=""）不受影响。
+    """
+    if not page or not segment_ids:
+        return 0
+    ids = {str(s) for s in segment_ids}
+    notes = all_notes(cfg)
+    kept = []
+    removed = 0
+    for n in notes:
+        if n.get("page") and n.get("page") == page \
+                and str(n.get("segment_id")) in ids:
+            removed += 1
+            continue
+        kept.append(n)
+    if removed and not dry_run:
+        _rewrite(cfg, kept)
+    return removed
+
+
+def purge_page(cfg: Config, page: str, dry_run: bool = False) -> int:
+    """清理指定页面的全部翻译笔记（不含用户注入笔记）。返回（将）删除条数。"""
+    if not page:
+        return 0
+    notes = all_notes(cfg)
+    kept = []
+    removed = 0
+    for n in notes:
+        if n.get("page") == page:
+            removed += 1
+            continue
+        kept.append(n)
+    if removed and not dry_run:
+        _rewrite(cfg, kept)
+    return removed
+
+
 def relevant(cfg: Config, text: str, limit: int = 8) -> list[dict]:
     """返回与文本相关的笔记（按引文/摘要关键词命中）。"""
     import re

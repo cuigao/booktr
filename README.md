@@ -124,8 +124,11 @@ python booktr-cli.py regenerate profile/profile.html
 python booktr-cli.py regenerate --all  # 重新生成所有已处理页
 
 # 17) 重置指定页面或段，使下次 translate 重新翻译
+#     同时自动清理该页/该段对应的翻译记忆(TM)与翻译笔记(notes)，避免重译时旧译文/旧说明
+#     经检索注入形成自我锚定；--keep-tm / --keep-notes 可分别保留
 python booktr-cli.py reset today/today4.html              # 整页重置（全新翻译）
 python booktr-cli.py reset today/today4.html --segments 16  # 只重置段16（保留其他段）
+python booktr-cli.py reset today/today4.html --segments 16 --keep-tm  # 保留 TM
 python booktr-cli.py reset --all -y                        # 重置所有页面
 
 # 18) 列出译文残留的源语言片段（当前仅日语·平假名；只读，不改状态）
@@ -213,7 +216,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
     注入到**该 chunk 的 user message** 作为"推荐翻译译文"，由 LLM 自行裁定在长句中的用法。
     有 note 的条目标注使用场景（如「导航入口」），避免将 HOME 等词在其他语境误翻译；
     短语型内容（短 chunk 精确匹配）已通过机械替换实现，无需 LLM。
-- **重新翻译**：删除 review 条目后，该段落标记为 pending，下次 translate 时自动重新翻译。
+- **重新翻译**：删除 review 条目后，该段落标记为 pending，下次 translate 时自动重新翻译。删除时会同时清理该段对应的翻译记忆（TM）与翻译笔记（notes），防止旧译文/旧说明经检索注入形成自我锚定（`reset` 命令同样如此，可用 `--keep-tm`/`--keep-notes` 保留）。
   - **上下文窗口**：重新翻译时提供前文/后文已翻译内容（总 `retranslate_context_chars`，每侧一半），让 LLM 看到完整的"上-中-下"结构。
   - **页面摘要**：注入页面摘要，提供整体上下文。
   - **全新对话**：重新翻译时创建新对话（新 context_id），不受之前翻译历史影响。
@@ -232,7 +235,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   - 所有指标分与排序证据（权重公式、每页各指标分、语义序来源）持久化在 `plan.json`，供 GUI 调权（v2）实时重算。
   - 上下文包把前 N 页摘要随页送入。
 - **暂停与人工介入**：LLM 每段返回结构化结果（confidence/冲突/needs_human）；冲突或低置信度写入 `work/review_queue.json`，批量边界暂停请求人工。用户任何时刻可向 `work/inbox/` 写入 `.txt`/`.md`/`.json` 注入笔记或规则，下个检查点生效。
-  - **审核条目操作**：`[a]`接受（保留译文）`[s]`跳过 `[d]`删除（清除该段译文，页面转 pending，`--next` 可重译）`[c]`确认加入词汇表 `[q]`退出。QA 条目（`qa_*` 原因）仅 `[a]`标记已处理，不改变页面翻译状态。
+  - **审核条目操作**：`[a]`接受（保留译文）`[s]`跳过 `[d]`删除（清除该段译文，页面转 pending，`--next` 可重译；删除前预览并二次确认，同时清理该段对应的翻译记忆 TM 与翻译笔记 notes，避免重译自我锚定）`[c]`确认加入词汇表 `[q]`退出。QA 条目（`qa_*` 原因）仅 `[a]`标记已处理，不改变页面翻译状态。
   - **页面状态流转**：页面有 open 审核项时 status=`review`，`--next` 会跳过；需处理完该页全部 open 项（或 `[d]` 使页面转 `pending`）后才会被 `--next` 重新翻译。删除段译文后，`translate --next` 只重译被删除的段，其余已译段保留。
 
 ## 增强工具

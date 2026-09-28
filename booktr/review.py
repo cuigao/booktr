@@ -5,6 +5,8 @@ import json
 import os
 
 from . import glossary as gl
+from . import notes as notes_mod
+from . import tm as tm_mod
 from . import util
 from .config import Config
 
@@ -77,9 +79,18 @@ def _finalize_review(cfg: Config, page: str) -> None:
         print(f"  ⚠ 无法重生成: {page}（段缓存缺失或为空）")
 
 
-def interactive_review(cfg: Config, prompt: str = None, max_items: int = 0) -> int:
-    """在终端逐条审核。返回处理条数。"""
+def interactive_review(cfg: Config, prompt: str = None, max_items: int = 0,
+                       confirm: str = None) -> int:
+    """在终端逐条审核。返回处理条数。
+
+    prompt：非 None 时用于自动化（逐条固定动作），此时二次确认默认视为 "y"。
+    confirm：删除类操作的二次确认应答（None 时用 input() 询问）。
+    """
     from .translate import State, STATUS
+
+    # 自动化模式（prompt 给定）下，二次确认默认视为 "y"（保持测试兼容）
+    if confirm is None and prompt is not None:
+        confirm = "y"
 
     items = load_queue(cfg)
     open_items = [it for it in items if it.get("status") == "open"]
@@ -120,11 +131,27 @@ def interactive_review(cfg: Config, prompt: str = None, max_items: int = 0) -> i
             if not is_qa:
                 changed_pages.add(it["page"])
         elif act == "d":
+            # 删除前预览将清理的 TM / notes，并二次确认
+            sid = str(it["segment_id"])
+            n_tm = tm_mod.purge_segments(cfg, it["page"], [sid], dry_run=True)
+            n_notes = notes_mod.purge_segments(cfg, it["page"], [sid], dry_run=True)
+            print(f"将删除该段译文，并清理：翻译记忆 {n_tm} 条、翻译笔记 {n_notes} 条")
+            if confirm is None:
+                ans = input("确认删除该段并清理？[y/N] ").strip().lower()
+            else:
+                ans = str(confirm).strip().lower()
+            if ans not in ("y", "yes"):
+                it["status"] = "skipped"
+                print("已跳过（未删除、未清理）。")
+                handled += 1
+                continue
+            # 清理 TM / notes
+            tm_mod.purge_segments(cfg, it["page"], [sid])
+            notes_mod.purge_segments(cfg, it["page"], [sid])
             it["status"] = "deleted"
             # 删除该段翻译，标记为 pending（使 --next 可重译）
             state = State(cfg)
             pstate = state.page(it["page"])
-            sid = str(it["segment_id"])
             seg_state = pstate.get("segments", {}).get(sid)
             if seg_state:
                 seg_state["translation"] = None
