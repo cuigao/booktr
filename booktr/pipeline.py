@@ -102,9 +102,15 @@ TRANSLATION_STYLES = [
 
 
 def apply_style_preset(user_rules: str, key: str) -> str:
-    """把指定风格预设追加到 user_rules 末尾；standard 或未知 key 原样返回。"""
+    """把指定风格预设追加到 user_rules 末尾；standard 或未知 key 原样返回。
+
+    幂等：若 user_rules 已含该预设块（以块首行 marker 判定），不重复追加。
+    """
     rules = next((r for k, _, r in TRANSLATION_STYLES if k == key), "")
     if not rules:
+        return user_rules
+    marker = rules.splitlines()[0]
+    if marker and marker in user_rules:
         return user_rules
     if not user_rules:
         return rules
@@ -139,10 +145,19 @@ def cmd_init(cfg: Config, args) -> None:
 
     print("\n-- 翻译风格 --")
     print("  （写入 user_rules 实现风格化译文；预设可扩展）")
+    # 偏好文件先于风格载入：其 user_rules 作为风格追加的基础
+    prefs_data = None
+    if getattr(args, "prefs", None):
+        try:
+            prefs_data = prefs_mod.load(args.prefs)
+        except ValueError as e:
+            print(f"⚠ 偏好导入失败: {e}")
+    base_rules = (prefs_data.get("user_rules") if prefs_data
+                  else data.get("user_rules", ""))
     style_labels = [label for _, label, _ in TRANSLATION_STYLES]
     chosen = _select("翻译风格", style_labels, "标准")
     style_key = next((k for k, label, _ in TRANSLATION_STYLES if label == chosen), "standard")
-    data["user_rules"] = apply_style_preset(str(data.get("user_rules", "")), style_key)
+    data["user_rules"] = apply_style_preset(str(base_rules or ""), style_key)
 
     llm = data.setdefault("llm", {})
     print("\n-- LLM 配置 --")
@@ -180,20 +195,14 @@ def cmd_init(cfg: Config, args) -> None:
             json.dump([], f, ensure_ascii=False, indent=2)
         print(f"已创建空的风格样例文件 {style_refs}")
 
-    # 偏好导入（显式 --prefs）：user_rules / glossary / style_refs
-    if getattr(args, "prefs", None):
-        try:
-            prefs = prefs_mod.load(args.prefs)
-        except ValueError as e:
-            print(f"⚠ 偏好导入失败: {e}")
-        else:
-            summary = prefs_mod.apply(cfg, prefs)
-            # user_rules 已写入 cfg.data，需重新保存 config
-            save_config(cfg)
-            print(f"已导入偏好: {args.prefs}")
-            print(f"  user_rules: {'已设置' if summary['user_rules'] else '未包含'}")
-            print(f"  glossary: {summary['glossary']} 条")
-            print(f"  style_refs: {summary['style_refs']} 条")
+    # 偏好导入（显式 --prefs）：glossary / style_refs 落盘
+    # （user_rules 已在前面与风格合并写入 data，此处不再覆盖）
+    if prefs_data is not None:
+        summary = prefs_mod.apply_data_files(cfg, prefs_data)
+        print(f"已导入偏好: {args.prefs}")
+        print(f"  user_rules: {'已设置' if prefs_data.get('user_rules') else '未包含'}")
+        print(f"  glossary: {summary['glossary']} 条")
+        print(f"  style_refs: {summary['style_refs']} 条")
 
     print(f"\n配置已写入: {config_path}")
     print("下一步: python booktr-cli.py scan  →  python booktr-cli.py plan  →  python booktr-cli.py translate")

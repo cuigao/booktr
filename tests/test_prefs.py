@@ -41,17 +41,21 @@ def test_export_roundtrip(tmp_cfg, tmp_path):
     assert loaded["style_refs"] == [{"src": "a", "dst": "甲"}]
 
 
-def test_apply_writes_instance(tmp_cfg):
+def test_apply_data_files_writes_instance(tmp_cfg):
     prefs_data = {
         "version": 1,
         "user_rules": "保留原名",
         "glossary": [{"src": "X", "dst": "Y", "category": "term", "status": "confirmed"}],
-        "style_refs": [],
+        "style_refs": [{"src": "s", "dst": "S"}],
     }
-    summary = prefs.apply(tmp_cfg, prefs_data)
-    assert summary == {"user_rules": True, "glossary": 1, "style_refs": 0}
-    assert tmp_cfg.get("user_rules") == "保留原名"
+    summary = prefs.apply_data_files(tmp_cfg, prefs_data)
+    assert summary == {"glossary": 1, "style_refs": 1}
+    # glossary/style_refs 落盘
     assert gl.lookup_read_only(tmp_cfg, "X") == "Y"
+    from booktr import util
+    assert util.read_json(tmp_cfg.get("style", "refs_path", default="style_refs.json")) == [{"src": "s", "dst": "S"}]
+    # user_rules 不在 apply_data_files 中处理
+    assert tmp_cfg.get("user_rules", default="") != "保留原名"
 
 
 def test_export_requires_path(tmp_cfg):
@@ -117,3 +121,62 @@ def test_cmd_init_without_prefs(tmp_cfg, tmp_path, monkeypatch):
 
     pipeline.cmd_init(cfg, Args())
     assert not (data_dir / "work" / "glossary.json").exists()
+
+
+def _run_init(tmp_path, monkeypatch, answers, prefs_path):
+    from booktr import pipeline
+    from booktr.config import Config, find_project_root
+    data_dir = tmp_path / ("inst_" + str(abs(hash(str(answers) + str(prefs_path)))))
+    cfg = Config(root=find_project_root(), data={}, data_dir=str(data_dir))
+    it = iter(answers + [""] * 40)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(it, ""))
+
+    class Args:
+        force = False
+        prefs = str(prefs_path) if prefs_path else None
+
+    pipeline.cmd_init(cfg, Args())
+    return json.loads((data_dir / "config.json").read_text(encoding="utf-8"))
+
+
+def test_init_prefs_then_style_appends(tmp_path, monkeypatch):
+    """init --prefs(基础 rules) + 上海话 → pref 基础 + 方言块（不被覆盖）。"""
+    pref = tmp_path / "p.json"
+    pref.write_text(json.dumps({
+        "version": 1, "user_rules": "偏好基础规则", "glossary": [], "style_refs": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    # 输入顺序：源目录/输出/工作/源语言/目标语言/风格(2=上海话)/provider(1=mock)... 
+    answers = ["", "", "", "", "", "2", "1"]
+    saved = _run_init(tmp_path, monkeypatch, answers, pref)
+    assert "偏好基础规则" in saved["user_rules"]
+    assert "## 翻译风格：上海话" in saved["user_rules"]
+    assert saved["user_rules"].count("## 翻译风格：上海话") == 1
+    # 模板默认 D 版规则不应出现（被 pref 基础规则取代）
+    assert "避免仅保留日文原形" not in saved["user_rules"]
+
+
+def test_init_prefs_with_dialect_no_duplicate(tmp_path, monkeypatch):
+    """init --prefs(已含方言) + 上海话 → 方言块不重复。"""
+    pref = tmp_path / "p2.json"
+    pref.write_text(json.dumps({
+        "version": 1,
+        "user_rules": "基础规则\n\n## 翻译风格：上海话\n- 旧方言块",
+        "glossary": [], "style_refs": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    answers = ["", "", "", "", "", "2", "1"]
+    saved = _run_init(tmp_path, monkeypatch, answers, pref)
+    assert saved["user_rules"].count("## 翻译风格：上海话") == 1
+    assert "旧方言块" in saved["user_rules"]
+
+
+def test_init_prefs_standard_keeps_rules(tmp_path, monkeypatch):
+    """init --prefs(含方言) + 标准 → 保持 pref 原样（标准=不改动）。"""
+    pref = tmp_path / "p3.json"
+    rules = "基础规则\n\n## 翻译风格：上海话\n- 旧方言块"
+    pref.write_text(json.dumps({
+        "version": 1, "user_rules": rules, "glossary": [], "style_refs": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    answers = ["", "", "", "", "", "1", "1"]  # 1 = 标准
+    saved = _run_init(tmp_path, monkeypatch, answers, pref)
+    assert saved["user_rules"] == rules
+

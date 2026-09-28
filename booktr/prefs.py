@@ -49,16 +49,13 @@ def load(path: str) -> dict:
     return data
 
 
-def apply(cfg: Config, prefs: dict) -> dict:
-    """把偏好写入实例：user_rules → config；glossary/style_refs → 数据文件。
+def apply_data_files(cfg: Config, prefs: dict) -> dict:
+    """把偏好中的 glossary/style_refs 写入实例数据文件。
 
-    返回摘要：{user_rules: bool, glossary: int, style_refs: int}。
+    user_rules 不在此处理：由 init 在「先偏好、后风格」流程中合并写入 config。
+    返回摘要：{glossary: int, style_refs: int}。
     """
-    summary = {"user_rules": False, "glossary": 0, "style_refs": 0}
-    rules = prefs.get("user_rules")
-    if rules:
-        cfg.set(rules, "user_rules")
-        summary["user_rules"] = True
+    summary = {"glossary": 0, "style_refs": 0}
     gl_items = prefs.get("glossary")
     if isinstance(gl_items, list):
         gl.save(cfg, gl_items)
@@ -69,3 +66,4 @@ def apply(cfg: Config, prefs: dict) -> dict:
         util.write_json(refs_path, refs)
         summary["style_refs"] = len(refs)
     return summary
+
