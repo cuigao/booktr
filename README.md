@@ -132,9 +132,10 @@ python booktr-cli.py reset --all -y                        # 重置所有页面
 python booktr-cli.py check-residual              # 扫描所有已译页，逐项给出 reset 命令
 python booktr-cli.py check-residual --pages today/today3.html
 python booktr-cli.py check-residual --no-report  # 只打印，不写 work/residual_report.json
-# 人工核验清单后，执行该项给出的 reset 命令，再 translate 即可重译该段：
-#   python booktr-cli.py reset today/today3.html --segments 4
-#   python booktr-cli.py translate --next
+# 人工核验清单后，执行该项给出的 reset 命令，再 translate 即可重译该段
+# （reset 命令会自动带上本次命令所用的 --data-dir，避免跑错数据根）：
+#   python booktr-cli.py --data-dir ../instance/x reset today/today3.html --segments 4
+#   python booktr-cli.py --data-dir ../instance/x translate --next
 
 # 查看进度
 python booktr-cli.py status

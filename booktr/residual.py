@@ -153,10 +153,12 @@ def _load_segments(cfg: Config, rel: str) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
-def scan(cfg: Config, pages: list[str] | None = None) -> list[dict]:
+def scan(cfg: Config, pages: list[str] | None = None,
+         data_dir: str | None = None) -> list[dict]:
     """扫描已译页面，返回按页分组的残留清单。
 
     每页：{"page", "reset", "items": [{"segment_id", "tokens", "excerpts"}]}。
+    ``data_dir`` 非空时，reset 命令前置 ``--data-dir "..."``，避免照抄执行到错误数据根。
     """
     from .translate import State, STATUS
 
@@ -165,6 +167,7 @@ def scan(cfg: Config, pages: list[str] | None = None) -> list[dict]:
         pages = [rel for rel, p in state.data.get("pages", {}).items()
                  if p.get("status") in (STATUS["done"], STATUS["review"])]
 
+    dd = f'--data-dir "{data_dir}" ' if data_dir else ""
     results: list[dict] = []
     for rel in pages:
         segs = _load_segments(cfg, rel)
@@ -189,7 +192,7 @@ def scan(cfg: Config, pages: list[str] | None = None) -> list[dict]:
             seg_ids.append(sid)
         if not items:
             continue
-        reset = (f"python booktr-cli.py reset {rel} --segments "
+        reset = (f"python booktr-cli.py {dd}reset {rel} --segments "
                  + " ".join(seg_ids))
         results.append({"page": rel, "reset": reset, "items": items})
     return results

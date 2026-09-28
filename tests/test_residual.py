@@ -67,7 +67,7 @@ def test_excerpt_contains_token():
 
 
 def _args(**kw):
-    base = {"pages": None, "json": None, "no_report": False}
+    base = {"pages": None, "json": None, "no_report": False, "data_dir": None}
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -126,3 +126,31 @@ def test_cmd_skips_non_japanese_source(tmp_cfg, capsys):
     out = capsys.readouterr().out
     assert "暂无残留检测规则" in out
     assert not os.path.exists(os.path.join(tmp_cfg.work_dir, "residual_report.json"))
+
+
+def test_reset_command_includes_data_dir(tmp_cfg, capsys):
+    """指定 --data-dir 时，reset 命令前置 --data-dir，避免跑错数据根。"""
+    segs = [{"id": 4, "kind": "text", "text": "そして、次。", "translation": "そして、次。"}]
+    _write_page(tmp_cfg, "today/today3.html", segs)
+    cmd_check_residual(tmp_cfg, _args(data_dir="../instance/x", no_report=True))
+    out = capsys.readouterr().out
+    assert 'python booktr-cli.py --data-dir "../instance/x" reset today/today3.html --segments 4' in out
+
+
+def test_reset_command_without_data_dir(tmp_cfg, capsys):
+    """未指定 --data-dir 时保持原样（默认数据根）。"""
+    segs = [{"id": 4, "kind": "text", "text": "そして、次。", "translation": "そして、次。"}]
+    _write_page(tmp_cfg, "today/today3.html", segs)
+    cmd_check_residual(tmp_cfg, _args(no_report=True))
+    out = capsys.readouterr().out
+    assert "python booktr-cli.py reset today/today3.html --segments 4" in out
+
+
+def test_report_reset_includes_data_dir(tmp_cfg):
+    """报告 JSON 中的 reset 同样带上 --data-dir。"""
+    segs = [{"id": 4, "kind": "text", "text": "そして、次。", "translation": "そして、次。"}]
+    _write_page(tmp_cfg, "today/today3.html", segs)
+    cmd_check_residual(tmp_cfg, _args(data_dir="../instance/y"))
+    report = util.read_json(os.path.join(tmp_cfg.work_dir, "residual_report.json"), {})
+    assert 'python booktr-cli.py --data-dir "../instance/y" reset today/today3.html --segments 4' \
+        == report["pages"][0]["reset"]

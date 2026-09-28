@@ -911,7 +911,7 @@ def cmd_check_residual(cfg: Config, args) -> None:
         return
 
     pages = args.pages or None
-    results = residual_mod.scan(cfg, pages)
+    results = residual_mod.scan(cfg, pages, data_dir=getattr(args, "data_dir", None))
 
     if not results:
         print("未发现残留假名。")
