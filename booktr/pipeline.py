@@ -114,6 +114,7 @@ def cmd_init(cfg: Config, args) -> None:
 
     llm = data.setdefault("llm", {})
     print("\n-- LLM 配置 --")
+    print("  （mock：离线测试，恒等翻译；openai-compatible：接入真实 API 服务）")
     providers = ["mock", "openai-compatible"]
     llm["provider"] = _select("LLM provider", providers, str(llm.get("provider", "mock")))
     if llm["provider"] not in providers:
