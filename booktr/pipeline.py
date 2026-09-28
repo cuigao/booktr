@@ -86,6 +86,31 @@ def _select_lang(label: str, default: str = "") -> str:
     return val
 
 
+_SHANGHAI_STYLE_RULES = (
+    "## 翻译风格：上海话\n"
+    "- 本页译文以简体中文（上海话）风格呈现\n"
+    "- 使用上海话（沪语）表达，保留口语特征（如「阿拉」「侬」「伊」「蛮好」「勿要」「哪能」等）\n"
+    "- 语气自然口语化，可适当使用上海话语气词\n"
+    "- 全角写法、专名处理、占位符与 JSON 格式等前述要求不变"
+)
+
+# 翻译风格预设：(key, label, 追加到 user_rules 的规则块)。standard 为空表示不改动。
+TRANSLATION_STYLES = [
+    ("standard", "标准", ""),
+    ("shanghai", "上海话", _SHANGHAI_STYLE_RULES),
+]
+
+
+def apply_style_preset(user_rules: str, key: str) -> str:
+    """把指定风格预设追加到 user_rules 末尾；standard 或未知 key 原样返回。"""
+    rules = next((r for k, _, r in TRANSLATION_STYLES if k == key), "")
+    if not rules:
+        return user_rules
+    if not user_rules:
+        return rules
+    return user_rules + "\n\n" + rules
+
+
 def cmd_init(cfg: Config, args) -> None:
     """交互式初始化：从 config.json.template 生成 <data_dir>/config.json。"""
     config_path = os.path.join(cfg.data_dir, "config.json")
@@ -111,6 +136,13 @@ def cmd_init(cfg: Config, args) -> None:
     data.setdefault("lang", {})
     data["lang"]["source"] = _select_lang("源语言", str(data.get("lang", {}).get("source", "ja")))
     data["lang"]["target"] = _select_lang("目标语言", str(data.get("lang", {}).get("target", "zh-Hans")))
+
+    print("\n-- 翻译风格 --")
+    print("  （写入 user_rules 实现风格化译文；预设可扩展）")
+    style_labels = [label for _, label, _ in TRANSLATION_STYLES]
+    chosen = _select("翻译风格", style_labels, "标准")
+    style_key = next((k for k, label, _ in TRANSLATION_STYLES if label == chosen), "standard")
+    data["user_rules"] = apply_style_preset(str(data.get("user_rules", "")), style_key)
 
     llm = data.setdefault("llm", {})
     print("\n-- LLM 配置 --")
