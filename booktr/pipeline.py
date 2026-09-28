@@ -9,7 +9,7 @@ import shutil
 import sys
 
 from . import annotator, crawler, glossary as gl, llm as llm_mod
-from . import planner, prompts, qa, review as review_mod, segments as seg_mod
+from . import planner, prefs as prefs_mod, prompts, qa, review as review_mod, segments as seg_mod
 from . import styles as styles_mod, translate as tr, util
 from .config import Config, ensure_dirs, load_config, save_config
 
@@ -180,8 +180,37 @@ def cmd_init(cfg: Config, args) -> None:
             json.dump([], f, ensure_ascii=False, indent=2)
         print(f"已创建空的风格样例文件 {style_refs}")
 
+    # 偏好导入（显式 --prefs）：user_rules / glossary / style_refs
+    if getattr(args, "prefs", None):
+        try:
+            prefs = prefs_mod.load(args.prefs)
+        except ValueError as e:
+            print(f"⚠ 偏好导入失败: {e}")
+        else:
+            summary = prefs_mod.apply(cfg, prefs)
+            # user_rules 已写入 cfg.data，需重新保存 config
+            save_config(cfg)
+            print(f"已导入偏好: {args.prefs}")
+            print(f"  user_rules: {'已设置' if summary['user_rules'] else '未包含'}")
+            print(f"  glossary: {summary['glossary']} 条")
+            print(f"  style_refs: {summary['style_refs']} 条")
+
     print(f"\n配置已写入: {config_path}")
     print("下一步: python booktr-cli.py scan  →  python booktr-cli.py plan  →  python booktr-cli.py translate")
+
+
+def cmd_export_prefs(cfg: Config, args) -> None:
+    """将当前实例偏好导出到指定文件。"""
+    try:
+        path = prefs_mod.export(cfg, args.path)
+    except ValueError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        sys.exit(2)
+    data = prefs_mod.collect(cfg)
+    print(f"已导出偏好: {path}")
+    print(f"  user_rules: {'已设置' if data['user_rules'] else '空'}")
+    print(f"  glossary: {len(data['glossary'])} 条")
+    print(f"  style_refs: {len(data['style_refs'])} 条")
 
 
 def cmd_plan(cfg: Config, args) -> None:
@@ -1562,6 +1591,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = mk("init", help="交互式初始化配置（从模板生成 data/config.json）")
     sp.add_argument("--force", action="store_true", help="覆盖现有配置")
+    sp.add_argument("--prefs", default=None, help="初始化时导入偏好文件（user_rules/glossary/style_refs）")
     sp.set_defaults(func=cmd_init)
 
     sp = mk("scan", help="扫描站点镜像")
@@ -1666,6 +1696,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--reset", action="store_true", help="额外清理 plan.json 和 site_map.json")
     sp.add_argument("-y", "--yes", action="store_true", help="跳过交互确认")
     sp.set_defaults(func=cmd_clean)
+
+    sp = mk("export-prefs", help="导出当前实例的个人偏好（user_rules/glossary/style_refs）")
+    sp.add_argument("path", help="偏好文件路径，如 pref/booktr-prefs.json")
+    sp.set_defaults(func=cmd_export_prefs)
 
     sp = mk("export-log", help="导出指定页面的完整 LLM 对话日志为 Markdown")
     sp.add_argument("page", help="页面路径，如 today/today6.html")

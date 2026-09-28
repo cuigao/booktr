@@ -66,6 +66,8 @@ cd src
 
 # 1) 初始化：交互式生成 data/config.json（默认值见 config.json.template）
 python booktr-cli.py init          # 或 python -m booktr init
+# 可选：同时导入个人偏好文件（user_rules/glossary/style_refs，见「偏好文件」）
+python booktr-cli.py init --prefs pref/booktr-prefs.json
 
 # 2) 放入待翻译站点镜像，并确认 config.json 中 source_dir 指向它
 #    默认: love.life.coocan.jp（相对数据根；可改绝对路径）
@@ -109,16 +111,19 @@ python booktr-cli.py clean --all -y       # 全清（含 output）
 python booktr-cli.py clean --reset -y     # 额外清理 plan.json + site_map.json
 python booktr-cli.py clean                # 交互选择
 
-# 14) 导出指定页面的完整 LLM 对话日志为 Markdown
+# 14) 导出个人偏好文件（user_rules/glossary/style_refs；供 init --prefs 复用）
+python booktr-cli.py export-prefs pref/booktr-prefs.json
+
+# 15) 导出指定页面的完整 LLM 对话日志为 Markdown
 python booktr-cli.py export-log today/today6.html
 python booktr-cli.py export-log today/today6.html --sessions 1  # 只导出最近1次翻译任务
 python booktr-cli.py export-log today/today6.html --task tsk_1755432600000  # 指定 task_id
 
-# 15) 重新生成指定页面的 out 文件（从段索引离线重组）
+# 16) 重新生成指定页面的 out 文件（从段索引离线重组）
 python booktr-cli.py regenerate profile/profile.html
 python booktr-cli.py regenerate --all  # 重新生成所有已处理页
 
-# 16) 重置指定页面或段，使下次 translate 重新翻译
+# 17) 重置指定页面或段，使下次 translate 重新翻译
 python booktr-cli.py reset today/today4.html              # 整页重置（全新翻译）
 python booktr-cli.py reset today/today4.html --segments 16  # 只重置段16（保留其他段）
 python booktr-cli.py reset --all -y                        # 重置所有页面
@@ -126,7 +131,7 @@ python booktr-cli.py reset --all -y                        # 重置所有页面
 # 查看进度
 python booktr-cli.py status
 
-# 添加词汇表条目
+# 添加词汇表条目（--purge-keyword 可清理 TM/notes 中含该错误译法关键词的条目）
 python booktr-cli.py add-term HOME 首页 --note "导航入口"
 
 # 审计已翻译段落，用新词汇表/短语记忆替换
@@ -146,7 +151,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 
 配置来源优先级：`<数据根>/config.json`（用户配置）> 代码内 DEFAULTS。
 
-- `python booktr-cli.py init`：交互式生成 `config.json`（询问站点目录、语言、翻译风格、LLM provider、增强工具等）
+- `python booktr-cli.py init`：交互式生成 `config.json`（询问站点目录、语言、翻译风格、LLM provider、增强工具等）；`--prefs <file>` 可同时导入个人偏好文件
 - 手动方式：复制 `config.json.template` 为 `<数据根>/config.json` 后编辑
 - 关键配置项（除注明外，相对路径均相对数据根解析）：
   - `source_dir` 站点镜像目录（如 `love.life.coocan.jp`，相对数据根；**或填完整绝对路径指向 src 之外**）
@@ -167,6 +172,19 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   - `llm.auto_retranslate`：翻译需要 review 时自动用重翻译提示词再试（默认 true）
   - `llm.auto_retranslate_attempts`：自动重翻译尝试次数（默认 1）
   - `style.refs_path`：风格样例文件（用户自备，接口就绪）
+
+### 偏好文件（跨实例复用个人偏好）
+
+个人偏好（翻译规则、词汇表、风格样例）默认**分散在各实例的 data 目录**，重建实例后容易遗漏。可用**偏好文件**保存并快速恢复：
+
+- **导出**：`python booktr-cli.py --data-dir <数据根> export-prefs pref/booktr-prefs.json`
+  - 写入指定文件路径（必须显式给出文件名），内容仅含 `user_rules`、`glossary`（全部条目）、`style_refs`。
+  - **不含**数据路径、模型、语言、API key 等实例专属配置。
+- **导入**：`python booktr-cli.py --data-dir <数据根> init --prefs pref/booktr-prefs.json`
+  - 仅在 `init` 时导入；生成 config 后写入 `user_rules`，并把 `glossary`/`style_refs` 落入实例。
+  - 不指定 `--prefs` 时不导入任何偏好。
+- 偏好文件建议放在仓库外（如工作区 `pref/`），**不入库**——它是个人偏好，不应成为他人默认。
+- 重建翻译实例时，先 `init --prefs <file>`，再 `scan → plan → translate`，即可恢复全部个人偏好。
 
 ## 核心机制
 
