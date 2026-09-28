@@ -26,7 +26,7 @@ DEFAULTS: dict[str, Any] = {
         "api_key": "",  # 直接写入的 key（优先级高于 api_key_env）；留空则用环境变量
         "api_key_required": True,  # 是否需要 key；本地免 key 服务（如 ollama）设为 false
         "temperature": 0.3,
-        "max_tokens": 4096,
+        "max_tokens": 131072,  # 推理模型会把大量预算花在 reasoning 上，留足上限避免 content 被截空
         "timeout": 120,
         "max_retries": 3,
         "max_requests_per_minute": 60,

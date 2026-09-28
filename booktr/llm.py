@@ -151,21 +151,12 @@ class LLMClient:
                 r = requests.post(url, headers=headers, json=body, timeout=self.timeout)
                 if r.status_code == 200:
                     data = r.json()
-                    try:
-                        content = data["choices"][0]["message"]["content"]
-                    except (KeyError, IndexError, TypeError) as e:
-                        last_err = LLMError(f"API 响应格式异常: {e}")
-                        raise LLMError(f"API 响应格式异常: {e}")
-                    if content is None:
-                        last_err = LLMError("LLM 返回空内容")
-                        raise LLMError("LLM 返回空内容")
                     usage = self._record(data)
+                    content = self._extract_content(data)
                     return content, usage
                 last_err = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
             except (requests.RequestException, ValueError) as e:
                 last_err = e
-            except LLMError:
-                pass  # last_err 已在抛出前设置，进入重试循环
             delay = 2 ** attempt
             log.warning("LLM multi 调用失败(%s)，%.1fs 后重试: %s", attempt + 1, delay, last_err)
             time.sleep(delay)
@@ -195,13 +186,8 @@ class LLMClient:
                 r = requests.post(url, headers=headers, json=body, timeout=self.timeout)
                 if r.status_code == 200:
                     data = r.json()
-                    try:
-                        content = data["choices"][0]["message"]["content"]
-                    except (KeyError, IndexError, TypeError) as e:
-                        raise LLMError(f"API 响应格式异常: {e}")
-                    if content is None:
-                        raise LLMError("LLM 返回空内容")
                     usage = self._record(data)
+                    content = self._extract_content(data)
                     return content, usage
                 last_err = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
             except (requests.RequestException, ValueError) as e:
@@ -211,6 +197,31 @@ class LLMClient:
             log.warning("LLM 调用失败(%s)，%.1fs 后重试: %s", attempt + 1, delay, last_err)
             time.sleep(delay)
         raise LLMError(f"LLM 调用最终失败: {last_err}")
+
+    def _extract_content(self, data: dict) -> str:
+        """从 200 响应提取正文，空内容/截断显式报错（而非静默返回空串）。
+
+        推理模型（如 deepseek-v4.1 系列）会先输出 ``reasoning`` 并占用
+        ``max_tokens`` 预算；预算不足时正文为空且 finish_reason == "length"。
+        此处将这种情形转为 LLMError，避免"ok 但空串"被上层静默吞掉。
+        """
+        try:
+            choice = data["choices"][0]
+            msg = choice["message"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise LLMError(f"API 响应格式异常: {e}")
+        content = msg.get("content")
+        if content:
+            return content
+        finish = choice.get("finish_reason")
+        reason_len = len(msg.get("reasoning") or "")
+        if finish == "length":
+            raise LLMError(
+                f"LLM 正文被截断为空（finish_reason=length，reasoning {reason_len} 字符，"
+                f"max_tokens={self.max_tokens}）；请提高 llm.max_tokens")
+        if content is None:
+            raise LLMError("LLM 返回空内容")
+        raise LLMError(f"LLM 返回空内容（finish_reason={finish}）")
 
     def _record(self, data: dict) -> dict:
         use = (data.get("usage") or {})

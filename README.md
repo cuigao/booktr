@@ -173,6 +173,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   - `llm.provider`：`mock`（离线测试）或 `openai-compatible`（真实 API）
   - `llm.base_url/model`：OpenAI 兼容服务接入参数
   - `llm.api_key` / `llm.api_key_env` / `llm.api_key_required`：API key 提供方式（见下）
+  - `llm.max_tokens`：单次回复的 token 上限（默认 131072）。**推理模型**（如 deepseek-v4.1 系列）会先输出大量 `reasoning` token，上限过低会导致正文为空（`finish_reason=length`），故默认放宽
   - `llm.max_repair`：解析失败自愈重试次数（默认 3）
   - `llm.max_history_segments`：多轮对话保留历史段落数（默认 50）
   - `llm.summary_enabled`：摘要接力开关（默认 true）
@@ -266,6 +267,8 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 - **LLM 深度检查**（`qa.deep_llm_check`，默认 true）：把整页原文+译文（各截断 6000 字符）交 LLM（temperature 0.2）做语义层面审查，补充误译、术语使用不当、上下文不一致等问题。
 
 问题生成 `work/qa_report.json`（统计总问题/高危数），并逐一以 `reason: "qa_high" / "qa_mid"` 写入 `work/review_queue.json` 审核队列供人工确认。QA 条目（`qa_*` 原因）在 review 中仅 `[a]` 标记已处理，**不改变页面翻译状态**——即 QA 只提示核对，不自动触发重新翻译。
+
+运行过程**逐页打印进度**（`[i/N] 页面  问题数 (耗时)`）；深度检查单页 LLM 调用失败会打印 `⚠ ... LLM 深度检查失败（已跳过）` 而非静默；`work/qa_report.json` **增量写入**（每页一次），长跑中断也不丢已得结果。
 
 ## LLM 接入
 

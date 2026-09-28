@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 from . import glossary as gl
 from . import llm as llm_mod
@@ -57,19 +58,23 @@ def run_qa(cfg: Config, client, rel: str) -> list[dict]:
                          "problem": iss.get("problem", ""),
                          "suggestion": iss.get("suggestion", "")}
                     )
-            except llm_mod.LLMError:
-                pass
+            except llm_mod.LLMError as e:
+                print(f"  ⚠ {rel}: LLM 深度检查失败（已跳过）: {e}", flush=True)
     return issues
 
 
 def qa_report(cfg: Config, client, rels: list[str]) -> dict:
     report = {"pages": {}, "total_issues": 0, "high": 0}
-    for rel in rels:
+    out = os.path.join(cfg.work_dir, "qa_report.json")
+    total = len(rels)
+    for i, rel in enumerate(rels, 1):
+        t0 = time.monotonic()
         issues = run_qa(cfg, client, rel)
+        dt = time.monotonic() - t0
         if issues:
             report["pages"][rel] = issues
             report["total_issues"] += len(issues)
-            report["high"] += sum(1 for i in issues if i["severity"] == "high")
-    out = os.path.join(cfg.work_dir, "qa_report.json")
-    util.write_json(out, report)
+            report["high"] += sum(1 for x in issues if x["severity"] == "high")
+        util.write_json(out, report)  # 增量落盘，长跑中断不丢失
+        print(f"[{i}/{total}] {rel}  {len(issues)} 问题 ({dt:.1f}s)", flush=True)
     return report

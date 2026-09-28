@@ -812,6 +812,8 @@ def cmd_qa(cfg: Config, args) -> None:
     done_pages = state.data.get("done_pages", [])
     if args.pages:
         done_pages = [p for p in args.pages if p in done_pages] or args.pages
+    deep = cfg.get("qa", "deep_llm_check", default=True)
+    print(f"QA 开始：共 {len(done_pages)} 页（深度检查={'开' if deep else '关'}）", flush=True)
     report = qa.qa_report(cfg, client, done_pages)
     print(f"QA 报告: 总问题 {report['total_issues']}，高危 {report['high']}，见 qa_report.json")
     for rel, issues in report["pages"].items():

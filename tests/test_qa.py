@@ -66,3 +66,56 @@ def test_cmd_qa_no_deep_overrides_config(tmp_cfg, tmp_path):
         tmp_cfg.set(False, "qa", "deep_llm_check")
     issues = qa.run_qa(tmp_cfg, counting, "page1.html")
     assert counting.calls == 0
+
+
+def _write_translated(tmp_cfg, tmp_path, rel="page1.html"):
+    write_sample_site(tmp_path)
+    from booktr import translate as tr
+    fake = FakeLLM.default()
+    state = tr.State(tmp_cfg)
+    tr.translate_page(tmp_cfg, fake, rel, state, {}, {}, [])
+
+
+def test_qa_report_prints_per_page_progress(tmp_cfg, tmp_path, capsys):
+    _write_translated(tmp_cfg, tmp_path)
+    tmp_cfg.set(False, "qa", "deep_llm_check")
+    qa.qa_report(tmp_cfg, FakeLLM.default(), ["page1.html"])
+    out = capsys.readouterr().out
+    assert "[1/1] page1.html" in out
+
+
+def test_qa_report_writes_incrementally(tmp_cfg, tmp_path):
+    _write_translated(tmp_cfg, tmp_path)
+    tmp_cfg.set(False, "qa", "deep_llm_check")
+    qa.qa_report(tmp_cfg, FakeLLM.default(), ["page1.html"])
+    report_path = os.path.join(tmp_cfg.work_dir, "qa_report.json")
+    assert os.path.exists(report_path)
+    data = json.loads(open(report_path, encoding="utf-8").read())
+    assert "pages" in data and "total_issues" in data
+
+
+def test_run_qa_warns_on_llm_failure(tmp_cfg, tmp_path, capsys):
+    from booktr import llm as llm_mod
+
+    _write_translated(tmp_cfg, tmp_path)
+    tmp_cfg.set(True, "qa", "deep_llm_check")
+
+    class FailingLLM:
+        calls = 0
+
+        def chat(self, *a, **k):
+            self.calls += 1
+            raise llm_mod.LLMError("boom")
+
+    issues = qa.run_qa(tmp_cfg, FailingLLM(), "page1.html")
+    out = capsys.readouterr().out
+    assert "LLM 深度检查失败" in out
+    assert isinstance(issues, list)
+
+
+def test_cmd_qa_prints_start_line(tmp_cfg, tmp_path, capsys):
+    _write_translated(tmp_cfg, tmp_path)
+    tmp_cfg.set(False, "qa", "deep_llm_check")
+    cmd_qa(tmp_cfg, _args())
+    out = capsys.readouterr().out
+    assert "QA 开始" in out

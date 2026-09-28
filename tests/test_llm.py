@@ -179,3 +179,40 @@ def test_repair_method_order_escape_then_close():
     resp = ('{"translation": "甲"乙", "notes": ["丙", "needs_human": false}')
     data = llm.parse_json_response(resp)
     assert data["repair_methods"] == [llm.REPAIR_METHOD_ESCAPE, llm.REPAIR_METHOD_CLOSE_ARRAY]
+
+# ── _extract_content：空内容/截断显式报错 ──────────────────────────────
+
+
+def _client(tmp_path):
+    return llm.LLMClient(_make_cfg(
+        {"provider": "openai-compatible", "api_key_required": False,
+         "max_tokens": 4096}, str(tmp_path)))
+
+
+def test_extract_content_ok(tmp_path):
+    c = _client(tmp_path)
+    data = {"choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]}
+    assert c._extract_content(data) == "hi"
+
+
+def test_extract_content_truncated_raises(tmp_path):
+    """finish_reason=length 且正文为空 → 明确提示提高 max_tokens。"""
+    c = _client(tmp_path)
+    data = {"choices": [{"message": {"content": "", "reasoning": "x" * 50},
+                         "finish_reason": "length"}]}
+    with pytest.raises(llm.LLMError) as ei:
+        c._extract_content(data)
+    assert "max_tokens" in str(ei.value)
+
+
+def test_extract_content_none_raises(tmp_path):
+    c = _client(tmp_path)
+    data = {"choices": [{"message": {"content": None}, "finish_reason": "stop"}]}
+    with pytest.raises(llm.LLMError):
+        c._extract_content(data)
+
+
+def test_extract_content_bad_shape_raises(tmp_path):
+    c = _client(tmp_path)
+    with pytest.raises(llm.LLMError):
+        c._extract_content({"choices": []})
