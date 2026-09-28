@@ -99,6 +99,10 @@ python booktr-cli.py review
 
 # 10) 一致性 QA
 python booktr-cli.py qa
+python booktr-cli.py qa --pages today/today0.html      # 限定页面
+python booktr-cli.py qa --start 1 --count 10           # 按 plan.order 从第 1 篇起检查 10 篇
+python booktr-cli.py qa --start 11 --count 10          # 下一批（无状态，按序推进）
+python booktr-cli.py qa --no-deep                      # 仅本地规则，跳过 LLM 深度检查
 
 # 11) 生成译者注
 python booktr-cli.py annotate
@@ -268,7 +272,9 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 
 问题生成 `work/qa_report.json`（统计总问题/高危数），并逐一以 `reason: "qa_high" / "qa_mid"` 写入 `work/review_queue.json` 审核队列供人工确认。QA 条目（`qa_*` 原因）在 review 中仅 `[a]` 标记已处理，**不改变页面翻译状态**——即 QA 只提示核对，不自动触发重新翻译。
 
-运行过程**逐页打印进度**（`[i/N] 页面  问题数 (耗时)`）；深度检查单页 LLM 调用失败会打印 `⚠ ... LLM 深度检查失败（已跳过）` 而非静默；`work/qa_report.json` **增量写入**（每页一次），长跑中断也不丢已得结果。
+运行过程**逐页打印进度**（`[i/N] 页面  问题数 (耗时)`）；深度检查单页 LLM 调用失败会打印 `⚠ ... LLM 深度检查失败（已跳过）` 而非静默。报告写入带时间戳的 `work/qa_reports/qa_<YYYYmmdd_HHMMSS>.json`（**每次运行都留存，不覆盖**），同时刷新稳定别名 `work/qa_report.json`；均为**逐页增量写入**，长跑中断也不丢已得结果。入审核队列时按 `(页面, 段, 原因)` 去重，重跑同一范围不会重复入队。
+
+**无状态、按区间推进**：QA 不记录"已检查到哪"，`--start/--count` 按 `plan.order`（站点固定顺序，不受重译影响）取区间。因此分批检查即 `--start 1 --count 10` → `--start 11 --count 10` …；重译后想重查某页用 `--pages` 强制指定。
 
 ## LLM 接入
 
@@ -294,7 +300,8 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 | `work/segments/*.json` | 每页段索引（源偏移↔译文↔引文） |
 | `work/state.json` | 检查点 |
 | `work/review_queue.json` | 待人工审核项 |
-| `work/qa_report.json` | QA 报告 |
+| `work/qa_report.json` | QA 报告（最新一次的别名） |
+| `work/qa_reports/qa_<时间戳>.json` | QA 报告归档（每次运行留存） |
 | `work/llm_logs/*.json` | LLM 调用日志（含完整对话历史、task_id、context_id） |
 | `work/logs/*.md` | 导出的 Markdown 对话日志（自动或手动导出） |
 | `out/` | 翻译后完整镜像 |

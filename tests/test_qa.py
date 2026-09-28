@@ -14,7 +14,8 @@ from conftest import FakeLLM, write_sample_site
 
 def _args(**kw):
     import argparse
-    base = {"pages": None, "no_deep": False, "with_deep": False}
+    base = {"pages": None, "no_deep": False, "with_deep": False,
+            "start": None, "count": None}
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -119,3 +120,96 @@ def test_cmd_qa_prints_start_line(tmp_cfg, tmp_path, capsys):
     cmd_qa(tmp_cfg, _args())
     out = capsys.readouterr().out
     assert "QA 开始" in out
+
+
+# ── --start/--count 区间 + 时间戳报告 ──────────────────────────────────
+
+
+def _seed_plan_and_done(tmp_cfg, tmp_path, rels):
+    """写入 plan.order，并为给定页写段缓存 + 标记 done。"""
+    from booktr import translate as tr
+    from booktr import util
+    util.write_json(os.path.join(tmp_cfg.work_dir, "plan.json"), {"order": rels})
+    seg_dir = tmp_cfg.get("segments_dir", default="")
+    state = tr.State(tmp_cfg)
+    for r in rels:
+        util.write_json(os.path.join(seg_dir, r.replace("/", "__") + ".json"), {
+            "encoding": "utf-8",
+            "segments": [{"id": 1, "kind": "text", "text": "こんにちは。",
+                          "translation": "你好。", "start": 0, "end": 6}],
+        })
+        state.page(r)["status"] = "done"
+    state.data["done_pages"] = list(rels)
+    state.save()
+
+
+def test_cmd_qa_range_selects_from_plan_order(tmp_cfg, tmp_path, capsys):
+    write_sample_site(tmp_path)
+    _seed_plan_and_done(tmp_cfg, tmp_path, ["page1.html", "page2.html", "page3.html"])
+    tmp_cfg.set(False, "qa", "deep_llm_check")
+    cmd_qa(tmp_cfg, _args(start=2, count=1))
+    out = capsys.readouterr().out
+    assert "plan.order[2..2]" in out
+    assert "page2.html" in out
+    assert "page1.html" not in out
+
+
+def test_cmd_qa_range_skips_untranslated(tmp_cfg, tmp_path, capsys):
+    write_sample_site(tmp_path)
+    _seed_plan_and_done(tmp_cfg, tmp_path, ["page1.html"])
+    # plan 含 page2 但未翻译
+    from booktr import util
+    util.write_json(os.path.join(tmp_cfg.work_dir, "plan.json"),
+                    {"order": ["page1.html", "page2.html"]})
+    tmp_cfg.set(False, "qa", "deep_llm_check")
+    cmd_qa(tmp_cfg, _args(start=1, count=2))
+    out = capsys.readouterr().out
+    assert "跳过未翻译 1 页" in out
+
+
+def test_cmd_qa_pages_and_start_conflict(tmp_cfg, tmp_path):
+    write_sample_site(tmp_path)
+    _seed_plan_and_done(tmp_cfg, tmp_path, ["page1.html"])
+    tmp_cfg.set(False, "qa", "deep_llm_check")
+    import pytest
+    with pytest.raises(SystemExit):
+        cmd_qa(tmp_cfg, _args(pages=["page1.html"], start=1))
+
+
+def test_cmd_qa_writes_timestamped_report(tmp_cfg, tmp_path):
+    write_sample_site(tmp_path)
+    _seed_plan_and_done(tmp_cfg, tmp_path, ["page1.html"])
+    tmp_cfg.set(False, "qa", "deep_llm_check")
+    cmd_qa(tmp_cfg, _args(start=1, count=1))
+    reports_dir = os.path.join(tmp_cfg.work_dir, "qa_reports")
+    files = [f for f in os.listdir(reports_dir) if f.startswith("qa_")]
+    assert len(files) == 1
+    # 最新别名同步存在
+    assert os.path.exists(os.path.join(tmp_cfg.work_dir, "qa_report.json"))
+
+
+def test_cmd_qa_queue_dedup(tmp_cfg, tmp_path):
+    """重复 QA 同一页，qa_ 队列条目不重复。"""
+    write_sample_site(tmp_path)
+    _seed_plan_and_done(tmp_cfg, tmp_path, ["page1.html"])
+    tmp_cfg.set(True, "qa", "deep_llm_check")
+
+    class IssueLLM:
+        def chat(self, system, user, **k):
+            return ('{"issues": [{"segment_id": 1, "problem": "x", '
+                    '"suggestion": "y", "severity": "low"}]}')
+
+    from booktr import review as review_mod
+    # 注入带问题的 client：直接调用 qa_report 后手动走入队逻辑较繁，改为调用两次 cmd_qa
+    # 用 monkeypatch 替换 _client
+    import booktr.pipeline as pl
+    orig = pl._client
+    pl._client = lambda cfg: IssueLLM()
+    try:
+        cmd_qa(tmp_cfg, _args(start=1, count=1))
+        cmd_qa(tmp_cfg, _args(start=1, count=1))
+    finally:
+        pl._client = orig
+    q = review_mod.load_queue(tmp_cfg)
+    qa_items = [it for it in q if str(it.get("reason", "")).startswith("qa_")]
+    assert len(qa_items) == 1

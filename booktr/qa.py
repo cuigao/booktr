@@ -63,9 +63,16 @@ def run_qa(cfg: Config, client, rel: str) -> list[dict]:
     return issues
 
 
-def qa_report(cfg: Config, client, rels: list[str]) -> dict:
+def qa_report(cfg: Config, client, rels: list[str],
+              out: str | None = None) -> dict:
+    """对给定页面列表执行 QA，返回报告。
+
+    ``out`` 非空时写入该路径（含时间戳的报告文件），并同步刷新稳定的
+    ``work/qa_report.json`` 别名；缺省则仅写 ``work/qa_report.json``。
+    无论何种方式，均逐页增量落盘。
+    """
     report = {"pages": {}, "total_issues": 0, "high": 0}
-    out = os.path.join(cfg.work_dir, "qa_report.json")
+    alias = os.path.join(cfg.work_dir, "qa_report.json")
     total = len(rels)
     for i, rel in enumerate(rels, 1):
         t0 = time.monotonic()
@@ -75,6 +82,8 @@ def qa_report(cfg: Config, client, rels: list[str]) -> dict:
             report["pages"][rel] = issues
             report["total_issues"] += len(issues)
             report["high"] += sum(1 for x in issues if x["severity"] == "high")
-        util.write_json(out, report)  # 增量落盘，长跑中断不丢失
+        util.write_json(alias, report)  # 增量落盘，长跑中断不丢失
+        if out:
+            util.write_json(out, report)
         print(f"[{i}/{total}] {rel}  {len(issues)} 问题 ({dt:.1f}s)", flush=True)
     return report

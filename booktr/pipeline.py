@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sys
+import time
 
 from . import annotator, crawler, glossary as gl, llm as llm_mod
 from . import planner, prefs as prefs_mod, prompts, qa, residual as residual_mod
@@ -810,24 +811,74 @@ def cmd_qa(cfg: Config, args) -> None:
         cfg.set(True, "qa", "deep_llm_check")
     state = tr.State(cfg)
     done_pages = state.data.get("done_pages", [])
+    done_set = set(done_pages)
+
+    # 选择待检查页：--pages 显式指定 | --start/--count 按 plan.order 取区间 | 缺省全部已译页
+    start = getattr(args, "start", None)
+    count = getattr(args, "count", None)
     if args.pages:
-        done_pages = [p for p in args.pages if p in done_pages] or args.pages
+        if start is not None or count is not None:
+            print("错误: --pages 与 --start/--count 不能同时使用", file=sys.stderr)
+            sys.exit(2)
+        targets = [p for p in args.pages if p in done_set] or args.pages
+        scope = "显式指定"
+    elif start is not None or count is not None:
+        plan = util.read_json(os.path.join(cfg.work_dir, "plan.json"), {})
+        order = plan.get("order", [])
+        if not order:
+            print("未找到 plan.json，先运行 `booktr plan`", file=sys.stderr)
+            sys.exit(2)
+        s = start if start is not None else 1
+        if s < 1:
+            print("错误: --start 从 1 开始", file=sys.stderr)
+            sys.exit(2)
+        n = count if count is not None else 1
+        window = order[s - 1: s - 1 + n] if n > 0 else order[s - 1:]
+        targets = [p for p in window if p in done_set]
+        skipped = [p for p in window if p not in done_set]
+        scope = f"plan.order[{s}..{s - 1 + len(window)}]"
+        print(f"范围 {scope}：命中 {len(targets)} 页"
+              + (f"，跳过未翻译 {len(skipped)} 页" if skipped else ""), flush=True)
+        if not targets:
+            print("该范围内没有已翻译页，结束。")
+            return
+    else:
+        targets = done_pages
+        scope = "全部已译页"
+
     deep = cfg.get("qa", "deep_llm_check", default=True)
-    print(f"QA 开始：共 {len(done_pages)} 页（深度检查={'开' if deep else '关'}）", flush=True)
-    report = qa.qa_report(cfg, client, done_pages)
-    print(f"QA 报告: 总问题 {report['total_issues']}，高危 {report['high']}，见 qa_report.json")
+    print(f"QA 开始：{scope}，共 {len(targets)} 页（深度检查={'开' if deep else '关'}）", flush=True)
+
+    # 时间戳报告（总是留存），并刷新 qa_report.json 别名
+    reports_dir = os.path.join(cfg.work_dir, "qa_reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(reports_dir, f"qa_{ts}.json")
+    report = qa.qa_report(cfg, client, targets, out=out_path)
+
+    print(f"QA 报告: 总问题 {report['total_issues']}，高危 {report['high']}，见 {out_path}")
     for rel, issues in report["pages"].items():
         print(f"  {rel}: {len(issues)} 问题")
         for i in issues[:3]:
             print(f"    段{i['segment_id']} [{i['severity']}] {i['problem']}")
-    # 将问题入审核队列
+    # 将问题入审核队列（按 page+segment_id+reason 去重，避免重跑重复入队）
     queue = review_mod.load_queue(cfg)
+    existing = {(it.get("page"), str(it.get("segment_id")), it.get("reason"))
+                for it in queue}
+    added = 0
     for rel, issues in report["pages"].items():
         for i in issues:
+            key = (rel, str(i["segment_id"]), "qa_" + i["severity"])
+            if key in existing:
+                continue
+            existing.add(key)
             queue.append({"page": rel, "segment_id": i["segment_id"], "src": "",
                           "reason": "qa_" + i["severity"], "detail": i["problem"],
                           "status": "open"})
+            added += 1
     review_mod.save_queue(cfg, queue)
+    if added:
+        print(f"已入审核队列: {added} 条")
 
 
 def cmd_annotate(cfg: Config, args) -> None:
@@ -1764,6 +1815,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = mk("qa", help="一致性 QA pass")
     sp.add_argument("--pages", nargs="*", help="限定检查页面")
+    sp.add_argument("--start", type=int, default=None,
+                    help="按 plan.order 从第 N 篇（1 起）开始检查")
+    sp.add_argument("--count", type=int, default=None,
+                    help="与 --start 搭配：检查 N 篇（缺省 1；0 表示到末尾）")
     deep_group = sp.add_mutually_exclusive_group()
     deep_group.add_argument("--no-deep", action="store_true",
                             help="仅本地规则，跳过 LLM 深度检查（覆盖配置）")
