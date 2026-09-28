@@ -128,6 +128,14 @@ python booktr-cli.py reset today/today4.html              # 整页重置（全�
 python booktr-cli.py reset today/today4.html --segments 16  # 只重置段16（保留其他段）
 python booktr-cli.py reset --all -y                        # 重置所有页面
 
+# 18) 列出译文残留的源语言片段（当前仅日语·平假名；只读，不改状态）
+python booktr-cli.py check-residual              # 扫描所有已译页，逐项给出 reset 命令
+python booktr-cli.py check-residual --pages today/today3.html
+python booktr-cli.py check-residual --no-report  # 只打印，不写 work/residual_report.json
+# 人工核验清单后，执行该项给出的 reset 命令，再 translate 即可重译该段：
+#   python booktr-cli.py reset today/today3.html --segments 4
+#   python booktr-cli.py translate --next
+
 # 查看进度
 python booktr-cli.py status
 
@@ -238,6 +246,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 | 上下文包 | plan 前 N1 篇 + 时间前导 N2 + 链接前导 N3 摘要（逐级去重） | `planner.context` |
 | 一致性 QA | 对已译页做体检：本地规则（占位符完整性=高危、术语一致=中危）+ LLM 深度语义检查（`qa.deep_llm_check`）；问题以 `qa_*` 原因写入审核队列供人工确认，不自动触发重译 | `qa.deep_llm_check` |
 | 词汇/短语审计 | `audit-terms` 用新词汇表/短语记忆重建已译段（按占位符边界精确匹配），同步 state+段缓存并重生成 out | `audit-terms` |
+| 残留检测 | `check-residual` 只读扫描已译段，列出译文残留的源语言片段（当前仅日语·平假名），逐项给出 reset 命令供人工核验后手动重译；不自动重译 | `check-residual` |
 | 译者注 | 跨页关联/趣味发现 → 外部 JSON | `annotate` |
 | Session ID | 页面翻译任务标识（task_id）+ 多轮对话标识（context_id） | 自动生成，写入 LLM 日志 |
 

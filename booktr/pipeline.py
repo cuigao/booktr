@@ -9,7 +9,8 @@ import shutil
 import sys
 
 from . import annotator, crawler, glossary as gl, llm as llm_mod
-from . import planner, prefs as prefs_mod, prompts, qa, review as review_mod, segments as seg_mod
+from . import planner, prefs as prefs_mod, prompts, qa, residual as residual_mod
+from . import review as review_mod, segments as seg_mod
 from . import styles as styles_mod, translate as tr, util
 from .config import Config, ensure_dirs, load_config, save_config
 
@@ -898,6 +899,48 @@ def cmd_status(cfg: Config, args) -> None:
         print(f"词汇表: {len(gl_)} 条（候选 {sum(1 for g in gl_ if g.get('status')=='auto-candidate')}）")
 
 
+def cmd_check_residual(cfg: Config, args) -> None:
+    """列出已译段落中译文残留的源语言片段（当前仅日语·平假名）。
+
+    只读：不修改状态、不触发重译。人工核验每项后，手动执行其下方给出的
+    reset 命令，再 translate 即可重译该段。
+    """
+    src_lang = cfg.get("lang", "source", default="ja")
+    if src_lang not in residual_mod.SUPPORTED_SOURCE_LANGS:
+        print(f"当前源语言「{prompts.lang_name(src_lang)}」暂无残留检测规则（仅支持日语）。")
+        return
+
+    pages = args.pages or None
+    results = residual_mod.scan(cfg, pages)
+
+    if not results:
+        print("未发现残留假名。")
+    else:
+        total_items = sum(len(r["items"]) for r in results)
+        print(f"发现残留假名：{total_items} 段 / {len(results)} 页\n")
+        idx = 0
+        for page in results:
+            for it in page["items"]:
+                idx += 1
+                tokens = "、".join(it["tokens"])
+                print(f"[{idx}] {page['page']}  段{it['segment_id']}")
+                print(f"    命中: {tokens}")
+                for ex in it["excerpts"]:
+                    print(f"    上下文: {ex}")
+            print(f"    重置: {page['reset']}")
+            print()
+
+    if not args.no_report:
+        report_path = args.json or os.path.join(cfg.work_dir, "residual_report.json")
+        util.write_json(report_path, {
+            "source_lang": src_lang,
+            "total_segments": sum(len(r["items"]) for r in results),
+            "total_pages": len(results),
+            "pages": results,
+        })
+        print(f"报告已写入: {report_path}")
+
+
 def cmd_export(cfg: Config, args) -> None:
     """将 work 产物导出/确认到输出目录。"""
     ensure_dirs(cfg)
@@ -1709,6 +1752,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = mk("export-prefs", help="导出当前实例的个人偏好（user_rules/glossary/style_refs）")
     sp.add_argument("path", help="偏好文件路径，如 pref/booktr-prefs.json")
     sp.set_defaults(func=cmd_export_prefs)
+
+    sp = mk("check-residual", help="列出译文残留的源语言片段（当前仅日语·平假名；只读）")
+    sp.add_argument("--pages", nargs="*", help="限定检查的页面")
+    sp.add_argument("--json", default=None, help="报告输出路径（默认 work/residual_report.json）")
+    sp.add_argument("--no-report", action="store_true", help="不写报告文件")
+    sp.set_defaults(func=cmd_check_residual)
 
     sp = mk("export-log", help="导出指定页面的完整 LLM 对话日志为 Markdown")
     sp.add_argument("page", help="页面路径，如 today/today6.html")
