@@ -54,3 +54,25 @@ def lookup(cfg: Config, text: str, threshold: float = 0.9) -> list[dict]:
 
 def size(cfg: Config) -> int:
     return len(util.read_jsonl(_path(cfg)))
+
+
+def purge_term(cfg: Config, src_term: str, dst_term: str) -> int:
+    """清理与指定术语规范译法矛盾的翻译记忆记录。
+
+    规则：记录的 src 含术语原文、且 dst 不含其规范译文 → 删除（视为过时错译）；
+    保留 dst 已含规范译文的记录。返回删除条数。
+    """
+    if not src_term or not dst_term:
+        return 0
+    records = util.read_jsonl(_path(cfg))
+    kept = []
+    removed = 0
+    for r in records:
+        if src_term in (r.get("src") or "") and dst_term not in (r.get("dst") or ""):
+            removed += 1
+            continue
+        kept.append(r)
+    if removed:
+        _rewrite(cfg, kept)
+    return removed
+

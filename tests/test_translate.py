@@ -273,8 +273,78 @@ def test_user_rules_priority_line(tmp_cfg):
     assert "全角规则" in sysp
 
 
-# ── 链接/时间前导 ─────────────────────────────────────────────────────
+# ── 重译上下文补齐 ────────────────────────────────────────────────────
 
+
+def test_retranslate_user_includes_full_context(tmp_cfg):
+    """重译 user 消息渲染词条/跨页前导/翻译记忆/风格样例，不弱于初译。"""
+    from booktr import prompts
+    ctx = {
+        "term_hints": "## 推荐翻译译文\n- リッツ → Ritz",
+        "prior_ctx": "前页摘要内容",
+        "summary": "页面摘要",
+        "page_ctx": "标题：测试",
+        "tm_hits": [{"src": "foo", "dst": "bar"}],
+        "exemplars": [{"src": "src例", "dst": "dst例"}],
+        "context_before": "前文已译",
+        "context_after": "后文已译",
+    }
+    usr = prompts.build_retranslate_user(tmp_cfg, "待译", ctx)
+    assert "リッツ → Ritz" in usr
+    assert "前页摘要内容" in usr
+    assert "foo → bar" in usr
+    assert "src例" in usr and "dst例" in usr
+    assert "前文已译" in usr
+    assert "后文已译" in usr
+
+
+def test_retranslate_user_minimal(tmp_cfg):
+    """上下文字段缺失时不渲染对应小节。"""
+    from booktr import prompts
+    usr = prompts.build_retranslate_user(tmp_cfg, "待译", {})
+    assert "## 翻译记忆命中" not in usr
+    assert "## 风格参照样例" not in usr
+    assert "### 待翻译文本" in usr or "## 待翻译文本" in usr
+
+
+def test_reset_segment_gets_term_hints(tmp_cfg, tmp_path):
+    """段级重译（translation=None）注入词汇表 term hint，非重置段被复制。"""
+    from booktr import phrases as phrases_mod
+    write_sample_site(tmp_path)
+    gl.upsert(tmp_cfg, {"src": "今日", "dst": "Ritz", "category": "term", "status": "confirmed"})
+
+    # 先正常翻译一页（FakeLLM 恒等）
+    fake = FakeLLM.default()
+    state = tr.State(tmp_cfg)
+    tr.translate_page(tmp_cfg, fake, "page1.html", state, {}, {}, [])
+    # 清空短语记忆，避免重译被机械替换（不走 LLM）
+    phrases_mod.save(tmp_cfg, {})
+    segs = seg_mod.segments_for_page(tmp_cfg, "page1.html")
+    target = next(s for s in segs if s.kind == "text" and "今日" in s.text)
+    keep = next(s for s in segs if s.kind == "text" and "今日" not in s.text)
+    keep_tr = state.page("page1.html")["segments"][str(keep.id)]["translation"]
+
+    # 重置该段（模拟 reset --segments），再翻译
+    state = tr.State(tmp_cfg)
+    state.page("page1.html")["segments"][str(target.id)]["translation"] = None
+    state.page("page1.html")["status"] = "pending"
+    state.save()
+    captured = {}
+
+    def resp(user):
+        captured["user"] = user
+        return _ok_json("Ritz")
+
+    fake2 = FakeLLM(responder=resp)
+    tr.translate_page(tmp_cfg, fake2, "page1.html", state, {}, {}, [])
+
+    # 重译 prompt 含词条推荐译法
+    assert "今日 → Ritz" in captured.get("user", "")
+    # 非重置段译文被原样保留
+    assert state.page("page1.html")["segments"][str(keep.id)]["translation"] == keep_tr
+
+
+# ── 链接/时间前导 ─────────────────────────────────────────────────────
 
 def _mk_site_map():
     """构造合成 site_map：today 系列 + photo 系列 + 链接关系。"""

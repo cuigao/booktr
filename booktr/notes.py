@@ -43,6 +43,34 @@ def all_notes(cfg: Config) -> list[dict]:
     return util.read_jsonl(_path(cfg))
 
 
+def _rewrite(cfg: Config, notes: list[dict]) -> None:
+    path = _path(cfg)
+    with open(path, "w", encoding="utf-8") as f:
+        for n in notes:
+            f.write(util.json.dumps(n, ensure_ascii=False) + "\n")
+
+
+def purge_term(cfg: Config, src_term: str, dst_term: str) -> int:
+    """清理讨论指定术语但未采用其规范译法的翻译笔记。
+
+    规则：note 的 summary 含术语原文、且不含其规范译文 → 删除（视为过时错译）；
+    保留 summary 已含规范译文的笔记。返回删除条数。
+    """
+    if not src_term or not dst_term:
+        return 0
+    notes = all_notes(cfg)
+    kept = []
+    removed = 0
+    for n in notes:
+        if src_term in (n.get("summary") or "") and dst_term not in (n.get("summary") or ""):
+            removed += 1
+            continue
+        kept.append(n)
+    if removed:
+        _rewrite(cfg, kept)
+    return removed
+
+
 def relevant(cfg: Config, text: str, limit: int = 8) -> list[dict]:
     """返回与文本相关的笔记（按引文/摘要关键词命中）。"""
     import re

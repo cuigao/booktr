@@ -157,6 +157,15 @@ def add_term(cfg: Config, src: str, dst: str, category: str = "term",
         del data[key]
         phrases_mod.save(cfg, data)
         print(f"  已清理短语记忆: {src}")
+    # 清理与该术语规范译法矛盾的翻译记忆与笔记
+    from . import notes as notes_mod
+    from . import tm as tm_mod
+    n_tm = tm_mod.purge_term(cfg, src, dst)
+    if n_tm:
+        print(f"  已清理翻译记忆: {n_tm} 条")
+    n_notes = notes_mod.purge_term(cfg, src, dst)
+    if n_notes:
+        print(f"  已清理翻译笔记: {n_notes} 条")
 
 
 def confirm(cfg: Config, src: str, dst: str | None = None) -> bool:

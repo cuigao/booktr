@@ -585,6 +585,9 @@ def translate_page(
 
     # 构建 system prompt（整页共享，仅含全局规则；词条推荐译法注入 user prompt）
     sysp = prompts.build_translate_system(cfg, [], guide, user_rules, focus)
+    # 重译专用 system（追加"重新翻译任务"规则；仅在被 reset 的段使用）
+    sysp_rt = prompts.build_translate_system(cfg, [], guide, user_rules, focus,
+                                             is_retranslation=True)
 
     result = {"status": "done", "skipped": False, "segments_total": len(segs), "review_count": 0}
 
@@ -640,7 +643,7 @@ def translate_page(
             # 创建新对话（fresh start），生成新 context_id
             context_seq += 1
             context_id = f"ctx_{_epoch_ms()}_{page_key}_{context_seq}"
-            conversation = [{"role": "system", "content": sysp}]
+            conversation = [{"role": "system", "content": sysp_rt}]
             history_count = 0
             pending_translations = []
             _ev("retranslate", {"sid": sid, "has_context": bool(retranslate_context)})
@@ -676,9 +679,6 @@ def translate_page(
             all_injections = gl_items + ph_items
             term_hints = prompts.format_term_hints(all_injections) if all_injections else ""
 
-            # 重新翻译模式标记（system prompt 仅追加重翻译规则，不含词条）
-            is_retranslation = retranslate_context is not None
-
             tm_hits = tm_mod.lookup(cfg, chk) if tm_on else []
             ex_refs = styles_mod.retrieve_exemplars(cfg, chk) if exemplar_on else []
             notes_ctx = build_translation_context(cfg, rel, chk, page_ctx)
@@ -690,8 +690,15 @@ def translate_page(
             is_first = (len(conversation) == 1) or (history_count == 0)
             if is_first:
                 if retranslate_context:
-                    # 重新翻译模式：使用带上下文窗口的消息
-                    usr = prompts.build_retranslate_user(cfg, chk, retranslate_context)
+                    # 重新翻译模式：补齐与初译同等的上下文（词条/跨页前导/记忆/样例）
+                    rt_ctx = dict(retranslate_context)
+                    rt_ctx.update({
+                        "term_hints": term_hints,
+                        "prior_ctx": chk_prior,
+                        "tm_hits": tm_hits,
+                        "exemplars": ex_refs,
+                    })
+                    usr = prompts.build_retranslate_user(cfg, chk, rt_ctx)
                 else:
                     usr = prompts.build_translate_user_first(
                         cfg, chk, page_ctx, chk_prior, ex_refs, tm_hits,
@@ -740,6 +747,10 @@ def translate_page(
                     "translated_chunks": translated_chunks,
                     "confidences": confidences,
                     "all_injections": all_injections,
+                    "term_hints": term_hints,
+                    "tm_hits": tm_hits,
+                    "exemplars": ex_refs,
+                    "prior_ctx": chk_prior,
                     "repair_methods": list(seg_repair_methods),
                     "repaired": seg_repaired,
                 })
@@ -796,7 +807,8 @@ def translate_page(
                 if summary:
                     conversation_summary = summary
                 # 重建对话，生成新 context_id
-                conversation = [{"role": "system", "content": sysp}]
+                conversation = [{"role": "system",
+                                 "content": sysp_rt if retranslate_context else sysp}]
                 history_count = 0
                 pending_translations = []
                 retranslate_context = None  # 防止残留，导致下一正常段误判为重翻译段
@@ -839,6 +851,12 @@ def translate_page(
                 rt_context = _build_retranslate_context(
                     cfg, rel, item["seg"], segs, state, site_map, plan
                 )
+                rt_context.update({
+                    "term_hints": item.get("term_hints", ""),
+                    "prior_ctx": item.get("prior_ctx", ""),
+                    "tm_hits": item.get("tm_hits", []),
+                    "exemplars": item.get("exemplars", []),
+                })
                 # 每次 auto-retranslate 使用独立递增的 context_id（利于日志归组）
                 context_seq += 1
                 rt_context_id = f"ctx_{_epoch_ms()}_{page_key}_{context_seq}"

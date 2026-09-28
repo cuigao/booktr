@@ -164,15 +164,34 @@ def build_translate_user_subsequent(
 
 
 def build_retranslate_user(cfg, src_text: str, context: dict) -> str:
-    """重新翻译时的用户消息（带上下文窗口）。"""
+    """重新翻译时的用户消息（带不弱于初次翻译的上下文）。
+
+    除本页前后已译内容外，注入与初次翻译同等的词汇表推荐译法、跨页前导、
+    翻译记忆命中与风格样例，使重译信息量不弱于初译。
+    """
     tgt = cfg.get("lang", "target", default="zh-Hans")
     tgt_name = lang_name(tgt)
     parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt_name}。"]
 
-    if context.get("page_ctx"):
-        parts.append(f"## 页面上下文\n{context['page_ctx']}")
+    if context.get("term_hints"):
+        parts.append(context["term_hints"])
     if context.get("summary"):
         parts.append(f"## 页面摘要\n{context['summary']}")
+    if context.get("page_ctx"):
+        parts.append(f"## 页面上下文\n{context['page_ctx']}")
+    if context.get("prior_ctx"):
+        parts.append(f"## 前文上下文（保持叙事与术语一致）\n{context['prior_ctx']}")
+    tm_hits = context.get("tm_hits") or []
+    if tm_hits:
+        tm_lines = [f"{h['src']} → {h['dst']}" for h in tm_hits]
+        parts.append("## 翻译记忆命中（可参考，但优先词汇表）\n" + "\n".join(tm_lines))
+    exemplars = context.get("exemplars") or []
+    if exemplars:
+        ex_lines = [f"原文：{e['src']}\n参考译文：{e['dst']}" for e in exemplars]
+        parts.append(
+            "## 风格参照样例（仅模仿其风格与措辞倾向，勿照抄内容）\n"
+            + "\n\n".join(ex_lines)
+        )
     if context.get("context_before"):
         parts.append(f"## 前文（已翻译，保持术语与风格一致）\n{context['context_before']}")
     parts.append(f"## 待翻译文本\n\n{src_text}")

@@ -68,6 +68,52 @@ def test_add_term_cleans_phrase(tmp_cfg):
     assert gl.lookup_read_only(tmp_cfg, "HOME") == "首页"
 
 
+def test_add_term_purges_conflicting_tm(tmp_cfg):
+    """add-term 清理与规范译法矛盾的翻译记忆（保留已含规范形的记录）。"""
+    from booktr import tm as tm_mod
+    from booktr import util
+    tm_mod.add(tmp_cfg, "リッツ会員A", "里茨会员", "p.html", 1)      # 矛盾 → 删
+    tm_mod.add(tmp_cfg, "リッツ会員B", "Ritz会员", "p2.html", 2)     # 已含规范形 → 留
+    tm_mod.add(tmp_cfg, "無関係", "无关", "p3.html", 3)             # 不含术语 src → 留
+    gl.add_term(tmp_cfg, "リッツ", "Ritz")
+    recs = util.read_jsonl(tmp_cfg.get("tm", "path", default="work/tm.jsonl"))
+    dsts = [r["dst"] for r in recs]
+    assert "里茨会员" not in dsts
+    assert "Ritz会员" in dsts
+    assert "无关" in dsts
+
+
+def test_add_term_purges_conflicting_notes(tmp_cfg):
+    """add-term 定向清理讨论该术语但未采用规范译法的笔记。"""
+    from booktr import notes as notes_mod
+    notes_mod.add(tmp_cfg, "p.html", 1, "リッツは…", "「リッツ」译作「里茨」", kind="翻译说明")
+    notes_mod.add(tmp_cfg, "p.html", 2, "リッツは…", "「リッツ」保留 Ritz 原形", kind="翻译说明")
+    notes_mod.add(tmp_cfg, "p.html", 3, "無関係", "与术语无关的说明", kind="翻译说明")
+    gl.add_term(tmp_cfg, "リッツ", "Ritz")
+    sums = [n["summary"] for n in notes_mod.all_notes(tmp_cfg)]
+    assert "「リッツ」译作「里茨」" not in sums
+    assert "「リッツ」保留 Ritz 原形" in sums
+    assert "与术语无关的说明" in sums
+
+
+def test_tm_purge_term_keeps_consistent(tmp_cfg):
+    from booktr import tm as tm_mod
+    tm_mod.add(tmp_cfg, "AリッツB", "旧译", "p.html", 1)
+    tm_mod.add(tmp_cfg, "CリッツD", "C Ritz D", "p.html", 2)
+    removed = tm_mod.purge_term(tmp_cfg, "リッツ", "Ritz")
+    assert removed == 1
+    assert tm_mod.size(tmp_cfg) == 1
+
+
+def test_notes_purge_term_targeted(tmp_cfg):
+    from booktr import notes as notes_mod
+    notes_mod.add(tmp_cfg, "p.html", 1, "", "「リッツ」旧译作「里茨」说明", kind="翻译说明")
+    notes_mod.add(tmp_cfg, "p.html", 2, "", "「リッツ」使用 Ritz 说明", kind="翻译说明")
+    removed = notes_mod.purge_term(tmp_cfg, "リッツ", "Ritz")
+    assert removed == 1
+    assert len(notes_mod.all_notes(tmp_cfg)) == 1
+
+
 # ── 短语记忆 ────────────────────────────────────────────────────────────
 
 
