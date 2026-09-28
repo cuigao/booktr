@@ -114,6 +114,58 @@ def test_notes_purge_term_targeted(tmp_cfg):
     assert len(notes_mod.all_notes(tmp_cfg)) == 1
 
 
+def test_tm_purge_keywords(tmp_cfg):
+    """TM 的 dst 命中关键词 → 删除；不命中保留。"""
+    from booktr import tm as tm_mod
+    from booktr import util
+    tm_mod.add(tmp_cfg, "srcA", "含错误音译里茨的译文", "p.html", 1)
+    tm_mod.add(tmp_cfg, "srcB", "正确译文 Ritz", "p.html", 2)
+    removed = tm_mod.purge_keywords(tmp_cfg, ["里茨"])
+    assert removed == 1
+    recs = util.read_jsonl(tmp_cfg.get("tm", "path", default="work/tm.jsonl"))
+    assert [r["src"] for r in recs] == ["srcB"]
+
+
+def test_notes_purge_keywords(tmp_cfg):
+    """notes 的 summary 命中关键词 → 删除；不命中保留。"""
+    from booktr import notes as notes_mod
+    notes_mod.add(tmp_cfg, "p.html", 1, "源文", "按规则译作里茨", kind="翻译说明")
+    notes_mod.add(tmp_cfg, "p.html", 2, "源文", "保留 Ritz 原形", kind="翻译说明")
+    removed = notes_mod.purge_keywords(tmp_cfg, ["里茨"])
+    assert removed == 1
+    assert [n["summary"] for n in notes_mod.all_notes(tmp_cfg)] == ["保留 Ritz 原形"]
+
+
+def test_purge_keywords_empty_noop(tmp_cfg):
+    from booktr import notes as notes_mod
+    from booktr import tm as tm_mod
+    notes_mod.add(tmp_cfg, "p.html", 1, "", "任意说明", kind="翻译说明")
+    tm_mod.add(tmp_cfg, "src", "任意译文", "p.html", 1)
+    assert tm_mod.purge_keywords(tmp_cfg, []) == 0
+    assert notes_mod.purge_keywords(tmp_cfg, [""]) == 0
+    assert len(notes_mod.all_notes(tmp_cfg)) == 1
+    assert tm_mod.size(tmp_cfg) == 1
+
+
+def test_add_term_purge_keywords(tmp_cfg):
+    """add-term 传 purge_keywords：清理 TM dst / notes summary 命中关键词的条目。"""
+    from booktr import notes as notes_mod
+    from booktr import tm as tm_mod
+    from booktr import util
+    tm_mod.add(tmp_cfg, "s1", "旧译里茨贝利菲尔兹", "p.html", 1)
+    tm_mod.add(tmp_cfg, "s2", "正确 Ritz", "p.html", 2)
+    notes_mod.add(tmp_cfg, "p.html", 1, "", "讨论里茨贝利菲尔兹的说明", kind="翻译说明")
+    notes_mod.add(tmp_cfg, "p.html", 2, "", "保留 Ritz 的说明", kind="翻译说明")
+    gl.add_term(tmp_cfg, "リッツベリーフィールズ", "Ritzberry Fields",
+                purge_keywords=["里茨贝利菲尔兹"])
+    dsts = [r["dst"] for r in util.read_jsonl(
+        tmp_cfg.get("tm", "path", default="work/tm.jsonl"))]
+    assert dsts == ["正确 Ritz"]
+    assert [n["summary"] for n in notes_mod.all_notes(tmp_cfg)] == ["保留 Ritz 的说明"]
+
+
+
+
 # ── 短语记忆 ────────────────────────────────────────────────────────────
 
 

@@ -553,7 +553,7 @@ def cmd_reset(cfg: Config, args) -> None:
 
 
 def cmd_add_term(cfg: Config, args) -> None:
-    """向词汇表添加条目，并清理对应的短语记忆。"""
+    """向词汇表添加条目，并清理对应的短语记忆/翻译记忆/笔记。"""
     if args.file:
         # 批量导入：从 JSON 文件读取条目列表
         entries = util.read_json(args.file, [])
@@ -564,13 +564,15 @@ def cmd_add_term(cfg: Config, args) -> None:
                 gl.add_term(cfg, src, dst,
                             category=e.get("category", "term"),
                             note=e.get("note", ""),
-                            author="user")
+                            author="user",
+                            purge_keywords=e.get("purge_keywords"))
         print(f"\n批量导入完成: {len(entries)} 条")
     elif args.src and args.dst:
         gl.add_term(cfg, args.src, args.dst,
                     category=args.category or "term",
                     note=args.note or "",
-                    author="user")
+                    author="user",
+                    purge_keywords=getattr(args, "purge_keyword", None))
     else:
         print("请指定 src 和 dst，或使用 --file 批量导入")
 
@@ -1582,12 +1584,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--interactive", action="store_true", help="交互式确认冲突")
     sp.set_defaults(func=cmd_extract_terms)
 
-    sp = mk("add-term", help="向词汇表添加条目，并清理对应短语记忆")
+    sp = mk("add-term", help="向词汇表添加条目，并清理对应短语记忆/翻译记忆/笔记")
     sp.add_argument("src", nargs="?", help="原文术语，如 HOME")
     sp.add_argument("dst", nargs="?", help="译文，如 首页")
     sp.add_argument("--category", default="term", help="类别（person/song/album/show/place/term/other）")
     sp.add_argument("--note", default="", help="备注说明")
     sp.add_argument("--file", default=None, help="从 JSON 文件批量导入条目列表")
+    sp.add_argument("--purge-keyword", action="append", default=None,
+                    help="已知错误译法关键词（可重复）；TM 的 dst 或 notes 的 summary 命中即清理")
     sp.set_defaults(func=cmd_add_term)
 
     sp = mk("audit-terms", help="审计已翻译段落，用新词汇表/短语记忆替换精确匹配的部分")

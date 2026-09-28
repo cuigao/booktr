@@ -76,3 +76,23 @@ def purge_term(cfg: Config, src_term: str, dst_term: str) -> int:
         _rewrite(cfg, kept)
     return removed
 
+
+def purge_keywords(cfg: Config, keywords: list[str]) -> int:
+    """清理译文（dst）中含任一指定关键词的翻译记忆记录。返回删除条数。"""
+    kws = [k for k in (keywords or []) if k]
+    if not kws:
+        return 0
+    records = util.read_jsonl(_path(cfg))
+    kept = []
+    removed = 0
+    for r in records:
+        dst = r.get("dst") or ""
+        if any(k in dst for k in kws):
+            removed += 1
+            continue
+        kept.append(r)
+    if removed:
+        _rewrite(cfg, kept)
+    return removed
+
+

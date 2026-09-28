@@ -144,8 +144,13 @@ def candidates(cfg: Config) -> list[dict]:
 
 
 def add_term(cfg: Config, src: str, dst: str, category: str = "term",
-             note: str = "", author: str = "user") -> None:
-    """添加词汇表条目，并清理对应的短语记忆条目。"""
+             note: str = "", author: str = "user",
+             purge_keywords: list[str] | None = None) -> None:
+    """添加词汇表条目，并清理对应的短语记忆/翻译记忆/笔记。
+
+    purge_keywords：已知错误译法关键词；TM 的 dst 或 notes 的 summary 命中任一
+    关键词时，该条目在本次调用中被清理（用于纠正历史错译）。
+    """
     ok, msg = upsert(cfg, {"src": src, "dst": dst, "category": category,
                            "note": note, "status": "confirmed"}, author=author)
     print(f"  {src} → {dst}: {msg}")
@@ -166,6 +171,14 @@ def add_term(cfg: Config, src: str, dst: str, category: str = "term",
     n_notes = notes_mod.purge_term(cfg, src, dst)
     if n_notes:
         print(f"  已清理翻译笔记: {n_notes} 条")
+    # 清理含已知错误译法关键词的翻译记忆与笔记（本次调用参数）
+    if purge_keywords:
+        n_tm_kw = tm_mod.purge_keywords(cfg, purge_keywords)
+        if n_tm_kw:
+            print(f"  已清理翻译记忆（关键词）: {n_tm_kw} 条")
+        n_notes_kw = notes_mod.purge_keywords(cfg, purge_keywords)
+        if n_notes_kw:
+            print(f"  已清理翻译笔记（关键词）: {n_notes_kw} 条")
 
 
 def confirm(cfg: Config, src: str, dst: str | None = None) -> bool:

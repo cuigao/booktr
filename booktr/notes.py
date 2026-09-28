@@ -71,6 +71,25 @@ def purge_term(cfg: Config, src_term: str, dst_term: str) -> int:
     return removed
 
 
+def purge_keywords(cfg: Config, keywords: list[str]) -> int:
+    """清理说明（summary）中含任一指定关键词的翻译笔记。返回删除条数。"""
+    kws = [k for k in (keywords or []) if k]
+    if not kws:
+        return 0
+    notes = all_notes(cfg)
+    kept = []
+    removed = 0
+    for n in notes:
+        s = n.get("summary") or ""
+        if any(k in s for k in kws):
+            removed += 1
+            continue
+        kept.append(n)
+    if removed:
+        _rewrite(cfg, kept)
+    return removed
+
+
 def relevant(cfg: Config, text: str, limit: int = 8) -> list[dict]:
     """返回与文本相关的笔记（按引文/摘要关键词命中）。"""
     import re
