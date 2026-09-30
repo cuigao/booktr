@@ -292,12 +292,14 @@ def test_locate_segments_includes_head_title():
 
 
 def test_qa_prompt_only_lists_actionable():
-    """系统提示词须含'只列出确实需要修改的问题'等约束。"""
+    """系统提示词须把生硬/翻译腔明确列为 low 可报告项。"""
     from booktr import prompts
     from booktr.config import Config
     import os
     cfg = Config(root=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     s = prompts.build_qa_system(cfg)
-    assert "只列出确实需要修改的问题" in s
+    assert "生硬" in s
+    assert "翻译腔" in s
+    assert "low" in s
     assert "合并为一条" in s
     assert "high" in s
