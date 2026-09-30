@@ -295,6 +295,8 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 
 配置（`qa`）：`deep_llm_check`、`queue_path`（默认 `work/qa_queue.json`）、`report_dir`（默认 `work/qa_reports`）、`reasoning_effort`（默认空=继承 `llm.reasoning_effort`）。**思考等级**：所有 LLM 调用默认**流式**（`llm.stream`），长思考不再误判超时；QA 可经 `qa.reasoning_effort` 单独覆盖思考等级（如设 `none` 关闭思考以加速，`high` 提升审查深度）。`reasoning` 内容完整记录在 `work/llm_logs/*.json`（`reasoning`/`reasoning_len`）。
 
+> 现有 `qa-review` 为逐条 yes/no 裁定，无法部分采纳/拆分意见、原文划线提意见或人工直改译文，且无撤销手段。更完整的**交互式 QA 审查**设计（含上述能力与数据模型演进）见工作区文档 `instance/report/interactive_qa_plan.md`。
+
 ## LLM 接入
 
 - `llm.provider: "mock"`：离线运行，返回确定性结果，用于验证管线与数据结构（无需 API key）。
@@ -340,3 +342,4 @@ python -m pytest tests/test_core.py -q
 
 - **v1（当前）**：CLI 全流程 + 全部增强工具 + 双式风格锚定 + 可选 survey pass + mock/真实 LLM + 交互式 init。
 - **v2**：`serve.py` Web 查看器——左右对照原文/译文，实时叠加词汇表/笔记/译者注；段索引锚点已就绪，无需返工。
+- **v2（QA 交互化）**：交互式 QA 审查（原文划线提意见、意见编辑/拆分/部分采纳、人工直改译文、撤销）——设计见工作区 `instance/report/interactive_qa_plan.md`（与 `roadmap.md §3` 衔接）。
