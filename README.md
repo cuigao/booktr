@@ -184,7 +184,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   - `lang.source/target` 源/目标语言代码（默认 `ja` → `zh-Hans`）；所有 prompt 通过 `lang_name()` 映射为人类可读名称（`zh-Hans` → "简体中文"），配置代码与提示词一致
   - `llm.provider`：`mock`（离线测试）或 `openai-compatible`（真实 API）
   - `llm.base_url/model`：OpenAI 兼容服务接入参数
-  - `llm.api_key` / `llm.api_key_env` / `llm.api_key_required`：API key 提供方式（见下）
+  - `llm.api_key` / `llm.api_key_env` / `llm.api_key_required`：API key 提供方式（init 时**三选一**：明文写入 config / 环境变量 / 无需 key，见下）
   - `llm.max_tokens`：单次回复的 token 上限（默认 131072）。**推理模型**（如 deepseek-v4.1 系列）会先输出大量 `reasoning` token，上限过低会导致正文为空（`finish_reason=length`），故默认放宽
   - `llm.max_tokens_ceiling`：当正文因 reasoning 被截空时，自动翻倍 `max_tokens` 重试一次的上限（默认 524288）
   - `llm.stream`：流式输出（默认 true）。流式下每个分块都会重置读取超时，**长思考不再被误判为网络超时**；不支持流式的服务设 false
@@ -223,7 +223,8 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 - 逐项提示的默认值来自该实例，**直接回车沿用、主动输入才覆盖**（仍是完整交互式，可改任意项）。
 - **自动继承**该实例的 `glossary` 与 `style_refs`；若同时给 `--prefs`，偏好文件在其后写入并**覆盖**继承数据。
 - **`source_dir` 相对路径按新数据根重算**，始终指向同一站点（同深度复制则保持原样；不同深度自动调整）；`output_dir`/`work_dir` 保持相对（新实例自有的 out/work，从零开始）。
-- API key 会一并复制；提示中**回车保留、输入 `-` 清空**。
+- **API key 提供方式**（`init` 中三选一）：`[1] 明文 key`（写入 config，**默认**）——回车保留现有值、输入 `-` 清空、直接留空表示无需 key；`[2] 环境变量`——写入环境变量名（默认 `BOOKTR_API_KEY`，可自定义），`api_key` 留空、运行时从环境读取；`[3] 无需 key`（本地服务）——`api_key_required: false`，请求头省略 `Authorization`。
+- **`--clone` 时**：API key 提供方式与提示默认值**镜像源实例**（源为环境变量模式则默认 env 并继承其变量名）；明文模式仍为回车保留、`-` 清空。
 - 典型用法（同配置、仅风格改为上海话）：
 
   ```bash
@@ -324,10 +325,11 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 ## LLM 接入
 
 - `llm.provider: "mock"`：离线运行，返回确定性结果，用于验证管线与数据结构（无需 API key）。
-- `llm.provider: "openai-compatible"`：接入任意兼容服务（OpenAI / OpenRouter / vLLM / Ollama / LM Studio 等）。API key 提供方式（优先级从高到低）：
-  - `llm.api_key`：**直接写入 config**（init 时输入即写入此项）。
-  - `llm.api_key_env`：环境变量名（默认 `BOOKTR_API_KEY`），从环境读取。
-  - 本地免 key 服务（如 Ollama）：设 `llm.api_key_required: false`，空 key 也可请求（请求头省略 `Authorization`）。
+- `llm.provider: "openai-compatible"`：接入任意兼容服务（OpenAI / OpenRouter / vLLM / Ollama / LM Studio 等）。API key 提供方式（`init` 三选一，运行时优先级从高到低）：
+  - `llm.api_key`：**直接写入 config**（init 选「明文 key」即写入此项）。
+  - `llm.api_key_env`：环境变量名（默认 `BOOKTR_API_KEY`），从环境读取（init 选「环境变量」时写入此项，`api_key` 留空）。
+  - 本地免 key 服务（如 Ollama）：init 选「无需 key」，即 `llm.api_key_required: false`，空 key 也可请求（请求头省略 `Authorization`）。
+  - 运行时取值优先级：**`llm.api_key`（非空）> 环境变量 `api_key_env` > 空**。
 
 ## 数据文件
 

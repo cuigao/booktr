@@ -142,18 +142,29 @@ def _run_init(tmp_path, monkeypatch, answers, prefs_path, clone=None):
     return json.loads((data_dir / "config.json").read_text(encoding="utf-8"))
 
 
-def _make_clone_source(root, monkeypatch):
-    """构造一个 --clone 源实例（完整 config + glossary + style_refs）。"""
+def _make_clone_source(root, monkeypatch, key_mode="plain"):
+    """构造一个 --clone 源实例（完整 config + glossary + style_refs）。
+
+    key_mode: plain（明文 SECRET）/ env（BOOKTR_API_KEY 环境变量）。
+    """
     clone = root / "cloneinst"
     (clone / "work").mkdir(parents=True, exist_ok=True)
+    if key_mode == "env":
+        llm = {"provider": "openai-compatible",
+               "base_url": "https://ollama.com/v1",
+               "model": "deepseek-v4.1-flash:cloud",
+               "api_key": "", "api_key_env": "CLONE_KEY_ENV",
+               "api_key_required": True}
+    else:
+        llm = {"provider": "openai-compatible",
+               "base_url": "https://ollama.com/v1",
+               "model": "deepseek-v4.1-flash:cloud",
+               "api_key": "SECRET", "api_key_required": True}
     cfg = {
         "source_dir": "../../love.life.coocan.jp",
         "output_dir": "out", "work_dir": "work",
         "lang": {"source": "ja", "target": "zh-Hans"},
-        "llm": {"provider": "openai-compatible",
-                "base_url": "https://ollama.com/v1",
-                "model": "deepseek-v4.1-flash:cloud",
-                "api_key": "SECRET", "api_key_required": True},
+        "llm": llm,
         "user_rules": "基础规则CLONE",
         "qa": {"deep_llm_check": True},
         "glossary": {"path": "work/glossary.json"},
@@ -257,4 +268,71 @@ def test_init_prefs_standard_keeps_rules(tmp_path, monkeypatch):
     answers = ["", "", "", "", "", "1", "1"]  # 1 = 标准
     saved = _run_init(tmp_path, monkeypatch, answers, pref)
     assert saved["user_rules"] == rules
+
+
+# ── API key 提供方式（init 三选一）────────────────────────────────────
+def test_init_key_mode_plain_default_blank(tmp_path, monkeypatch):
+    """直接 init：模式默认「明文」，明文留空 → 无需 key。"""
+    # 顺序：源/输出/工作/源语言/目标语言/风格(1)/provider(2=openai-compatible)
+    #       base_url/model + 模式(回车=plain) + key(留空)
+    answers = ["", "", "", "", "", "1", "2", "", "", "", "", "", "", "", "", "", ""]
+    saved = _run_init(tmp_path, monkeypatch, answers, None)
+    assert saved["llm"]["api_key"] == ""
+    assert saved["llm"]["api_key_required"] is False
+
+
+def test_init_key_mode_plain_writes_key(tmp_path, monkeypatch):
+    """直接 init：明文模式输入 key → 写入 config 且 required=true。"""
+    answers = ["", "", "", "", "", "1", "2", "", "", "", "MYKEY", "", "", "", "", "", ""]
+    saved = _run_init(tmp_path, monkeypatch, answers, None)
+    assert saved["llm"]["api_key"] == "MYKEY"
+    assert saved["llm"]["api_key_required"] is True
+
+
+def test_init_key_mode_env_default_name(tmp_path, monkeypatch):
+    """直接 init：env 模式 + 名留空 → 默认 BOOKTR_API_KEY。"""
+    # 模式选 2（环境变量） + 名留空
+    answers = ["", "", "", "", "", "1", "2", "", "", "2", "", "", "", "", "", "", ""]
+    saved = _run_init(tmp_path, monkeypatch, answers, None)
+    assert saved["llm"]["api_key"] == ""
+    assert saved["llm"]["api_key_env"] == "BOOKTR_API_KEY"
+    assert saved["llm"]["api_key_required"] is True
+
+
+def test_init_key_mode_env_custom_name(tmp_path, monkeypatch):
+    """直接 init：env 模式 + 自定义名。"""
+    answers = ["", "", "", "", "", "1", "2", "", "", "2", "MY_KEY_ENV", "", "", "", "", "", ""]
+    saved = _run_init(tmp_path, monkeypatch, answers, None)
+    assert saved["llm"]["api_key_env"] == "MY_KEY_ENV"
+    assert saved["llm"]["api_key_required"] is True
+
+
+def test_init_key_mode_none(tmp_path, monkeypatch):
+    """直接 init：无需 key 模式 → required=false。"""
+    answers = ["", "", "", "", "", "1", "2", "", "", "3", "", "", "", "", "", "", ""]
+    saved = _run_init(tmp_path, monkeypatch, answers, None)
+    assert saved["llm"]["api_key"] == ""
+    assert saved["llm"]["api_key_required"] is False
+
+
+def test_init_clone_key_mode_mirrors_env_source(tmp_path, monkeypatch):
+    """--clone 源为 env → 模式回车默认 env，并继承源变量名。"""
+    clone = _make_clone_source(tmp_path, monkeypatch, key_mode="env")
+    # 源/输出/工作/源语言/目标语言/风格(1)/provider(回车=openai-compatible)
+    # base_url/model 回车 + 模式(回车=env) + env 名(回车=继承 CLONE_KEY_ENV)
+    answers = ["", "", "", "", "", "1", "", "", "", "", "", "", "", "", "", "", ""]
+    saved = _run_init(tmp_path, monkeypatch, answers, None, clone=clone)
+    assert saved["llm"]["api_key"] == ""
+    assert saved["llm"]["api_key_env"] == "CLONE_KEY_ENV"
+    assert saved["llm"]["api_key_required"] is True
+
+
+def test_init_clone_key_mode_mirrors_plain_source(tmp_path, monkeypatch):
+    """--clone 源为明文 → 模式回车默认明文，回车保留源 key。"""
+    clone = _make_clone_source(tmp_path, monkeypatch, key_mode="plain")
+    answers = ["", "", "", "", "", "1", "", "", "", "", "", "", "", "", "", "", ""]
+    saved = _run_init(tmp_path, monkeypatch, answers, None, clone=clone)
+    assert saved["llm"]["api_key"] == "SECRET"
+    assert saved["llm"]["api_key_required"] is True
+
 

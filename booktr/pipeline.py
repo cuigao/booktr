@@ -102,6 +102,20 @@ TRANSLATION_STYLES = [
     ("shanghai", "上海话", _SHANGHAI_STYLE_RULES),
 ]
 
+# API key 提供方式预设：(key, label)。plain=明文写入 config；env=从环境变量读取；none=无需 key。
+KEY_MODES = [
+    ("plain", "明文 key（写入 config）"),
+    ("env", "环境变量"),
+    ("none", "无需 key（本地服务）"),
+]
+
+
+def _key_mode_default(llm: dict) -> str:
+    """由当前 llm 层派生默认 key 模式：非空 api_key→plain；required→env；否则 none。"""
+    if str(llm.get("api_key") or ""):
+        return "plain"
+    return "env" if bool(llm.get("api_key_required", True)) else "none"
+
 
 def apply_style_preset(user_rules: str, key: str) -> str:
     """把指定风格预设追加到 user_rules 末尾；standard 或未知 key 原样返回。
@@ -210,15 +224,31 @@ def cmd_init(cfg: Config, args) -> None:
     if llm["provider"] == "openai-compatible":
         llm["base_url"] = _prompt("base_url", str(llm.get("base_url", "https://api.openai.com/v1")))
         llm["model"] = _prompt("model", str(llm.get("model", "gpt-4o-mini")))
-        existing_key = str(llm.get("api_key") or "")
-        hint = "（回车保留现有 key；输入 '-' 清空）" if existing_key else "（留空则无需 key；否则直接写入 config）"
-        raw_key = input(f"API key{hint}: ").strip()
-        if not raw_key:
-            raw_key = existing_key  # 回车保留（--clone 时可继承）
-        elif raw_key == "-":
-            raw_key = ""
-        llm["api_key"] = raw_key
-        llm["api_key_required"] = bool(raw_key)
+        mode_labels = [label for _, label in KEY_MODES]
+        # 默认：直接 init → 明文；--clone → 镜像源实例（源为 env 则默认 env）
+        default_mode = _key_mode_default(llm) if clone_dir else "plain"
+        default_label = next(label for k, label in KEY_MODES if k == default_mode)
+        chosen_mode = _select("API key 提供方式", mode_labels, default_label)
+        mode = next((k for k, label in KEY_MODES if label == chosen_mode), default_mode)
+        if mode == "plain":
+            existing_key = str(llm.get("api_key") or "")
+            hint = "（回车保留现有 key；输入 '-' 清空）" if existing_key else "（留空则无需 key；否则直接写入 config）"
+            raw_key = input(f"API key{hint}: ").strip()
+            if not raw_key:
+                raw_key = existing_key  # 回车保留（--clone 时可继承）
+            elif raw_key == "-":
+                raw_key = ""
+            llm["api_key"] = raw_key
+            llm["api_key_required"] = bool(raw_key)
+        elif mode == "env":
+            env_name = _prompt("API key 环境变量名",
+                               str(llm.get("api_key_env", "BOOKTR_API_KEY") or "BOOKTR_API_KEY"))
+            llm["api_key"] = ""
+            llm["api_key_env"] = env_name
+            llm["api_key_required"] = True
+        else:  # none
+            llm["api_key"] = ""
+            llm["api_key_required"] = False
 
     print("\n-- 增强工具（true/false）--")
     planner = data.setdefault("planner", {})
