@@ -104,7 +104,8 @@ DEFAULTS: dict[str, Any] = {
     "notes": {"path": "work/notes.jsonl"},
     "phrases": {"path": "work/phrase_memory.json", "max_len": 30},
     "tm": {"path": "work/tm.jsonl", "enabled": True},
-    "qa": {"deep_llm_check": True},
+    "qa": {"deep_llm_check": True, "queue_path": "work/qa_queue.json",
+           "report_dir": "work/qa_reports"},
     "translators_notes": {"path": "work/translators_notes.json", "focus": ""},
     "review": {"path": "work/review_queue.json", "auto_regenerate": True},
     "state": {"path": "work/state.json"},
@@ -169,10 +170,11 @@ class Config:
             if not isinstance(cur, dict) or k not in cur:
                 return default
             cur = cur[k]
-        # 路径型叶子键（path/dir/_dir 等）自动解析为基于数据根的绝对路径
+        # 路径型叶子键（path/dir/_dir/_path 等）自动解析为基于数据根的绝对路径
         if isinstance(cur, str) and keys:
             k = keys[-1].lower()
-            if k in ("path", "dir", "directory", "refs_path", "guide_path") or k.endswith("_dir"):
+            if k in ("path", "dir", "directory", "refs_path", "guide_path") \
+                    or k.endswith("_dir") or k.endswith("_path"):
                 return self._path(cur)
         return cur
 

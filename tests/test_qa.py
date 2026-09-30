@@ -189,19 +189,19 @@ def test_cmd_qa_writes_timestamped_report(tmp_cfg, tmp_path):
 
 
 def test_cmd_qa_queue_dedup(tmp_cfg, tmp_path):
-    """重复 QA 同一页，qa_ 队列条目不重复。"""
+    """重复 QA 同一页，qa_queue 条目不重复；不写入 review_queue。"""
     write_sample_site(tmp_path)
     _seed_plan_and_done(tmp_cfg, tmp_path, ["page1.html"])
     tmp_cfg.set(True, "qa", "deep_llm_check")
 
     class IssueLLM:
         def chat(self, system, user, **k):
-            return ('{"issues": [{"segment_id": 1, "problem": "x", '
-                    '"suggestion": "y", "severity": "low"}]}')
+            return ('{"issues": [{"severity": "low", "reason": "x", '
+                    '"src_quote": "こんにちは。", "dst_quote": "", '
+                    '"suggestion": "y"}]}')
 
+    from booktr import qa_queue as qa_queue_mod
     from booktr import review as review_mod
-    # 注入带问题的 client：直接调用 qa_report 后手动走入队逻辑较繁，改为调用两次 cmd_qa
-    # 用 monkeypatch 替换 _client
     import booktr.pipeline as pl
     orig = pl._client
     pl._client = lambda cfg: IssueLLM()
@@ -210,6 +210,37 @@ def test_cmd_qa_queue_dedup(tmp_cfg, tmp_path):
         cmd_qa(tmp_cfg, _args(start=1, count=1))
     finally:
         pl._client = orig
-    q = review_mod.load_queue(tmp_cfg)
-    qa_items = [it for it in q if str(it.get("reason", "")).startswith("qa_")]
-    assert len(qa_items) == 1
+    q = qa_queue_mod.load(tmp_cfg)
+    assert len(q) == 1
+    assert q[0]["resolved"] is True
+    assert q[0]["segments"] == [1]
+    # 不再写入 review_queue
+    assert review_mod.load_queue(tmp_cfg) == []
+
+
+def test_locate_segments_exact_and_fuzzy(tmp_cfg, tmp_path):
+    from booktr import qa
+    from booktr import translate as tr
+    write_sample_site(tmp_path)
+    fake = FakeLLM.default()
+    state = tr.State(tmp_cfg)
+    tr.translate_page(tmp_cfg, fake, "page1.html", state, {}, {}, [])
+    segs = __import__("booktr.segments", fromlist=["segments"]).segments_for_page(tmp_cfg, "page1.html")
+    # 精确原文命中
+    ids = qa.locate_segments(segs, "今日はいい天気です。", "")
+    assert ids
+    # 无法命中
+    assert qa.locate_segments(segs, "存在しないテキストXYZ", "") == []
+
+
+def test_locate_segments_cross_segment_lines(tmp_cfg, tmp_path):
+    from booktr import qa
+    from booktr import translate as tr
+    write_sample_site(tmp_path)
+    fake = FakeLLM.default()
+    state = tr.State(tmp_cfg)
+    tr.translate_page(tmp_cfg, fake, "page1.html", state, {}, {}, [])
+    segs = __import__("booktr.segments", fromlist=["segments"]).segments_for_page(tmp_cfg, "page1.html")
+    # 跨段的多行引用：应命中多个段
+    ids = qa.locate_segments(segs, "こんにちは。\n今日はいい天気です。", "")
+    assert len(ids) >= 2

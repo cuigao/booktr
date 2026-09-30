@@ -850,35 +850,95 @@ def cmd_qa(cfg: Config, args) -> None:
     print(f"QA 开始：{scope}，共 {len(targets)} 页（深度检查={'开' if deep else '关'}）", flush=True)
 
     # 时间戳报告（总是留存），并刷新 qa_report.json 别名
-    reports_dir = os.path.join(cfg.work_dir, "qa_reports")
-    os.makedirs(reports_dir, exist_ok=True)
+    report_dir = cfg.get("qa", "report_dir", default="work/qa_reports")
+    os.makedirs(report_dir, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
-    out_path = os.path.join(reports_dir, f"qa_{ts}.json")
+    out_path = os.path.join(report_dir, f"qa_{ts}.json")
     report = qa.qa_report(cfg, client, targets, out=out_path)
 
-    print(f"QA 报告: 总问题 {report['total_issues']}，高危 {report['high']}，见 {out_path}")
+    print(f"QA 报告: 总问题 {report['total_issues']}（未定位 {report.get('unresolved', 0)}），"
+          f"高危 {report['high']}，见 {out_path}")
     for rel, issues in report["pages"].items():
         print(f"  {rel}: {len(issues)} 问题")
         for i in issues[:3]:
-            print(f"    段{i['segment_id']} [{i['severity']}] {i['problem']}")
-    # 将问题入审核队列（按 page+segment_id+reason 去重，避免重跑重复入队）
-    queue = review_mod.load_queue(cfg)
-    existing = {(it.get("page"), str(it.get("segment_id")), it.get("reason"))
-                for it in queue}
-    added = 0
-    for rel, issues in report["pages"].items():
-        for i in issues:
-            key = (rel, str(i["segment_id"]), "qa_" + i["severity"])
-            if key in existing:
-                continue
-            existing.add(key)
-            queue.append({"page": rel, "segment_id": i["segment_id"], "src": "",
-                          "reason": "qa_" + i["severity"], "detail": i["problem"],
-                          "status": "open"})
-            added += 1
-    review_mod.save_queue(cfg, queue)
-    if added:
-        print(f"已入审核队列: {added} 条")
+            loc = f"段{i['segments']}" if i.get("segments") else "（未定位）"
+            print(f"    {loc} [{i['severity']}] {i['reason']}")
+
+    # 写入专用 QA 队列（标准化条目，机械定位段号；按 id 去重）
+    from . import qa_queue as qa_queue_mod
+    origin = {"ts": ts, "scope": scope,
+              "start": start, "count": count}
+    new_items = [qa_queue_mod.make_item(rel, i, origin)
+                 for rel, issues in report["pages"].items() for i in issues]
+    added = qa_queue_mod.append_items(cfg, new_items)
+    print(f"已写入 QA 队列: 新增 {added} 条（work/qa_queue.json）；用 `qa-review` 裁定，"
+          f"`qa-apply` 应用采纳项。")
+
+
+def cmd_qa_review(cfg: Config, args) -> None:
+    """交互式裁定 QA 队列条目。"""
+    from . import qa_queue as qa_queue_mod
+    stats = qa_queue_mod.stats(cfg)
+    print(f"QA 队列：总 {stats['total']} | open {stats['open']} | 采纳 {stats['adopted']}"
+          f" | 按严重度(open)={stats['by_severity']}")
+    qa_queue_mod.interactive_qa_review(cfg, max_items=args.max_items)
+
+
+def cmd_qa_apply(cfg: Config, args) -> None:
+    """对已采纳（adopted）的 QA 意见批量定点重译。"""
+    from . import qa_queue as qa_queue_mod
+
+    client = _client(cfg)
+    state = tr.State(cfg)
+    # site_map/plan 缺失时用空值（QA 修正不强依赖跨页上下文）
+    sm = util.read_json(os.path.join(cfg.work_dir, "site_map.json"), {})
+    plan = util.read_json(os.path.join(cfg.work_dir, "plan.json"), {})
+
+    queue = qa_queue_mod.load(cfg)
+    adopted = [it for it in queue if it.get("status") == qa_queue_mod.STATUS_ADOPTED]
+    if args.page:
+        adopted = [it for it in adopted if it.get("page") == args.page]
+    if not adopted:
+        print("没有已采纳的 QA 条目（先用 `qa-review` 采纳）。")
+        return
+
+    # 按 (page, segment) 分组，合并同一段的多个意见
+    grouped: dict[tuple, list[dict]] = {}
+    for it in adopted:
+        for sid in it.get("segments", []) or []:
+            grouped.setdefault((it["page"], str(sid)), []).append(it)
+
+    print(f"将应用 {len(adopted)} 条已采纳意见，涉及 {len(grouped)} 个段。")
+    if args.dry_run:
+        for (rel, sid), ops in grouped.items():
+            print(f"  {rel} 段{sid}: {len(ops)} 条意见")
+        return
+
+    guide = styles_mod.load_guide(cfg) if cfg.get("style", "rules_enabled", default=True) else ""
+    focus = cfg.get("translators_notes", "focus", default="")
+    _, _, user_rules = tr.build_context(cfg, sm, plan, next(iter(grouped))[0]) \
+        if grouped else ("", "", "")
+
+    ok = 0
+    pages_done = set()
+    for (rel, sid), ops in grouped.items():
+        opinions = [{"severity": o.get("severity", ""), "reason": o.get("reason", ""),
+                     "src_quote": o.get("src_quote", ""), "dst_quote": o.get("dst_quote", ""),
+                     "suggestion": o.get("suggestion", "")} for o in ops]
+        r = tr.apply_qa_fix(cfg, client, rel, sid, opinions, state, sm, plan,
+                            guide=guide, user_rules=user_rules, focus=focus)
+        if r.get("ok"):
+            ok += 1
+            pages_done.add(rel)
+            for o in ops:
+                o["status"] = qa_queue_mod.STATUS_APPLIED
+            print(f"  ✓ {rel} 段{sid}: 已修正（{len(ops)} 条意见）")
+        else:
+            print(f"  ✗ {rel} 段{sid}: 修正失败（占位符/空译文），保留待处理")
+
+    state.save()
+    qa_queue_mod.save(cfg, queue)
+    print(f"\n完成: {ok}/{len(grouped)} 段已修正；涉及 {len(pages_done)} 页已重生成。")
 
 
 def cmd_annotate(cfg: Config, args) -> None:
@@ -1825,6 +1885,15 @@ def build_parser() -> argparse.ArgumentParser:
     deep_group.add_argument("--with-deep", action="store_true",
                             help="强制启用 LLM 深度检查（覆盖配置）")
     sp.set_defaults(func=cmd_qa)
+
+    sp = mk("qa-review", help="交互式裁定 QA 队列（采纳/拒绝/丢弃）")
+    sp.add_argument("--max-items", type=int, default=0, help="最多处理条数")
+    sp.set_defaults(func=cmd_qa_review)
+
+    sp = mk("qa-apply", help="对已采纳的 QA 意见批量定点重译")
+    sp.add_argument("--page", default=None, help="限定页面")
+    sp.add_argument("--dry-run", action="store_true", help="仅列出将修正的段")
+    sp.set_defaults(func=cmd_qa_apply)
 
     sp = mk("annotate", help="生成译者注")
     sp.add_argument("--pages", nargs="*", help="限定页面")

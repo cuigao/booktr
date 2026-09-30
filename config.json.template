@@ -103,7 +103,9 @@
     "enabled": true
   },
   "qa": {
-    "deep_llm_check": true
+    "deep_llm_check": true,
+    "queue_path": "work/qa_queue.json",
+    "report_dir": "work/qa_reports"
   },
   "translators_notes": {
     "path": "work/translators_notes.json",

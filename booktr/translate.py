@@ -973,6 +973,70 @@ def translate_page(
     return result
 
 
+def apply_qa_fix(cfg: Config, client, rel: str, sid: str, opinions: list[dict],
+                 state: State, site_map: dict, plan: dict,
+                 guide: str = "", user_rules: str = "", focus: str = "") -> dict:
+    """对单个段应用已采纳的 QA 意见，定点重译并写回。
+
+    - 构建与重译同等的上下文（词表/摘要/前导/记忆/样例/前后文）
+    - 追加 QA 意见 + 现有译文，提示"在此基础上修正"
+    - 清理该段旧 TM/notes 后，写入新译文并更新 TM
+    返回 {ok, translation, sid}。
+    """
+    from .crawler import decode_page
+    from . import notes as notes_mod
+    from . import tm as tm_mod
+
+    html, html_enc = decode_page(cfg, rel)
+    segs = seg_mod.segments_for_page(cfg, rel, html=html, encoding=html_enc)
+    seg = next((s for s in segs if str(s.id) == str(sid)), None)
+    if seg is None:
+        return {"ok": False, "sid": sid, "translation": ""}
+
+    pstate = state.page(rel)
+    current = pstate.get("segments", {}).get(str(sid), {}).get("translation") \
+        or seg.translation or ""
+
+    ctx = _build_retranslate_context(cfg, rel, seg, segs, state, site_map, plan)
+    ctx.update({"term_hints": "", "tm_hits": [], "exemplars": []})
+    sysp = prompts.build_translate_system(cfg, [], guide, user_rules, focus,
+                                          is_qa_fix=True)
+    usr = prompts.build_qa_fix_user(cfg, seg.text, current, opinions, ctx)
+    conversation = [{"role": "system", "content": sysp},
+                    {"role": "user", "content": usr}]
+
+    page_key = rel.replace("/", "_").replace(".html", "")
+    task_id = f"tsk_{int(time.time() * 1000)}_{page_key}_qafix"
+    context_id = f"{task_id}_1"
+    data = _translate_chunk_with_repair_multi(
+        cfg, client, conversation, rel, str(sid), seg.text,
+        task_id=task_id, context_id=context_id)
+    new_t = (data.get("translation") or "").strip()
+    if not new_t or _check_placeholders(seg.text, new_t):
+        return {"ok": False, "sid": sid, "translation": new_t}
+
+    # 清理旧 TM/notes 后写入新译文（与 reset 重译一致，避免自我锚定）
+    tm_mod.purge_segments(cfg, rel, [str(sid)])
+    notes_mod.purge_segments(cfg, rel, [str(sid)])
+    if cfg.get("tm", "enabled", default=True) \
+            and util.normalize_ws(new_t) != util.normalize_ws(seg.text):
+        tm_mod.add(cfg, seg.text, new_t, rel, seg.id)
+
+    seg.translation = new_t
+    seg.confidence = float(data.get("confidence") or 0.9)
+    seg.needs_human = False
+    seg_state = pstate.setdefault("segments", {}).setdefault(str(sid), {})
+    seg_state["translation"] = new_t
+    seg_state["confidence"] = seg.confidence
+    seg_state["needs_human"] = False
+    seg_state["untrusted"] = False
+
+    _save_segment_index(cfg, rel, segs)
+    out_html = seg_mod.reassemble(html, segs)
+    seg_mod.write_page_output(cfg, rel, out_html)
+    return {"ok": True, "sid": sid, "translation": new_t}
+
+
 def _make_review(cfg, rel, sid, src_text, reason, detail) -> dict:
     return {
         "page": rel,

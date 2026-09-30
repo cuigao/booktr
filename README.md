@@ -104,6 +104,12 @@ python booktr-cli.py qa --start 1 --count 10           # 按 plan.order 从第 1
 python booktr-cli.py qa --start 11 --count 10          # 下一批（无状态，按序推进）
 python booktr-cli.py qa --no-deep                      # 仅本地规则，跳过 LLM 深度检查
 
+# 10b) QA 裁定与应用（采纳后定点重译）
+python booktr-cli.py qa-review                 # 逐条检阅 QA 意见（含原文/现译/上下文），[a]采纳/[r]拒绝/[d]丢弃
+python booktr-cli.py qa-apply                  # 对已采纳意见批量定点重译
+python booktr-cli.py qa-apply --page index.html
+python booktr-cli.py qa-apply --dry-run        # 仅列出将修正的段
+
 # 11) 生成译者注
 python booktr-cli.py annotate
 
@@ -268,13 +274,22 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 - **本地规则检查**（无 LLM 开销，逐段执行）：
   - **HTML 安全（高危）**：译文占位符数量与原文不一致（`[[P0]]` 等），说明内联标签被 LLM 删除/改动，会破坏原站结构。
   - **术语一致（中危）**：原文含已确认词汇表术语但译文未含其标准译文。
-- **LLM 深度检查**（`qa.deep_llm_check`，默认 true）：把整页原文+译文（各截断 6000 字符）交 LLM（temperature 0.2）做语义层面审查，补充误译、术语使用不当、上下文不一致等问题。
+- **LLM 深度检查**（`qa.deep_llm_check`，默认 true）：把整页原文+译文（各截断 6000 字符）交 LLM（temperature 0.2）做语义层面审查，补充误译、术语使用不当、上下文不一致等问题。LLM 须**逐字引用**相关原文/译文片段（`src_quote`/`dst_quote`），不给出段号。
 
-问题生成 `work/qa_report.json`（统计总问题/高危数），并逐一以 `reason: "qa_high" / "qa_mid"` 写入 `work/review_queue.json` 审核队列供人工确认。QA 条目（`qa_*` 原因）在 review 中仅 `[a]` 标记已处理，**不改变页面翻译状态**——即 QA 只提示核对，不自动触发重新翻译。
+每条问题标准化为 `{severity, reason, src_quote, dst_quote, suggestion}`，随后按引用的**原文/译文片段机械定位**到具体段（`locate_segments`：精确子串 → 去占位符 → 跨行拆分 → 模糊），得到 `segments` 与 `resolved`。
 
-运行过程**逐页打印进度**（`[i/N] 页面  问题数 (耗时)`）；深度检查单页 LLM 调用失败会打印 `⚠ ... LLM 深度检查失败（已跳过）` 而非静默。报告写入带时间戳的 `work/qa_reports/qa_<YYYYmmdd_HHMMSS>.json`（**每次运行都留存，不覆盖**），同时刷新稳定别名 `work/qa_report.json`；均为**逐页增量写入**，长跑中断也不丢已得结果。入审核队列时按 `(页面, 段, 原因)` 去重，重跑同一范围不会重复入队。
+运行过程**逐页打印进度**（`[i/N] 页面  问题数 (耗时)`）；深度检查单页 LLM 调用失败会打印 `⚠ ... LLM 深度检查失败（已跳过）` 而非静默。报告写入带时间戳的 `work/qa_reports/qa_<YYYYmmdd_HHMMSS>.json`（**每次运行都留存，不覆盖**），同时刷新稳定别名 `work/qa_report.json`；均为**逐页增量写入**。问题写入**专用队列** `work/qa_queue.json`（按 id 去重，**不再写入 `review_queue.json`**）。
 
 **无状态、按区间推进**：QA 不记录"已检查到哪"，`--start/--count` 按 `plan.order`（站点固定顺序，不受重译影响）取区间。因此分批检查即 `--start 1 --count 10` → `--start 11 --count 10` …；重译后想重查某页用 `--pages` 强制指定。
+
+### QA 裁定与应用（`qa-review` / `qa-apply`）
+
+QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
+
+1. `qa-review`：逐条检阅（严重度/原因/相关原文/现有译文/建议，并展示定位段的**完整原文+现译+前后文**）。操作 `[a]采纳` `[r]拒绝` `[m]手工指定段号` `[d]丢弃` `[s]跳过` `[q]退出`。**未定位**（`resolved=false`）的条目会提示，须 `[m]` 指定段号或 `[d]` 丢弃（保留在队列直至手动处理）。
+2. `qa-apply`：对 `adopted` 条目按 `(页面, 段)` 分组、合并同段意见，逐段定点重译——在基础重译上下文之上，追加 **QA 意见 + 现有译文**，并提示"在此基础上修正、其余尽量保持不变"。重译前清理该段旧 TM/notes、成功后写入新 TM（与 `reset` 一致，避免自我锚定），同步更新 state/段缓存并重生成 out，条目标记 `applied`。`--dry-run` 仅列出将修正的段。
+
+配置（`qa`）：`deep_llm_check`、`queue_path`（默认 `work/qa_queue.json`）、`report_dir`（默认 `work/qa_reports`）。
 
 ## LLM 接入
 
@@ -302,6 +317,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 | `work/review_queue.json` | 待人工审核项 |
 | `work/qa_report.json` | QA 报告（最新一次的别名） |
 | `work/qa_reports/qa_<时间戳>.json` | QA 报告归档（每次运行留存） |
+| `work/qa_queue.json` | QA 问题队列（裁定/应用状态） |
 | `work/llm_logs/*.json` | LLM 调用日志（含完整对话历史、task_id、context_id） |
 | `work/logs/*.md` | 导出的 Markdown 对话日志（自动或手动导出） |
 | `out/` | 翻译后完整镜像 |

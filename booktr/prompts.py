@@ -55,6 +55,7 @@ def build_translate_system(
     user_rules: str,
     focus: str,
     is_retranslation: bool = False,
+    is_qa_fix: bool = False,
 ) -> str:
     tgt = cfg.get("lang", "target", default="zh-Hans")
     src = cfg.get("lang", "source", default="ja")
@@ -87,6 +88,8 @@ def build_translate_system(
     )
     if is_retranslation:
         parts.append(_build_retranslate_rules(src_name, tgt_name))
+    if is_qa_fix:
+        parts.append(_build_qa_fix_rules(src_name, tgt_name))
     return "\n\n".join(parts)
 
 
@@ -280,13 +283,15 @@ def build_style_guide_user(refs: list[dict]) -> str:
 
 
 def build_qa_system(cfg) -> str:
-    tgt = cfg.get("lang", "target", default="zh-Hans")
     return (
-        f"你是翻译质量审核员。检查译文是否：1)术语与词汇表一致 2)未泄漏HTML标签/占位符 "
+        "你是翻译质量审核员。检查译文是否：1)术语与词汇表一致 2)未泄漏HTML标签/占位符 "
         "3)漏译、误译、生硬处。\n"
-        f"输出 JSON：{{\"issues\": [{{\"segment_id\": 数字, \"problem\": \"描述\", "
-        f"\"suggestion\": \"修改建议\", \"severity\": \"high|mid|low\"}}]}}\n"
-        f"没有问题则 issues 为空数组。只输出 JSON。"
+        "对每个问题，须逐字引用原文片段与译文片段（用于机械定位段落），"
+        "不要臆造；引用须能在给定原文/译文中原样找到。\n"
+        "输出 JSON：{\"issues\": [{\"severity\": \"high|mid|low\", "
+        "\"reason\": \"问题原因\", \"src_quote\": \"有问题的原文片段\", "
+        "\"dst_quote\": \"有问题的译文片段\", \"suggestion\": \"建议译文或修改方向\"}]}\n"
+        "没有问题则 issues 为空数组。只输出 JSON。"
     )
 
 
@@ -297,6 +302,67 @@ def build_qa_user(src_text: str, dst_text: str, glossary: list[dict]) -> str:
         f"## 原文\n|TEXT|\n{src_text}\n\n"
         f"## 译文\n|DST|\n{dst_text}"
     )
+
+
+def _build_qa_fix_rules(src_name: str, tgt_name: str) -> str:
+    """QA 修正专用规则（在基础翻译规则之后追加）。"""
+    return (
+        "## QA 修正任务（当收到\u201cQA 修正\u201d指令时适用）\n"
+        "- 这是对现有译文的定点修正：QA 意见已由人工采纳，务必落实\n"
+        "- 现有译文中未被指出的部分尽量保持不变，不要整段重写\n"
+        "- 修正须自然融入上下文，避免生硬拼接、重复或遗漏\n"
+        f"- 仍为完整{tgt_name}翻译，不保留任何{src_name}原文\n"
+        "- 保留所有 [[Px]] 占位符\n"
+        "- 用户附加规则仍然适用"
+    )
+
+
+def build_qa_fix_user(cfg, src_text: str, current_translation: str,
+                      opinions: list[dict], context: dict) -> str:
+    """QA 修正的用户消息：在基础重译上下文之上，加入已采纳的 QA 意见与现有译文。"""
+    tgt = cfg.get("lang", "target", default="zh-Hans")
+    tgt_name = lang_name(tgt)
+    parts = [f"请根据下列已采纳的 QA 审核意见，修正并重新给出{_srcname(cfg)}→{tgt_name}的译文。"]
+
+    if context.get("term_hints"):
+        parts.append(context["term_hints"])
+    if context.get("summary"):
+        parts.append(f"## 页面摘要\n{context['summary']}")
+    if context.get("page_ctx"):
+        parts.append(f"## 页面上下文\n{context['page_ctx']}")
+    if context.get("prior_ctx"):
+        parts.append(f"## 前文上下文（保持叙事与术语一致）\n{context['prior_ctx']}")
+    tm_hits = context.get("tm_hits") or []
+    if tm_hits:
+        tm_lines = [f"{h['src']} → {h['dst']}" for h in tm_hits]
+        parts.append("## 翻译记忆命中（可参考，但优先词汇表）\n" + "\n".join(tm_lines))
+    exemplars = context.get("exemplars") or []
+    if exemplars:
+        ex_lines = [f"原文：{e['src']}\n参考译文：{e['dst']}" for e in exemplars]
+        parts.append(
+            "## 风格参照样例（仅模仿其风格与措辞倾向，勿照抄内容）\n"
+            + "\n\n".join(ex_lines)
+        )
+
+    op_lines = ["## QA 审核意见（已采纳，请据此修正）",
+                "请在保持其余内容不变的前提下，落实以下修正："]
+    for i, op in enumerate(opinions, 1):
+        op_lines.append(
+            f"{i}. [{op.get('severity', '')}] {op.get('reason', '')}\n"
+            f"   相关原文：{op.get('src_quote', '')}\n"
+            f"   现有译文问题：{op.get('dst_quote', '')}\n"
+            f"   建议：{op.get('suggestion', '')}"
+        )
+    parts.append("\n".join(op_lines))
+
+    if current_translation:
+        parts.append(f"## 现有译文（在此基础上修正，其余尽量保持不变）\n{current_translation}")
+    if context.get("context_before"):
+        parts.append(f"## 前文（已翻译，保持术语与风格一致）\n{context['context_before']}")
+    parts.append(f"## 待翻译文本（原文）\n\n{src_text}")
+    if context.get("context_after"):
+        parts.append(f"## 后文（已翻译，保持术语与风格一致）\n{context['context_after']}")
+    return "\n\n".join(parts)
 
 
 def build_translator_note_system(cfg) -> str:
