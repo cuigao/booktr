@@ -382,3 +382,73 @@ def test_log_records_reasoning(tmp_cfg, monkeypatch):
     entry = json.load(open(files[-1], encoding="utf-8"))
     assert entry["reasoning"] == "R"
     assert entry["reasoning_len"] == 1
+
+
+# ── 失败调用记录 reasoning / finish_reason（诊断） ──────────────────────
+
+
+def test_llmerror_carries_diagnostics():
+    e = llm.LLMError("m", reasoning="think", finish_reason="length",
+                     usage={"prompt_tokens": 1})
+    assert str(e) == "m"
+    assert e.reasoning == "think"
+    assert e.finish_reason == "length"
+    assert e.usage == {"prompt_tokens": 1}
+    # 默认值
+    d = llm.LLMError("x")
+    assert d.reasoning == "" and d.finish_reason is None and d.usage == {}
+
+
+def test_log_records_reasoning_on_failure(tmp_cfg, monkeypatch):
+    """截空失败（finish=length）也记录 reasoning / finish_reason。"""
+    tmp_cfg.set("openai-compatible", "llm", "provider")
+    tmp_cfg.set(False, "llm", "api_key_required")
+    c = llm.LLMClient(tmp_cfg)
+    c.stream = True
+    c.max_tokens = 3000
+    c.max_tokens_ceiling = 4096
+    monkeypatch.setattr("booktr.llm.requests.post", lambda *a, **k: _FakeStream(_sse(
+        {"choices": [{"delta": {"reasoning": "x" * 100}, "finish_reason": "length"}]})))
+    with pytest.raises(llm.LLMError):
+        c.chat("s", "u", tag="qa")
+    logdir = tmp_cfg.get("llm_logs", "dir", default="")
+    import glob
+    files = glob.glob(os.path.join(logdir, "qa_*.json"))
+    assert files
+    entry = json.load(open(files[-1], encoding="utf-8"))
+    assert entry["ok"] is False
+    assert entry["reasoning"] == "x" * 100
+    assert entry["reasoning_len"] == 100
+    assert entry["finish_reason"] == "length"
+
+
+def test_log_records_partial_reasoning_on_stream_error(tmp_cfg, monkeypatch):
+    """流式中途网络中断（重试耗尽）也带出已累加的部分 reasoning。"""
+    tmp_cfg.set("openai-compatible", "llm", "provider")
+    tmp_cfg.set(False, "llm", "api_key_required")
+    c = llm.LLMClient(tmp_cfg)
+    c.stream = True
+    c.max_retries = 0
+
+    class _BoomStream:
+        status_code = 200
+
+        def iter_lines(self, decode_unicode=False):
+            yield "data: " + json.dumps(
+                {"choices": [{"delta": {"reasoning": "partial"}, "finish_reason": None}]})
+            raise llm.requests.ConnectionError("boom")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("booktr.llm.requests.post",
+                        lambda *a, **k: _BoomStream())
+    monkeypatch.setattr("booktr.llm.time.sleep", lambda *a: None)
+    with pytest.raises(llm.LLMError):
+        c.chat("s", "u", tag="qa")
+    logdir = tmp_cfg.get("llm_logs", "dir", default="")
+    import glob
+    files = glob.glob(os.path.join(logdir, "qa_*.json"))
+    assert files
+    entry = json.load(open(files[-1], encoding="utf-8"))
+    assert entry["reasoning"] == "partial"

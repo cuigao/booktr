@@ -319,7 +319,7 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
    - `[e]自定义意见`：LLM 检出问题但不满意其提案时，人工输入**建议译文/说明**覆盖有效字段 `suggestion`/`reason`，原 LLM 值归档到 `llm_suggestion`/`llm_reason`（**仅留档，后续 `qa-apply` 不再引用**），标记来源 `source=human` 后采纳。字段级输入：**回车=沿用 LLM 原值**、**`-`=清空该字段**、其它文本=覆盖；两字段均回车视为无变化，取消 `[e]`、不采纳（如需直接采纳 LLM 建议用 `[a]`）。人工建议仍作为提示交 LLM 重译（非逐字硬写）。
 2. `qa-apply`：对 `adopted` 条目按 `(页面, 段)` 分组、合并同段意见，逐段定点重译——在基础重译上下文之上，追加 **QA 意见 + 现有译文**，并提示"在此基础上修正、其余尽量保持不变"。重译前清理该段旧 TM/notes、成功后写入新 TM（与 `reset` 一致，避免自我锚定），同步更新 state/段缓存并重生成 out，条目标记 `applied`。`--dry-run` 仅列出将修正的段。
 
-配置（`qa`）：`deep_llm_check`、`queue_path`（默认 `work/qa_queue.json`）、`report_dir`（默认 `work/qa_reports`）、`reasoning_effort`（默认空=继承 `llm.reasoning_effort`）。**思考等级**：所有 LLM 调用默认**流式**（`llm.stream`），长思考不再误判超时；QA 可经 `qa.reasoning_effort` 单独覆盖思考等级（如设 `none` 关闭思考以加速，`high` 提升审查深度）。`reasoning` 内容完整记录在 `work/llm_logs/*.json`（`reasoning`/`reasoning_len`）。
+配置（`qa`）：`deep_llm_check`、`queue_path`（默认 `work/qa_queue.json`）、`report_dir`（默认 `work/qa_reports`）、`reasoning_effort`（默认空=继承 `llm.reasoning_effort`）。**思考等级**：所有 LLM 调用默认**流式**（`llm.stream`），长思考不再误判超时；QA 可经 `qa.reasoning_effort` 单独覆盖思考等级（如设 `none` 关闭思考以加速，`high` 提升审查深度）。`reasoning` 内容完整记录在 `work/llm_logs/*.json`（`reasoning`/`reasoning_len`）；**失败调用**（如正文被 reasoning 截空、流式中断）也会尽量记录已累加的 `reasoning`/`reasoning_len` 与 `finish_reason`，便于事后诊断模型"纠结"的内容。
 
 > `[e]自定义意见` 已实现"覆盖意见并采纳"（`interactive_qa_plan.md` L1 的最小落地）。但 `qa-review` 仍无法**部分采纳/拆分**意见、原文划线提意见或人工直改译文，且无撤销手段。更完整的**交互式 QA 审查**设计（含上述能力与数据模型演进）见工作区文档 `instance/report/interactive_qa_plan.md`。
 

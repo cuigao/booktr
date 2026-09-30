@@ -21,7 +21,18 @@ log = logging.getLogger("booktr.llm")
 
 
 class LLMError(RuntimeError):
-    pass
+    """LLM 调用错误。可携带诊断信息（诊断失败时模型"纠结"的内容）。
+
+    reasoning：失败前已累加的思考内容（若有）；finish_reason/usage 同理。
+    这些字段供失败日志记录，便于事后诊断。
+    """
+
+    def __init__(self, message: str = "", reasoning: str = "",
+                 finish_reason: str | None = None, usage: dict | None = None):
+        super().__init__(message)
+        self.reasoning = reasoning
+        self.finish_reason = finish_reason
+        self.usage = usage or {}
 
 
 # JSON 机械修复方法（parse_json_response 后处理），规范字段 repair_methods 的取值。
@@ -83,6 +94,9 @@ class LLMClient:
                                                        reasoning_effort=reasoning_effort)
         except LLMError as e:
             self._log(tag, system, user, "", ok=False, error=str(e),
+                      reasoning=getattr(e, "reasoning", ""),
+                      finish_reason=getattr(e, "finish_reason", None),
+                      usage=getattr(e, "usage", None),
                       duration_ms=(time.monotonic() - t0) * 1000)
             raise
         self._log(tag, system, user, resp, ok=True, usage=usage, reasoning=reasoning,
@@ -129,6 +143,9 @@ class LLMClient:
         except LLMError as e:
             self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
                       "", ok=False, error=str(e),
+                      reasoning=getattr(e, "reasoning", ""),
+                      finish_reason=getattr(e, "finish_reason", None),
+                      usage=getattr(e, "usage", None),
                       duration_ms=(time.monotonic() - t0) * 1000,
                       messages=messages, task_id=task_id, context_id=context_id)
             raise
@@ -182,6 +199,10 @@ class LLMClient:
         url = self.base_url + "/chat/completions"
         last_err: Exception | None = None
         doubled = False  # 是否已因 length 空正文而翻倍重试
+        # 诊断：尽力记录失败前已累加的 reasoning / finish_reason / usage（供失败日志）
+        last_reasoning = ""
+        last_finish: str | None = None
+        last_usage: dict = {}
         for attempt in range(self.max_retries + 1):
             self._rate_limit()
             body = dict(base_body)
@@ -192,11 +213,20 @@ class LLMClient:
                     content, reasoning, usage, finish = self._post_once(url, headers, body)
             except (requests.RequestException, ValueError, LLMError) as e:
                 last_err = e
+                # 网络/HTTP/格式类错误：尽量带出已累加的诊断信息（若异常未携带）
+                if not getattr(e, "reasoning", ""):
+                    e.reasoning = last_reasoning
+                if getattr(e, "finish_reason", None) is None:
+                    e.finish_reason = last_finish
+                if not getattr(e, "usage", None):
+                    e.usage = last_usage
                 # 网络/HTTP/格式类错误：正常退避重试
                 delay = 2 ** attempt
                 log.warning("LLM 调用失败(%s)，%.1fs 后重试: %s", attempt + 1, delay, last_err)
                 time.sleep(delay)
                 continue
+
+            last_reasoning, last_finish, last_usage = reasoning, finish, usage
 
             # 正文为空且被截断（reasoning 吃满预算）→ 翻倍 max_tokens 重试一次
             if not content and finish == "length" and not doubled:
@@ -215,13 +245,17 @@ class LLMClient:
                 last_err = LLMError(
                     f"LLM 正文被截断为空（finish_reason=length，reasoning {rl} 字符，"
                     f"max_tokens={base_body.get('max_tokens', self.max_tokens)}）；"
-                    "已尝试翻倍仍不足，请提高 llm.max_tokens_ceiling")
+                    "已尝试翻倍仍不足，请提高 llm.max_tokens_ceiling",
+                    reasoning=reasoning, finish_reason=finish, usage=usage)
             else:
-                last_err = LLMError(f"LLM 返回空内容（finish_reason={finish}）")
+                last_err = LLMError(f"LLM 返回空内容（finish_reason={finish}）",
+                                    reasoning=reasoning, finish_reason=finish, usage=usage)
             break
         if isinstance(last_err, LLMError):
             raise last_err
-        raise LLMError(f"LLM 调用最终失败: {last_err}")
+        raise LLMError(f"LLM 调用最终失败: {last_err}",
+                       reasoning=last_reasoning, finish_reason=last_finish,
+                       usage=last_usage)
 
     def _post_once(self, url: str, headers: dict, body: dict) -> tuple[str, str, dict, str]:
         """非流式：返回 (content, reasoning, usage, finish_reason)。"""
@@ -288,6 +322,11 @@ class LLMClient:
                         on_delta("content", cc)
                 if ch.get("finish_reason"):
                     finish = ch["finish_reason"]
+        except requests.RequestException as e:
+            # 流式中途网络中断：尽量带出已累加的 reasoning，供失败日志诊断
+            raise LLMError(f"流式读取中断: {e}",
+                           reasoning="".join(reasoning_parts),
+                           finish_reason=finish, usage=usage)
         finally:
             r.close()
         if not usage:
@@ -370,7 +409,8 @@ class LLMClient:
     def _log(self, tag: str, system: str, user: str, response: str,
              ok: bool = True, error: str = "", usage: dict | None = None,
              duration_ms: float = 0.0, messages: list[dict] | None = None,
-             task_id: str = "", context_id: str = "", reasoning: str = "") -> None:
+             task_id: str = "", context_id: str = "", reasoning: str = "",
+             finish_reason: str | None = None) -> None:
         """完整记录一次 LLM 调用（成功或失败，含 mock）。"""
         d = self.cfg.get("llm_logs", "dir", default="")
         if not d:
@@ -395,6 +435,8 @@ class LLMClient:
         if reasoning:
             entry["reasoning"] = reasoning
             entry["reasoning_len"] = len(reasoning)
+        if finish_reason is not None:
+            entry["finish_reason"] = finish_reason
         if task_id:
             entry["task_id"] = task_id
         if context_id:
