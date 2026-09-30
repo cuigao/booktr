@@ -48,7 +48,10 @@ class LLMClient:
         self.api_key_required = bool(llm.get("api_key_required", True))
         self.temperature = llm.get("temperature", 0.3)
         self.max_tokens = llm.get("max_tokens", 4096)
+        self.max_tokens_ceiling = llm.get("max_tokens_ceiling", 524288)
         self.timeout = llm.get("timeout", 120)
+        self.connect_timeout = llm.get("connect_timeout", 20)
+        self.stream = bool(llm.get("stream", True))
         self.max_retries = llm.get("max_retries", 3)
         self.rpm = llm.get("max_requests_per_minute", 60)
         self._min_interval = 60.0 / max(self.rpm, 1)
@@ -76,13 +79,13 @@ class LLMClient:
                       duration_ms=(time.monotonic() - t0) * 1000)
             raise LLMError(err)
         try:
-            resp, usage = self._openai_chat(system, user, temperature,
-                                            reasoning_effort=reasoning_effort)
+            resp, usage, reasoning = self._openai_chat(system, user, temperature,
+                                                       reasoning_effort=reasoning_effort)
         except LLMError as e:
             self._log(tag, system, user, "", ok=False, error=str(e),
                       duration_ms=(time.monotonic() - t0) * 1000)
             raise
-        self._log(tag, system, user, resp, ok=True, usage=usage,
+        self._log(tag, system, user, resp, ok=True, usage=usage, reasoning=reasoning,
                   duration_ms=(time.monotonic() - t0) * 1000)
         return resp
 
@@ -121,8 +124,8 @@ class LLMClient:
                       messages=messages, task_id=task_id, context_id=context_id)
             raise LLMError(err)
         try:
-            resp, usage = self._openai_chat_multi(messages, temperature,
-                                                  reasoning_effort=reasoning_effort)
+            resp, usage, reasoning = self._openai_chat_multi(messages, temperature,
+                                                             reasoning_effort=reasoning_effort)
         except LLMError as e:
             self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
                       "", ok=False, error=str(e),
@@ -130,15 +133,15 @@ class LLMClient:
                       messages=messages, task_id=task_id, context_id=context_id)
             raise
         self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
-                  resp, ok=True, usage=usage,
+                  resp, ok=True, usage=usage, reasoning=reasoning,
                   duration_ms=(time.monotonic() - t0) * 1000,
                   messages=messages, task_id=task_id, context_id=context_id)
         return resp
 
     def _openai_chat_multi(self, messages: list[dict],
                            temperature: float | None,
-                           reasoning_effort: str | None = None) -> tuple[str, dict]:
-        """多轮对话底层调用。"""
+                           reasoning_effort: str | None = None) -> tuple[str, dict, str]:
+        """多轮对话底层调用。返回 (content, usage, reasoning)。"""
         body = {
             "model": self.model,
             "messages": messages,
@@ -148,31 +151,12 @@ class LLMClient:
             body["max_tokens"] = self.max_tokens
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        url = self.base_url + "/chat/completions"
-        last_err: Exception | None = None
-        for attempt in range(self.max_retries + 1):
-            self._rate_limit()
-            try:
-                r = requests.post(url, headers=headers, json=body, timeout=self.timeout)
-                if r.status_code == 200:
-                    data = r.json()
-                    usage = self._record(data)
-                    content = self._extract_content(data)
-                    return content, usage
-                last_err = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
-            except (requests.RequestException, ValueError) as e:
-                last_err = e
-            delay = 2 ** attempt
-            log.warning("LLM multi 调用失败(%s)，%.1fs 后重试: %s", attempt + 1, delay, last_err)
-            time.sleep(delay)
-        raise LLMError(f"LLM multi 调用最终失败: {last_err}")
+        return self._request(body, "multi")
 
     # ------------------------------------------------------------------
     def _openai_chat(self, system: str, user: str, temperature: float | None,
-                     reasoning_effort: str | None = None) -> tuple[str, dict]:
+                     reasoning_effort: str | None = None) -> tuple[str, dict, str]:
+        """单轮对话底层调用。返回 (content, usage, reasoning)。"""
         body = {
             "model": self.model,
             "messages": [
@@ -185,29 +169,130 @@ class LLMClient:
             body["max_tokens"] = self.max_tokens
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
+        return self._request(body, "single")
+
+    def _request(self, base_body: dict, kind: str) -> tuple[str, dict, str]:
+        """统一请求入口：流式（默认）或非流式；带网络重试与"思考占满预算"翻倍重试。
+
+        返回 (content, usage, reasoning)。
+        """
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         url = self.base_url + "/chat/completions"
         last_err: Exception | None = None
-        retries = 0
+        doubled = False  # 是否已因 length 空正文而翻倍重试
         for attempt in range(self.max_retries + 1):
             self._rate_limit()
+            body = dict(base_body)
             try:
-                r = requests.post(url, headers=headers, json=body, timeout=self.timeout)
-                if r.status_code == 200:
-                    data = r.json()
-                    usage = self._record(data)
-                    content = self._extract_content(data)
-                    return content, usage
-                last_err = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
-            except (requests.RequestException, ValueError) as e:
+                if self.stream:
+                    content, reasoning, usage, finish = self._post_stream(url, headers, body)
+                else:
+                    content, reasoning, usage, finish = self._post_once(url, headers, body)
+            except (requests.RequestException, ValueError, LLMError) as e:
                 last_err = e
-            retries += 1
-            delay = 2 ** attempt
-            log.warning("LLM 调用失败(%s)，%.1fs 后重试: %s", attempt + 1, delay, last_err)
-            time.sleep(delay)
+                # 网络/HTTP/格式类错误：正常退避重试
+                delay = 2 ** attempt
+                log.warning("LLM 调用失败(%s)，%.1fs 后重试: %s", attempt + 1, delay, last_err)
+                time.sleep(delay)
+                continue
+
+            # 正文为空且被截断（reasoning 吃满预算）→ 翻倍 max_tokens 重试一次
+            if not content and finish == "length" and not doubled:
+                doubled = True
+                old = base_body.get("max_tokens", self.max_tokens)
+                new = min(max(old * 2, 1), self.max_tokens_ceiling)
+                if new > old:
+                    base_body = {**base_body, "max_tokens": new}
+                    log.warning("LLM 正文被 reasoning 截空，max_tokens %s→%s 重试", old, new)
+                    continue
+            if content:
+                return content, usage, reasoning
+            # 有 reasoning 但无正文 / 其它空内容
+            rl = len(reasoning or "")
+            if finish == "length":
+                last_err = LLMError(
+                    f"LLM 正文被截断为空（finish_reason=length，reasoning {rl} 字符，"
+                    f"max_tokens={base_body.get('max_tokens', self.max_tokens)}）；"
+                    "已尝试翻倍仍不足，请提高 llm.max_tokens_ceiling")
+            else:
+                last_err = LLMError(f"LLM 返回空内容（finish_reason={finish}）")
+            break
+        if isinstance(last_err, LLMError):
+            raise last_err
         raise LLMError(f"LLM 调用最终失败: {last_err}")
+
+    def _post_once(self, url: str, headers: dict, body: dict) -> tuple[str, str, dict, str]:
+        """非流式：返回 (content, reasoning, usage, finish_reason)。"""
+        r = requests.post(url, headers=headers, json=body, timeout=self.timeout)
+        if r.status_code != 200:
+            raise LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
+        data = r.json()
+        usage = self._record(data)
+        try:
+            choice = data["choices"][0]
+            msg = choice["message"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise LLMError(f"API 响应格式异常: {e}")
+        return (msg.get("content") or "", msg.get("reasoning") or "",
+                usage, choice.get("finish_reason"))
+
+    def _post_stream(self, url: str, headers: dict, body: dict,
+                     on_delta=None) -> tuple[str, str, dict, str]:
+        """流式：逐块累加 content/reasoning，返回 (content, reasoning, usage, finish)。
+
+        流式下每个 chunk 都会重置读取超时，长思考不再误判为网络超时。
+        on_delta(kind, text) 为可选的实时回调（kind ∈ {"content","reasoning"}），
+        供未来实时输出使用。
+        """
+        body = {**body, "stream": True, "stream_options": {"include_usage": True}}
+        r = requests.post(url, headers=headers, json=body,
+                          timeout=(self.connect_timeout, self.timeout), stream=True)
+        if r.status_code != 200:
+            raise LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        usage: dict = {}
+        finish: str | None = None
+        try:
+            for raw in r.iter_lines():
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    d = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("usage"):
+                    usage = self._record(d)
+                choices = d.get("choices") or []
+                if not choices:
+                    continue
+                ch = choices[0]
+                delta = ch.get("delta") or {}
+                rc = delta.get("reasoning")
+                if rc:
+                    reasoning_parts.append(rc)
+                    if on_delta:
+                        on_delta("reasoning", rc)
+                cc = delta.get("content")
+                if cc:
+                    content_parts.append(cc)
+                    if on_delta:
+                        on_delta("content", cc)
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
+        finally:
+            r.close()
+        if not usage:
+            self._stats["calls"] += 1
+        return ("".join(content_parts), "".join(reasoning_parts), usage, finish)
 
     def _extract_content(self, data: dict) -> str:
         """从 200 响应提取正文，空内容/截断显式报错（而非静默返回空串）。
@@ -285,7 +370,7 @@ class LLMClient:
     def _log(self, tag: str, system: str, user: str, response: str,
              ok: bool = True, error: str = "", usage: dict | None = None,
              duration_ms: float = 0.0, messages: list[dict] | None = None,
-             task_id: str = "", context_id: str = "") -> None:
+             task_id: str = "", context_id: str = "", reasoning: str = "") -> None:
         """完整记录一次 LLM 调用（成功或失败，含 mock）。"""
         d = self.cfg.get("llm_logs", "dir", default="")
         if not d:
@@ -307,6 +392,9 @@ class LLMClient:
             "user": user,
             "response": response,
         }
+        if reasoning:
+            entry["reasoning"] = reasoning
+            entry["reasoning_len"] = len(reasoning)
         if task_id:
             entry["task_id"] = task_id
         if context_id:

@@ -15,7 +15,11 @@
     "api_key_required": true,
     "temperature": 0.3,
     "max_tokens": 131072,
+    "max_tokens_ceiling": 524288,
     "timeout": 300,
+    "connect_timeout": 20,
+    "stream": true,
+    "reasoning_effort": "",
     "max_retries": 3,
     "max_requests_per_minute": 60,
     "max_repair": 3,
@@ -106,7 +110,7 @@
     "deep_llm_check": true,
     "queue_path": "work/qa_queue.json",
     "report_dir": "work/qa_reports",
-    "reasoning_effort": "none"
+    "reasoning_effort": ""
   },
   "translators_notes": {
     "path": "work/translators_notes.json",

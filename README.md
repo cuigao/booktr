@@ -184,6 +184,10 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   - `llm.base_url/model`：OpenAI 兼容服务接入参数
   - `llm.api_key` / `llm.api_key_env` / `llm.api_key_required`：API key 提供方式（见下）
   - `llm.max_tokens`：单次回复的 token 上限（默认 131072）。**推理模型**（如 deepseek-v4.1 系列）会先输出大量 `reasoning` token，上限过低会导致正文为空（`finish_reason=length`），故默认放宽
+  - `llm.max_tokens_ceiling`：当正文因 reasoning 被截空时，自动翻倍 `max_tokens` 重试一次的上限（默认 524288）
+  - `llm.stream`：流式输出（默认 true）。流式下每个分块都会重置读取超时，**长思考不再被误判为网络超时**；不支持流式的服务设 false
+  - `llm.connect_timeout`：流式建连超时（默认 20s）
+  - `llm.reasoning_effort`：推理模型思考等级（OpenAI 规范字段）。**空字符串 = 不发送该字段**（用模型默认，通常 `high`）；可设 `none`/`low`/`high`/`max`（以服务支持值为准）。**命令级覆盖**：`qa.reasoning_effort` 非空时覆盖全局，仅对 QA 生效；为空则继承 `llm.reasoning_effort`。
   - `llm.max_repair`：解析失败自愈重试次数（默认 3）
   - `llm.max_history_segments`：多轮对话保留历史段落数（默认 50）
   - `llm.summary_enabled`：摘要接力开关（默认 true）
@@ -289,7 +293,7 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 1. `qa-review`：逐条检阅（严重度/原因/相关原文/现有译文/建议，并展示定位段的**完整原文+现译+前后文**）。操作 `[a]采纳` `[r]拒绝` `[m]手工指定段号` `[d]丢弃` `[s]跳过` `[q]退出`。**未定位**（`resolved=false`）的条目会提示，须 `[m]` 指定段号或 `[d]` 丢弃（保留在队列直至手动处理）。
 2. `qa-apply`：对 `adopted` 条目按 `(页面, 段)` 分组、合并同段意见，逐段定点重译——在基础重译上下文之上，追加 **QA 意见 + 现有译文**，并提示"在此基础上修正、其余尽量保持不变"。重译前清理该段旧 TM/notes、成功后写入新 TM（与 `reset` 一致，避免自我锚定），同步更新 state/段缓存并重生成 out，条目标记 `applied`。`--dry-run` 仅列出将修正的段。
 
-配置（`qa`）：`deep_llm_check`、`queue_path`（默认 `work/qa_queue.json`）、`report_dir`（默认 `work/qa_reports`）、`reasoning_effort`（默认 `none`）。**`reasoning_effort`**：推理模型（如 deepseek-v4.1 系列）默认思考等级 `high` 会产生海量 reasoning token，吃满 `max_tokens` 使正文为空——故 QA 默认传 `none` 关闭思考（实测稳定，正文完整、引用准确）。可改为服务支持的值（如 `low`/`high`/`max`），仅对 QA 生效；translate 等其他调用不传该字段。
+配置（`qa`）：`deep_llm_check`、`queue_path`（默认 `work/qa_queue.json`）、`report_dir`（默认 `work/qa_reports`）、`reasoning_effort`（默认空=继承 `llm.reasoning_effort`）。**思考等级**：所有 LLM 调用默认**流式**（`llm.stream`），长思考不再误判超时；QA 可经 `qa.reasoning_effort` 单独覆盖思考等级（如设 `none` 关闭思考以加速，`high` 提升审查深度）。`reasoning` 内容完整记录在 `work/llm_logs/*.json`（`reasoning`/`reasoning_len`）。
 
 ## LLM 接入
 

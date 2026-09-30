@@ -115,7 +115,7 @@ def test_run_qa_warns_on_llm_failure(tmp_cfg, tmp_path, capsys):
 
 
 def test_run_qa_passes_reasoning_effort(tmp_cfg, tmp_path):
-    """QA 深度检查调用应带上配置的 reasoning_effort（默认 none）。"""
+    """QA 深度检查 reasoning_effort：qa 覆盖 llm；空则不传（None）。"""
     _write_translated(tmp_cfg, tmp_path)
     tmp_cfg.set(True, "qa", "deep_llm_check")
 
@@ -126,13 +126,20 @@ def test_run_qa_passes_reasoning_effort(tmp_cfg, tmp_path):
             RecLLM.kwargs = k
             return '{"issues": []}'
 
+    # 默认（qa 与 llm 均空）→ 不传
     qa.run_qa(tmp_cfg, RecLLM(), "page1.html")
-    assert RecLLM.kwargs.get("reasoning_effort") == "none"
+    assert RecLLM.kwargs.get("reasoning_effort") is None
 
-    # 配置可覆盖
-    tmp_cfg.set("low", "qa", "reasoning_effort")
+    # qa 覆盖
+    tmp_cfg.set("high", "qa", "reasoning_effort")
     qa.run_qa(tmp_cfg, RecLLM(), "page1.html")
-    assert RecLLM.kwargs.get("reasoning_effort") == "low"
+    assert RecLLM.kwargs.get("reasoning_effort") == "high"
+
+    # qa 空 → 继承 llm
+    tmp_cfg.set("", "qa", "reasoning_effort")
+    tmp_cfg.set("max", "llm", "reasoning_effort")
+    qa.run_qa(tmp_cfg, RecLLM(), "page1.html")
+    assert RecLLM.kwargs.get("reasoning_effort") == "max"
 
 
 def test_cmd_qa_prints_start_line(tmp_cfg, tmp_path, capsys):

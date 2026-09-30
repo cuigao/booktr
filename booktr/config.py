@@ -27,7 +27,11 @@ DEFAULTS: dict[str, Any] = {
         "api_key_required": True,  # 是否需要 key；本地免 key 服务（如 ollama）设为 false
         "temperature": 0.3,
         "max_tokens": 131072,  # 推理模型会把大量预算花在 reasoning 上，留足上限避免 content 被截空
+        "max_tokens_ceiling": 524288,  # reasoning 截空时翻倍重试的上限
         "timeout": 300,
+        "connect_timeout": 20,  # 流式建连超时（读取超时随 chunk 重置）
+        "stream": True,  # 流式输出（长思考不再误判网络超时；不支持的服务设 false）
+        "reasoning_effort": "",  # 思考等级：空=不设置(用模型默认)；none/low/high/max
         "max_retries": 3,
         "max_requests_per_minute": 60,
         "max_repair": 3,  # 解析失败自愈重试次数
@@ -105,7 +109,7 @@ DEFAULTS: dict[str, Any] = {
     "phrases": {"path": "work/phrase_memory.json", "max_len": 30},
     "tm": {"path": "work/tm.jsonl", "enabled": True},
     "qa": {"deep_llm_check": True, "queue_path": "work/qa_queue.json",
-           "report_dir": "work/qa_reports", "reasoning_effort": "none"},
+           "report_dir": "work/qa_reports", "reasoning_effort": ""},
     "translators_notes": {"path": "work/translators_notes.json", "focus": ""},
     "review": {"path": "work/review_queue.json", "auto_regenerate": True},
     "state": {"path": "work/state.json"},

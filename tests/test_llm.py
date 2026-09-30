@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -183,10 +184,11 @@ def test_repair_method_order_escape_then_close():
 # ── _extract_content：空内容/截断显式报错 ──────────────────────────────
 
 
-def _client(tmp_path):
-    return llm.LLMClient(_make_cfg(
-        {"provider": "openai-compatible", "api_key_required": False,
-         "max_tokens": 4096}, str(tmp_path)))
+def _client(tmp_path, **extra):
+    llm_cfg = {"provider": "openai-compatible", "api_key_required": False,
+               "max_tokens": 4096, "stream": False}
+    llm_cfg.update(extra)
+    return llm.LLMClient(_make_cfg(llm_cfg, str(tmp_path)))
 
 
 def test_extract_content_ok(tmp_path):
@@ -261,3 +263,122 @@ def test_reasoning_effort_multi(tmp_path, monkeypatch):
     c = _client(tmp_path)
     body = _capture_body(c, monkeypatch, _fn="chat_multi", reasoning_effort="low")
     assert body["reasoning_effort"] == "low"
+
+
+# ── 流式聚合 + 截空翻倍重试 + reasoning 记录 ────────────────────────────
+
+
+class _FakeStream:
+    """模拟流式响应对象，供 _post_stream 的 iter_lines() 使用。"""
+
+    def __init__(self, lines, status_code=200):
+        self._lines = lines
+        self.status_code = status_code
+
+    def iter_lines(self, decode_unicode=False):
+        for ln in self._lines:
+            yield ln
+
+    def close(self):
+        pass
+
+
+def _sse(*events):
+    lines = []
+    for e in events:
+        lines.append("data: " + json.dumps(e, ensure_ascii=False))
+    lines.append("data: [DONE]")
+    return lines
+
+
+def test_stream_aggregates_content_and_reasoning(tmp_path, monkeypatch):
+    c = _client(tmp_path, stream=True)
+    lines = _sse(
+        {"choices": [{"delta": {"reasoning": "think1"}, "finish_reason": None}]},
+        {"choices": [{"delta": {"reasoning": "think2"}, "finish_reason": None}]},
+        {"choices": [{"delta": {"content": "hello "}, "finish_reason": None}]},
+        {"choices": [{"delta": {"content": "world"}, "finish_reason": "stop"}]},
+        {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 5,
+                                  "total_tokens": 8}},
+    )
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        captured["body"] = json
+        return _FakeStream(lines)
+
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    out = c.chat("s", "u")
+    assert out == "hello world"
+    assert captured["body"]["stream"] is True
+    assert captured["body"]["stream_options"] == {"include_usage": True}
+
+
+def test_stream_length_empty_doubles_maxtokens(tmp_path, monkeypatch):
+    """finish=length 且正文空 → 第二次请求 max_tokens 翻倍。"""
+    c = _client(tmp_path, stream=True, max_tokens=1000, max_tokens_ceiling=4096)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        calls.append(json.get("max_tokens"))
+        if len(calls) == 1:
+            return _FakeStream(_sse(
+                {"choices": [{"delta": {"reasoning": "x" * 100}, "finish_reason": "length"}]}))
+        return _FakeStream(_sse(
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}))
+
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    out = c.chat("s", "u")
+    assert out == "ok"
+    assert calls == [1000, 2000]
+
+
+def test_stream_ceiling_caps_doubling(tmp_path, monkeypatch):
+    """翻倍不超过 ceiling；仍空则报错。"""
+    c = _client(tmp_path, stream=True, max_tokens=3000, max_tokens_ceiling=4096)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        calls.append(json.get("max_tokens"))
+        return _FakeStream(_sse(
+            {"choices": [{"delta": {"reasoning": "x" * 10}, "finish_reason": "length"}]}))
+
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    with pytest.raises(llm.LLMError):
+        c.chat("s", "u")
+    assert calls == [3000, 4096]  # 3000*2=6000 被 ceiling 4096 截断
+
+
+def test_stream_network_error_retries(tmp_path, monkeypatch):
+    c = _client(tmp_path, stream=True, max_retries=1)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        calls.append(1)
+        if len(calls) == 1:
+            raise llm.requests.ConnectionError("boom")
+        return _FakeStream(_sse(
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}))
+
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    monkeypatch.setattr("booktr.llm.time.sleep", lambda *a: None)
+    assert c.chat("s", "u") == "ok"
+    assert len(calls) == 2
+
+
+def test_log_records_reasoning(tmp_cfg, monkeypatch):
+    tmp_cfg.set("openai-compatible", "llm", "provider")
+    tmp_cfg.set(False, "llm", "api_key_required")
+    c = llm.LLMClient(tmp_cfg)
+    c.stream = True
+    monkeypatch.setattr("booktr.llm.requests.post", lambda *a, **k: _FakeStream(_sse(
+        {"choices": [{"delta": {"reasoning": "R"}, "finish_reason": None}]},
+        {"choices": [{"delta": {"content": "C"}, "finish_reason": "stop"}]})))
+    c.chat("s", "u", tag="qa")
+    logdir = tmp_cfg.get("llm_logs", "dir", default="")
+    import glob
+    files = glob.glob(os.path.join(logdir, "qa_*.json"))
+    assert files
+    entry = json.load(open(files[-1], encoding="utf-8"))
+    assert entry["reasoning"] == "R"
+    assert entry["reasoning_len"] == 1
