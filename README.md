@@ -289,7 +289,7 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 1. `qa-review`：逐条检阅（严重度/原因/相关原文/现有译文/建议，并展示定位段的**完整原文+现译+前后文**）。操作 `[a]采纳` `[r]拒绝` `[m]手工指定段号` `[d]丢弃` `[s]跳过` `[q]退出`。**未定位**（`resolved=false`）的条目会提示，须 `[m]` 指定段号或 `[d]` 丢弃（保留在队列直至手动处理）。
 2. `qa-apply`：对 `adopted` 条目按 `(页面, 段)` 分组、合并同段意见，逐段定点重译——在基础重译上下文之上，追加 **QA 意见 + 现有译文**，并提示"在此基础上修正、其余尽量保持不变"。重译前清理该段旧 TM/notes、成功后写入新 TM（与 `reset` 一致，避免自我锚定），同步更新 state/段缓存并重生成 out，条目标记 `applied`。`--dry-run` 仅列出将修正的段。
 
-配置（`qa`）：`deep_llm_check`、`queue_path`（默认 `work/qa_queue.json`）、`report_dir`（默认 `work/qa_reports`）。
+配置（`qa`）：`deep_llm_check`、`queue_path`（默认 `work/qa_queue.json`）、`report_dir`（默认 `work/qa_reports`）、`reasoning_effort`（默认 `none`）。**`reasoning_effort`**：推理模型（如 deepseek-v4.1 系列）默认思考等级 `high` 会产生海量 reasoning token，吃满 `max_tokens` 使正文为空——故 QA 默认传 `none` 关闭思考（实测稳定，正文完整、引用准确）。可改为服务支持的值（如 `low`/`high`/`max`），仅对 QA 生效；translate 等其他调用不传该字段。
 
 ## LLM 接入
 

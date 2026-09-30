@@ -68,13 +68,13 @@ class FakeLLM:
 
         return cls(responder=_resp)
 
-    def chat(self, system, user, temperature=None, tag="chat"):
+    def chat(self, system, user, temperature=None, tag="chat", **kwargs):
         self.calls += 1
         self.last_user = user
         return self._next(system, user)
 
     def chat_multi(self, messages, temperature=None, tag="chat_multi",
-                   task_id="", context_id=""):
+                   task_id="", context_id="", **kwargs):
         self.calls += 1
         last = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
         self.last_user = last

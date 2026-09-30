@@ -125,7 +125,9 @@ def run_qa(cfg: Config, client, rel: str) -> list[dict]:
             sysp = prompts.build_qa_system(cfg)
             usr = prompts.build_qa_user(src_all[:6000], dst_all[:6000], gl_confirmed)
             try:
-                resp = client.chat(sysp, usr, temperature=0.2, tag="qa")
+                resp = client.chat(
+                    sysp, usr, temperature=0.2, tag="qa",
+                    reasoning_effort=cfg.get("qa", "reasoning_effort", default="none"))
                 data = llm_mod.parse_json_response(resp)
                 for iss in data.get("issues", []) or []:
                     src_quote = iss.get("src_quote", "") or ""

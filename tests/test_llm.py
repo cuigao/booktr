@@ -216,3 +216,48 @@ def test_extract_content_bad_shape_raises(tmp_path):
     c = _client(tmp_path)
     with pytest.raises(llm.LLMError):
         c._extract_content({"choices": []})
+
+
+# ── reasoning_effort 透传 ──────────────────────────────────────────────
+
+
+class _FakeResp:
+    status_code = 200
+
+    def json(self):
+        return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {}}
+
+
+def _capture_body(client, monkeypatch, **kw):
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured.update(json)
+        return _FakeResp()
+
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    fn = kw.pop("_fn", "chat")
+    if fn == "chat":
+        client.chat("sys", "usr", **kw)
+    else:
+        client.chat_multi([{"role": "user", "content": "usr"}], **kw)
+    return captured
+
+
+def test_reasoning_effort_sent_when_set(tmp_path, monkeypatch):
+    c = _client(tmp_path)
+    body = _capture_body(c, monkeypatch, reasoning_effort="none")
+    assert body["reasoning_effort"] == "none"
+
+
+def test_reasoning_effort_absent_by_default(tmp_path, monkeypatch):
+    c = _client(tmp_path)
+    body = _capture_body(c, monkeypatch)
+    assert "reasoning_effort" not in body
+
+
+def test_reasoning_effort_multi(tmp_path, monkeypatch):
+    c = _client(tmp_path)
+    body = _capture_body(c, monkeypatch, _fn="chat_multi", reasoning_effort="low")
+    assert body["reasoning_effort"] == "low"

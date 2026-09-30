@@ -57,8 +57,11 @@ class LLMClient:
 
     # ------------------------------------------------------------------
     def chat(self, system: str, user: str, temperature: float | None = None,
-             tag: str = "chat") -> str:
-        """单轮对话，返回文本。每次调用（含 mock）都完整记录到 llm_logs。"""
+             tag: str = "chat", reasoning_effort: str | None = None) -> str:
+        """单轮对话，返回文本。每次调用（含 mock）都完整记录到 llm_logs。
+
+        reasoning_effort：推理模型思考等级（OpenAI 规范字段，如 "none"/"low"/
+        "high"）；空则请求体不含该字段。"""
         t0 = time.monotonic()
         if self.provider == "mock":
             resp = self._mock(system, user)
@@ -73,7 +76,8 @@ class LLMClient:
                       duration_ms=(time.monotonic() - t0) * 1000)
             raise LLMError(err)
         try:
-            resp, usage = self._openai_chat(system, user, temperature)
+            resp, usage = self._openai_chat(system, user, temperature,
+                                            reasoning_effort=reasoning_effort)
         except LLMError as e:
             self._log(tag, system, user, "", ok=False, error=str(e),
                       duration_ms=(time.monotonic() - t0) * 1000)
@@ -85,7 +89,7 @@ class LLMClient:
     # ------------------------------------------------------------------
     def chat_multi(self, messages: list[dict], temperature: float | None = None,
                    tag: str = "chat_multi", task_id: str = "",
-                   context_id: str = "") -> str:
+                   context_id: str = "", reasoning_effort: str | None = None) -> str:
         """多轮对话，messages = [{"role": "system"|"user"|"assistant", "content": ...}]。
 
         返回最后一条 assistant 消息的文本。完整记录到 llm_logs。
@@ -117,7 +121,8 @@ class LLMClient:
                       messages=messages, task_id=task_id, context_id=context_id)
             raise LLMError(err)
         try:
-            resp, usage = self._openai_chat_multi(messages, temperature)
+            resp, usage = self._openai_chat_multi(messages, temperature,
+                                                  reasoning_effort=reasoning_effort)
         except LLMError as e:
             self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
                       "", ok=False, error=str(e),
@@ -131,7 +136,8 @@ class LLMClient:
         return resp
 
     def _openai_chat_multi(self, messages: list[dict],
-                           temperature: float | None) -> tuple[str, dict]:
+                           temperature: float | None,
+                           reasoning_effort: str | None = None) -> tuple[str, dict]:
         """多轮对话底层调用。"""
         body = {
             "model": self.model,
@@ -140,6 +146,8 @@ class LLMClient:
         }
         if self.max_tokens:
             body["max_tokens"] = self.max_tokens
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -163,7 +171,8 @@ class LLMClient:
         raise LLMError(f"LLM multi 调用最终失败: {last_err}")
 
     # ------------------------------------------------------------------
-    def _openai_chat(self, system: str, user: str, temperature: float | None) -> tuple[str, dict]:
+    def _openai_chat(self, system: str, user: str, temperature: float | None,
+                     reasoning_effort: str | None = None) -> tuple[str, dict]:
         body = {
             "model": self.model,
             "messages": [
@@ -174,6 +183,8 @@ class LLMClient:
         }
         if self.max_tokens:
             body["max_tokens"] = self.max_tokens
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
