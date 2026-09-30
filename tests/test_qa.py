@@ -265,3 +265,32 @@ def test_locate_segments_cross_segment_lines(tmp_cfg, tmp_path):
     # 跨段的多行引用：应命中多个段
     ids = qa.locate_segments(segs, "こんにちは。\n今日はいい天気です。", "")
     assert len(ids) >= 2
+
+
+def test_locate_segments_includes_head_title():
+    """候选段含 head_title（非 text），使其可被定位。"""
+    from booktr import qa
+    from booktr.segments import Segment
+
+    segs = [
+        Segment(id=1, kind="head_title", start=0, end=7, text="YOUKOSO",
+                translation="欢迎"),
+        Segment(id=2, kind="text", start=8, end=20, text="こんにちは。",
+                translation="你好。"),
+    ]
+    # 原文命中 head_title
+    assert qa.locate_segments(segs, "YOUKOSO", "") == [1]
+    # 译文命中 head_title
+    assert qa.locate_segments(segs, "", "欢迎") == [1]
+
+
+def test_qa_prompt_only_lists_actionable():
+    """系统提示词须含'只列出确实需要修改的问题'等约束。"""
+    from booktr import prompts
+    from booktr.config import Config
+    import os
+    cfg = Config(root=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    s = prompts.build_qa_system(cfg)
+    assert "只列出确实需要修改的问题" in s
+    assert "合并为一条" in s
+    assert "high" in s

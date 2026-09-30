@@ -274,9 +274,9 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 - **本地规则检查**（无 LLM 开销，逐段执行）：
   - **HTML 安全（高危）**：译文占位符数量与原文不一致（`[[P0]]` 等），说明内联标签被 LLM 删除/改动，会破坏原站结构。
   - **术语一致（中危）**：原文含已确认词汇表术语但译文未含其标准译文。
-- **LLM 深度检查**（`qa.deep_llm_check`，默认 true）：把整页原文+译文（各截断 6000 字符）交 LLM（temperature 0.2）做语义层面审查，补充误译、术语使用不当、上下文不一致等问题。LLM 须**逐字引用**相关原文/译文片段（`src_quote`/`dst_quote`），不给出段号。
+- **LLM 深度检查**（`qa.deep_llm_check`，默认 true）：把整页原文+译文（各截断 6000 字符）交 LLM（temperature 0.2）做语义层面审查，补充误译、术语使用不当、上下文不一致等问题。提示词要求**只列出确实需要修改的问题**（正确/可接受/无需修改的不列出）、同段同类问题合并为一条、`high` 用于确定性错误；并**逐字引用**相关原文/译文片段（`src_quote`/`dst_quote`），不给出段号。
 
-每条问题标准化为 `{severity, reason, src_quote, dst_quote, suggestion}`，随后按引用的**原文/译文片段机械定位**到具体段（`locate_segments`：精确子串 → 去占位符 → 跨行拆分 → 模糊），得到 `segments` 与 `resolved`。
+每条问题标准化为 `{severity, reason, src_quote, dst_quote, suggestion}`，随后按引用的**原文/译文片段机械定位**到具体段（`locate_segments`：精确子串 → 去占位符 → 跨行拆分 → 模糊；候选为**所有已翻译段**，含 `head_title`/属性段），得到 `segments` 与 `resolved`。
 
 运行过程**逐页打印进度**（`[i/N] 页面  问题数 (耗时)`）；深度检查单页 LLM 调用失败会打印 `⚠ ... LLM 深度检查失败（已跳过）` 而非静默。报告写入带时间戳的 `work/qa_reports/qa_<YYYYmmdd_HHMMSS>.json`（**每次运行都留存，不覆盖**），同时刷新稳定别名 `work/qa_report.json`；均为**逐页增量写入**。问题写入**专用队列** `work/qa_queue.json`（按 id 去重，**不再写入 `review_queue.json`**）。
 

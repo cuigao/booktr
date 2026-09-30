@@ -39,23 +39,25 @@ def _matches(quote: str, hay: str, strip_ph: bool = False) -> bool:
 def locate_segments(segs: list, src_quote: str, dst_quote: str) -> list[int]:
     """把 QA 引用的原文/译文片段机械定位到段号。
 
+    候选段为**所有已翻译段**（text / head_title / attr_title / attr_alt）。
     匹配优先级：原文精确子串 → 译文精确子串 → 去占位符后子串 →
     引文按换行拆分后逐行命中 → 模糊（Dice ≥ 阈值）。
     返回命中的段 id 列表（可能为空）。
     """
-    text_segs = [s for s in segs if getattr(s, "kind", "") == "text"
-                 and (s.text or s.translation)]
-    if not text_segs:
+    cand_segs = [s for s in segs
+                 if getattr(s, "translation", None)
+                 and ((s.text or "") or (s.translation or ""))]
+    if not cand_segs:
         return []
 
     # 1/2/3. 原文或译文（含去占位符变体）子串命中
     hits = []
-    for s in text_segs:
+    for s in cand_segs:
         if _matches(src_quote, s.text or "") or _matches(dst_quote, s.translation or ""):
             hits.append(s.id)
     if hits:
         return hits
-    for s in text_segs:
+    for s in cand_segs:
         if _matches(src_quote, s.text or "", strip_ph=True) \
                 or _matches(dst_quote, s.translation or "", strip_ph=True):
             hits.append(s.id)
@@ -65,7 +67,7 @@ def locate_segments(segs: list, src_quote: str, dst_quote: str) -> list[int]:
     # 4. 引文按换行拆分，逐行命中（跨段引用）
     quote_lines = [ln for ln in (src_quote or "").splitlines() if _norm(ln)]
     if len(quote_lines) > 1:
-        for s in text_segs:
+        for s in cand_segs:
             if any(_matches(ln, s.text or "") for ln in quote_lines):
                 hits.append(s.id)
         if hits:
@@ -75,7 +77,7 @@ def locate_segments(segs: list, src_quote: str, dst_quote: str) -> list[int]:
     target = _strip_ph(src_quote or "") or _strip_ph(dst_quote or "")
     if target:
         scored = [(util.dice_coefficient(_strip_ph(s.text or ""), target), s.id)
-                  for s in text_segs]
+                  for s in cand_segs]
         best = max(scored, key=lambda x: x[0]) if scored else (0.0, None)
         if best[0] >= _FUZZY_THRESHOLD:
             return [best[1]]
