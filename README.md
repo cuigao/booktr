@@ -105,7 +105,7 @@ python booktr-cli.py qa --start 11 --count 10          # 下一批（无状态�
 python booktr-cli.py qa --no-deep                      # 仅本地规则，跳过 LLM 深度检查
 
 # 10b) QA 裁定与应用（采纳后定点重译）
-python booktr-cli.py qa-review                 # 逐条检阅 QA 意见（含原文/现译/上下文），[a]采纳/[r]拒绝/[d]丢弃
+python booktr-cli.py qa-review                 # 逐条检阅 QA 意见（含原文/现译/上下文），[a]采纳/[e]自定义意见/[r]拒绝/[d]丢弃
 python booktr-cli.py qa-apply                  # 对已采纳意见批量定点重译
 python booktr-cli.py qa-apply --page index.html
 python booktr-cli.py qa-apply --dry-run        # 仅列出将修正的段
@@ -315,12 +315,13 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 
 QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 
-1. `qa-review`：逐条检阅（严重度/原因/相关原文/现有译文/建议，并展示定位段的**完整原文+现译+前后文**）。操作 `[a]采纳` `[r]拒绝` `[m]手工指定段号` `[d]丢弃` `[s]跳过` `[q]退出`。**未定位**（`resolved=false`）的条目会提示，须 `[m]` 指定段号或 `[d]` 丢弃（保留在队列直至手动处理）。
+1. `qa-review`：逐条检阅（严重度/原因/相关原文/现有译文/建议，并展示定位段的**完整原文+现译+前后文**）。操作 `[a]采纳` `[e]自定义意见` `[r]拒绝` `[m]手工指定段号` `[d]丢弃` `[s]跳过` `[q]退出`。**未定位**（`resolved=false`）的条目会提示，须 `[m]` 指定段号或 `[d]` 丢弃（保留在队列直至手动处理）。
+   - `[e]自定义意见`：LLM 检出问题但不满意其提案时，人工输入**建议译文/说明**覆盖有效字段 `suggestion`/`reason`，原 LLM 值归档到 `llm_suggestion`/`llm_reason`（**仅留档，后续 `qa-apply` 不再引用**），标记来源 `source=human` 后采纳。字段级输入：**回车=沿用 LLM 原值**、**`-`=清空该字段**、其它文本=覆盖；两字段均回车视为无变化，取消 `[e]`、不采纳（如需直接采纳 LLM 建议用 `[a]`）。人工建议仍作为提示交 LLM 重译（非逐字硬写）。
 2. `qa-apply`：对 `adopted` 条目按 `(页面, 段)` 分组、合并同段意见，逐段定点重译——在基础重译上下文之上，追加 **QA 意见 + 现有译文**，并提示"在此基础上修正、其余尽量保持不变"。重译前清理该段旧 TM/notes、成功后写入新 TM（与 `reset` 一致，避免自我锚定），同步更新 state/段缓存并重生成 out，条目标记 `applied`。`--dry-run` 仅列出将修正的段。
 
 配置（`qa`）：`deep_llm_check`、`queue_path`（默认 `work/qa_queue.json`）、`report_dir`（默认 `work/qa_reports`）、`reasoning_effort`（默认空=继承 `llm.reasoning_effort`）。**思考等级**：所有 LLM 调用默认**流式**（`llm.stream`），长思考不再误判超时；QA 可经 `qa.reasoning_effort` 单独覆盖思考等级（如设 `none` 关闭思考以加速，`high` 提升审查深度）。`reasoning` 内容完整记录在 `work/llm_logs/*.json`（`reasoning`/`reasoning_len`）。
 
-> 现有 `qa-review` 为逐条 yes/no 裁定，无法部分采纳/拆分意见、原文划线提意见或人工直改译文，且无撤销手段。更完整的**交互式 QA 审查**设计（含上述能力与数据模型演进）见工作区文档 `instance/report/interactive_qa_plan.md`。
+> `[e]自定义意见` 已实现"覆盖意见并采纳"（`interactive_qa_plan.md` L1 的最小落地）。但 `qa-review` 仍无法**部分采纳/拆分**意见、原文划线提意见或人工直改译文，且无撤销手段。更完整的**交互式 QA 审查**设计（含上述能力与数据模型演进）见工作区文档 `instance/report/interactive_qa_plan.md`。
 
 ## LLM 接入
 

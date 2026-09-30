@@ -4,6 +4,11 @@
 - 每条含定位到的段号（机械定位）、severity、原因、原文/译文片段、建议。
 - 人工交互裁定 status ∈ {open, adopted, rejected, applied} 或丢弃。
 - 采纳后由 `qa-apply` 触发定点重译（见 translate.apply_qa_fix）。
+- `[e]` 自定义意见：LLM 检出问题但不满意其提案时，人工输入建议译文/说明覆盖有效
+  字段 `suggestion`/`reason`；原 LLM 值归档到 `llm_suggestion`/`llm_reason`（仅留档，
+  后续 `qa-apply` 不引用），并标记 `source="human"` 后采纳。
+  - 字段级输入语义：回车=沿用 LLM 原值；`-`=清空该字段；其它文本=覆盖。
+  - 两个字段均回车（无任何覆盖）视为无变化，取消 [e]、不采纳。
 
 未定位成功（resolved=False）的条目保留在队列，需人工 `[m]` 指定段号或 `[d]` 丢弃。
 """
@@ -93,13 +98,16 @@ def _format_item(idx: int, it: dict) -> str:
     sev = it.get("severity", "")
     segs = it.get("segments", [])
     loc = f"段 {segs}" if segs else "（未定位）"
+    src_tag = "[人工] " if it.get("source") == "human" else ""
     lines = [
-        f"[{idx}] {it.get('page')}  {loc}  [{sev}]  {it.get('status')}",
+        f"[{idx}] {src_tag}{it.get('page')}  {loc}  [{sev}]  {it.get('status')}",
         f"    原因: {it.get('reason', '')}",
         f"    相关原文: {it.get('src_quote', '')}",
         f"    现有译文问题: {it.get('dst_quote', '')}",
         f"    建议: {it.get('suggestion', '')}",
     ]
+    if it.get("source") == "human" and (it.get("llm_reason") or it.get("llm_suggestion")):
+        lines.append(f"    （原 LLM 建议: {it.get('llm_reason', '')} / {it.get('llm_suggestion', '')}）")
     return "\n".join(lines)
 
 
@@ -154,7 +162,7 @@ def interactive_qa_review(cfg: Config, prompt: str = None,
         seg_ids = it.get("segments", []) or []
         if it.get("resolved") and seg_ids:
             _show_segment_context(cfg, it.get("page"), seg_ids)
-            print("操作: [a]采纳  [r]拒绝  [m]手工指定段号  [d]丢弃  [s]跳过  [q]退出")
+            print("操作: [a]采纳  [e]自定义意见  [r]拒绝  [m]手工指定段号  [d]丢弃  [s]跳过  [q]退出")
         else:
             print("⚠ 未定位到段：请 [m] 手工指定段号，或 [d] 丢弃。")
             print("操作: [m]手工指定段号  [d]丢弃  [s]跳过  [q]退出")
@@ -167,6 +175,33 @@ def interactive_qa_review(cfg: Config, prompt: str = None,
                 handled += 1
                 continue
             it["status"] = STATUS_ADOPTED
+        elif act == "e":
+            if prompt:
+                print("  自动化模式不支持自定义意见（[e]）。")
+                handled += 1
+                continue
+            if not (it.get("resolved") and seg_ids):
+                print("  未定位段，无法自定义意见（请先 [m] 指定段号）。")
+                handled += 1
+                continue
+            print("  自定义意见（覆盖 LLM 建议/说明；回车=沿用 LLM，'-'=清空该字段）")
+            raw_sug = input("  建议译文（回车=沿用 LLM 建议，'-'=清空）: ").strip()
+            raw_rsn = input("  说明/理由（回车=沿用 LLM 说明，'-'=清空）: ").strip()
+            new_sug = it.get("suggestion", "") if raw_sug == "" else ("" if raw_sug == "-" else raw_sug)
+            new_rsn = it.get("reason", "") if raw_rsn == "" else ("" if raw_rsn == "-" else raw_rsn)
+            if new_sug == it.get("suggestion", "") and new_rsn == it.get("reason", ""):
+                print("  未做修改，未采纳（如需直接采纳 LLM 建议请用 [a]）。")
+                handled += 1
+                continue
+            if "llm_suggestion" not in it:
+                it["llm_suggestion"] = it.get("suggestion", "")
+            if "llm_reason" not in it:
+                it["llm_reason"] = it.get("reason", "")
+            it["suggestion"] = new_sug
+            it["reason"] = new_rsn
+            it["source"] = "human"
+            it["status"] = STATUS_ADOPTED
+            print("  已采纳自定义意见。")
         elif act == "r":
             it["status"] = STATUS_REJECTED
         elif act == "m":
