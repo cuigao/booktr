@@ -95,6 +95,76 @@ def test_qa_report_writes_incrementally(tmp_cfg, tmp_path):
     assert "pages" in data and "total_issues" in data
 
 
+def test_qa_report_records_checked_even_without_issues(tmp_cfg, tmp_path):
+    """version 2：0 问题页也写入 checked（含 ts/计数），供聚合查询。"""
+    _write_translated(tmp_cfg, tmp_path)
+    tmp_cfg.set(False, "qa", "deep_llm_check")  # 无 LLM，通常 0 问题
+    report = qa.qa_report(tmp_cfg, FakeLLM.default(), ["page1.html"],
+                          ts="20260101_000000", scope="test")
+    assert report["version"] == 2
+    assert report["ts"] == "20260101_000000"
+    assert report["total_pages_checked"] == 1
+    assert "page1.html" in report["checked"]
+    info = report["checked"]["page1.html"]
+    for k in ("ts", "total", "high", "mid", "low", "unresolved",
+              "deep", "duration_s"):
+        assert k in info
+    # 无问题时 checked 有记录，pages 不含该页
+    if not report["total_issues"]:
+        assert "page1.html" not in report["pages"]
+
+
+def test_collect_page_status_picks_latest(tmp_cfg, tmp_path):
+    """聚合取每页 ts 最大的 checked 记录；兼容旧报告（仅有问题页）。"""
+    _write_translated(tmp_cfg, tmp_path)
+    tmp_cfg.set(False, "qa", "deep_llm_check")
+    reports_dir = os.path.join(tmp_cfg.work_dir, "qa_reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    from booktr import util
+    util.write_json(os.path.join(reports_dir, "qa_20260101_000000.json"), {
+        "version": 2, "ts": "20260101_000000",
+        "pages": {"page1.html": [{"severity": "high"}]},
+        "checked": {"page1.html": {"ts": "20260101_000000", "total": 1,
+                                   "high": 1, "mid": 0, "low": 0,
+                                   "unresolved": 0, "deep": True,
+                                   "duration_s": 1.0}},
+        "total_issues": 1, "high": 1, "unresolved": 0, "total_pages_checked": 1,
+    })
+    util.write_json(os.path.join(reports_dir, "qa_20260202_000000.json"), {
+        "version": 2, "ts": "20260202_000000",
+        "pages": {}, "checked": {"page1.html": {"ts": "20260202_000000",
+            "total": 0, "high": 0, "mid": 0, "low": 0, "unresolved": 0,
+            "deep": True, "duration_s": 0.5}},
+        "total_issues": 0, "high": 0, "unresolved": 0, "total_pages_checked": 1,
+    })
+    latest = qa.collect_page_status(tmp_cfg)
+    assert latest["page1.html"]["ts"] == "20260202_000000"
+    assert latest["page1.html"]["total"] == 0
+
+
+def test_cmd_qa_status_lists_checked_and_unchecked(tmp_cfg, tmp_path, capsys):
+    write_sample_site(tmp_path)
+    _seed_plan_and_done(tmp_cfg, tmp_path, ["page1.html", "page2.html"])
+    tmp_cfg.set(False, "qa", "deep_llm_check")
+    reports_dir = os.path.join(tmp_cfg.work_dir, "qa_reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    from booktr import util
+    util.write_json(os.path.join(reports_dir, "qa_20260101_000000.json"), {
+        "version": 2, "ts": "20260101_000000", "pages": {},
+        "checked": {"page1.html": {"ts": "20260101_000000", "total": 0,
+                                   "high": 0, "mid": 0, "low": 0,
+                                   "unresolved": 0, "deep": True,
+                                   "duration_s": 0.1}},
+        "total_issues": 0, "high": 0, "unresolved": 0, "total_pages_checked": 1,
+    })
+    from booktr.pipeline import cmd_qa_status
+    cmd_qa_status(tmp_cfg, _args())
+    out = capsys.readouterr().out
+    assert "1/2" in out
+    assert "page1.html" in out
+    assert "page2.html" in out
+
+
 def test_run_qa_warns_on_llm_failure(tmp_cfg, tmp_path, capsys):
     from booktr import llm as llm_mod
 

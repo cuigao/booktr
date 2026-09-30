@@ -152,27 +152,104 @@ def run_qa(cfg: Config, client, rel: str) -> list[dict]:
 
 
 def qa_report(cfg: Config, client, rels: list[str],
-              out: str | None = None) -> dict:
+              out: str | None = None, ts: str = "",
+              scope: str = "") -> dict:
     """对给定页面列表执行 QA，返回报告。
 
     ``out`` 非空时写入该路径（含时间戳的报告文件），并同步刷新稳定的
     ``work/qa_report.json`` 别名；缺省则仅写 ``work/qa_report.json``。
     无论何种方式，均逐页增量落盘。
+
+    报告结构（version 2）：
+    - ``pages``：仅有问题的页 → issue 列表（向后兼容）。
+    - ``checked``：**每个被检查的页**（含 0 问题）→ ``{ts,total,high,mid,low,
+      unresolved,deep,duration_s}``，用于聚合"每页 QA 状态/最近时间"。
+    - ``ts``/``scope``/``total_pages_checked``：本次运行的元信息。
     """
-    report = {"pages": {}, "total_issues": 0, "high": 0, "unresolved": 0}
+    report = {
+        "version": 2,
+        "ts": ts,
+        "scope": scope,
+        "pages": {},
+        "checked": {},
+        "total_issues": 0,
+        "high": 0,
+        "unresolved": 0,
+        "total_pages_checked": 0,
+    }
     alias = os.path.join(cfg.work_dir, "qa_report.json")
+    deep = cfg.get("qa", "deep_llm_check", default=True)
     total = len(rels)
     for i, rel in enumerate(rels, 1):
         t0 = time.monotonic()
         issues = run_qa(cfg, client, rel)
         dt = time.monotonic() - t0
+        n_high = sum(1 for x in issues if x["severity"] == "high")
+        n_mid = sum(1 for x in issues if x["severity"] == "mid")
+        n_low = sum(1 for x in issues if x["severity"] == "low")
+        n_unres = sum(1 for x in issues if not x.get("resolved", True))
+        report["checked"][rel] = {
+            "ts": ts, "total": len(issues), "high": n_high, "mid": n_mid,
+            "low": n_low, "unresolved": n_unres, "deep": deep,
+            "duration_s": round(dt, 1),
+        }
+        report["total_pages_checked"] += 1
         if issues:
             report["pages"][rel] = issues
             report["total_issues"] += len(issues)
-            report["high"] += sum(1 for x in issues if x["severity"] == "high")
-            report["unresolved"] += sum(1 for x in issues if not x.get("resolved", True))
+            report["high"] += n_high
+            report["unresolved"] += n_unres
         util.write_json(alias, report)  # 增量落盘，长跑中断不丢失
         if out:
             util.write_json(out, report)
         print(f"[{i}/{total}] {rel}  {len(issues)} 问题 ({dt:.1f}s)", flush=True)
     return report
+
+
+def collect_page_status(cfg: Config) -> dict:
+    """扫描 ``qa_reports/*.json``，聚合每页最近一次 QA 状态（只读）。
+
+    返回 ``{rel: {"ts","total","high","mid","low","unresolved","deep",
+    "duration_s"}}``，取每页 ``checked`` 中 ``ts`` 最大者。
+
+    兼容 version 1（无 ``checked``）的旧报告：退化为从 ``pages``（仅有问题
+    的页）推断，字段以 ``ts`` 与 ``total/high`` 为准，其余缺省。旧报告不含
+    0 问题页，故该页的"已 QA"未必可查——新报告（version 2）才完整。
+    """
+    report_dir = cfg.get("qa", "report_dir", default="work/qa_reports")
+    alias = os.path.join(cfg.work_dir, "qa_report.json")
+    files = []
+    if os.path.isdir(report_dir):
+        files += [os.path.join(report_dir, f) for f in os.listdir(report_dir)
+                  if f.startswith("qa_") and f.endswith(".json")]
+    if os.path.exists(alias):
+        files.append(alias)
+
+    latest: dict[str, dict] = {}
+    for path in files:
+        data = util.read_json(path, {})
+        if not isinstance(data, dict):
+            continue
+        ts = str(data.get("ts") or "")
+        if not ts:
+            m = re.search(r"qa_(\d{8}_\d{6})", os.path.basename(path))
+            ts = m.group(1) if m else ""
+        checked = data.get("checked") or {}
+        if checked:
+            for rel, info in checked.items():
+                rec = dict(info)
+                rec.setdefault("ts", ts)
+                if rel not in latest or str(rec.get("ts", "")) >= str(latest[rel].get("ts", "")):
+                    latest[rel] = rec
+        else:
+            # 旧报告：仅有问题的页
+            for rel, issues in (data.get("pages") or {}).items():
+                n_high = sum(1 for x in issues if x.get("severity") == "high")
+                rec = {"ts": ts, "total": len(issues), "high": n_high,
+                       "mid": sum(1 for x in issues if x.get("severity") == "mid"),
+                       "low": sum(1 for x in issues if x.get("severity") == "low"),
+                       "unresolved": sum(1 for x in issues if not x.get("resolved", True)),
+                       "deep": None, "duration_s": None}
+                if rel not in latest or str(ts) >= str(latest[rel].get("ts", "")):
+                    latest[rel] = rec
+    return latest

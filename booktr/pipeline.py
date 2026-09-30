@@ -13,7 +13,7 @@ from . import annotator, crawler, glossary as gl, llm as llm_mod
 from . import planner, prefs as prefs_mod, prompts, qa, residual as residual_mod
 from . import review as review_mod, segments as seg_mod
 from . import styles as styles_mod, translate as tr, util
-from .config import Config, ensure_dirs, load_config, save_config
+from .config import DEFAULTS, Config, ensure_dirs, load_config, save_config
 
 
 def _client(cfg: Config):
@@ -119,26 +119,64 @@ def apply_style_preset(user_rules: str, key: str) -> str:
     return user_rules + "\n\n" + rules
 
 
+def _resolve_clone_dir(root: str, clone: str) -> str:
+    """把 init --clone 解析为绝对数据根（与 --data-dir 同规则：相对项目根）。"""
+    if os.path.isabs(clone):
+        return os.path.normpath(clone)
+    return os.path.normpath(os.path.join(root, clone))
+
+
 def cmd_init(cfg: Config, args) -> None:
-    """交互式初始化：从 config.json.template 生成 <data_dir>/config.json。"""
+    """交互式初始化：从 config.json.template 或 ``--clone`` 实例生成 <data_dir>/config.json。
+
+    ``--clone <data_dir>``：以已存在实例的 config.json 作为**默认配置层**（替代模板，
+    仍深合并 DEFAULTS 兜底），逐项提示时直接回车即沿用其值，主动输入才覆盖。
+    同时继承该实例的 glossary 与 style_refs（`--prefs` 若给出则随后覆盖）。
+    """
     config_path = os.path.join(cfg.data_dir, "config.json")
     if os.path.exists(config_path) and not args.force:
         print(f"配置文件已存在：{config_path}")
         print("如需重新生成请加 --force（会覆盖现有配置）。")
         return
 
-    template_path = os.path.join(cfg.root, "config.json.template")
-    if os.path.exists(template_path):
-        with open(template_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+    clone = getattr(args, "clone", None)
+    clone_dir = _resolve_clone_dir(cfg.root, clone) if clone else None
+
+    if clone_dir:
+        clone_cfg_path = os.path.join(clone_dir, "config.json")
+        if not os.path.exists(clone_cfg_path):
+            print(f"⚠ --clone 实例缺少 config.json：{clone_cfg_path}（回退到模板默认值）")
+            clone_dir = None
+
+    if clone_dir:
+        # 以 clone 实例的完整配置作为默认层（深合并到 DEFAULTS 之上兜底）
+        with open(os.path.join(clone_dir, "config.json"), "r", encoding="utf-8") as f:
+            clone_data = json.load(f)
+        data = json.loads(json.dumps(DEFAULTS))
+        Config._deep_merge(data, clone_data)
     else:
-        data = json.loads(json.dumps(cfg.data))
+        template_path = os.path.join(cfg.root, "config.json.template")
+        if os.path.exists(template_path):
+            with open(template_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            data = json.loads(json.dumps(cfg.data))
 
     print("== booktr 初始化 ==")
     print("(直接回车使用默认值；配置将写入 data_dir/config.json)")
     print(f"数据根目录（data_dir）: {cfg.data_dir}")
+    if clone_dir:
+        print(f"默认配置层: --clone {clone_dir}")
     print("站点源目录可填相对路径（相对数据根）或完整绝对路径（如源镜像在 src 之外）。")
-    data["source_dir"] = _prompt("站点源目录", str(data.get("source_dir", "love.life.coocan.jp")))
+    # C：仅 source_dir 相对路径按新数据根重算（指向同一站点）；output/work 保持相对实例本地。
+    src_default = str(data.get("source_dir", "love.life.coocan.jp"))
+    if clone_dir and not os.path.isabs(src_default):
+        try:
+            abs_site = os.path.normpath(os.path.join(clone_dir, src_default))
+            src_default = os.path.relpath(abs_site, cfg.data_dir).replace(os.sep, "/")
+        except ValueError:
+            pass  # 跨盘符等无法计算相对路径时，保留原值
+    data["source_dir"] = _prompt("站点源目录", src_default)
     data["output_dir"] = _prompt("输出镜像目录", str(data.get("output_dir", "out")))
     data["work_dir"] = _prompt("工作目录", str(data.get("work_dir", "work")))
     data.setdefault("lang", {})
@@ -172,7 +210,13 @@ def cmd_init(cfg: Config, args) -> None:
     if llm["provider"] == "openai-compatible":
         llm["base_url"] = _prompt("base_url", str(llm.get("base_url", "https://api.openai.com/v1")))
         llm["model"] = _prompt("model", str(llm.get("model", "gpt-4o-mini")))
-        raw_key = _prompt("API key（留空则无需 key；否则直接写入 config）", "").strip()
+        existing_key = str(llm.get("api_key") or "")
+        hint = "（回车保留现有 key；输入 '-' 清空）" if existing_key else "（留空则无需 key；否则直接写入 config）"
+        raw_key = input(f"API key{hint}: ").strip()
+        if not raw_key:
+            raw_key = existing_key  # 回车保留（--clone 时可继承）
+        elif raw_key == "-":
+            raw_key = ""
         llm["api_key"] = raw_key
         llm["api_key_required"] = bool(raw_key)
 
@@ -197,8 +241,22 @@ def cmd_init(cfg: Config, args) -> None:
             json.dump([], f, ensure_ascii=False, indent=2)
         print(f"已创建空的风格样例文件 {style_refs}")
 
-    # 偏好导入（显式 --prefs）：glossary / style_refs 落盘
-    # （user_rules 已在前面与风格合并写入 data，此处不再覆盖）
+    # --clone：继承该实例的 glossary 与 style_refs（后续 --prefs 会覆盖）
+    if clone_dir:
+        from . import glossary as gl_mod
+        with open(os.path.join(clone_dir, "config.json"), "r", encoding="utf-8") as f:
+            clone_inst_data = json.load(f)
+        clone_cfg = Config(root=cfg.root, data=clone_inst_data, data_dir=clone_dir)
+        clone_gl = gl_mod.load(clone_cfg)
+        if clone_gl:
+            gl_mod.save(cfg, clone_gl)
+        clone_refs_path = clone_cfg.get("style", "refs_path", default="style_refs.json")
+        clone_refs = util.read_json(clone_refs_path, [])
+        if clone_refs:
+            util.write_json(cfg.get("style", "refs_path", default="style_refs.json"), clone_refs)
+        print(f"已继承 --clone 实例数据: glossary {len(clone_gl)} 条 / style_refs {len(clone_refs)} 条")
+
+    # 偏好导入（显式 --prefs）：glossary / style_refs 落盘（覆盖 --clone 继承）
     if prefs_data is not None:
         summary = prefs_mod.apply_data_files(cfg, prefs_data)
         print(f"已导入偏好: {args.prefs}")
@@ -854,7 +912,7 @@ def cmd_qa(cfg: Config, args) -> None:
     os.makedirs(report_dir, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
     out_path = os.path.join(report_dir, f"qa_{ts}.json")
-    report = qa.qa_report(cfg, client, targets, out=out_path)
+    report = qa.qa_report(cfg, client, targets, out=out_path, ts=ts, scope=scope)
 
     print(f"QA 报告: 总问题 {report['total_issues']}（未定位 {report.get('unresolved', 0)}），"
           f"高危 {report['high']}，见 {out_path}")
@@ -939,6 +997,60 @@ def cmd_qa_apply(cfg: Config, args) -> None:
     state.save()
     qa_queue_mod.save(cfg, queue)
     print(f"\n完成: {ok}/{len(grouped)} 段已修正；涉及 {len(pages_done)} 页已重生成。")
+
+
+def cmd_qa_status(cfg: Config, args) -> None:
+    """聚合各页最近一次 QA 状态（只读；扫描 qa_reports/*.json）。"""
+    from . import qa_queue as qa_queue_mod
+
+    latest = qa.collect_page_status(cfg)
+    plan = util.read_json(os.path.join(cfg.work_dir, "plan.json"), {})
+    order = plan.get("order", [])
+    if not order:
+        # 无 plan 时退回所有已译页
+        state = tr.State(cfg)
+        order = [rel for rel, p in state.data.get("pages", {}).items()
+                 if p.get("status") in (tr.STATUS["done"], tr.STATUS["review"])]
+
+    # 队列 open 条数（按页）
+    queue = qa_queue_mod.load(cfg)
+    open_by_page: dict[str, int] = {}
+    for it in queue:
+        if it.get("status") == qa_queue_mod.STATUS_OPEN:
+            open_by_page[it.get("page", "")] = open_by_page.get(it.get("page", ""), 0) + 1
+
+    checked = [rel for rel in order if rel in latest]
+    unchecked = [rel for rel in order if rel not in latest]
+    print(f"QA 覆盖 {len(checked)}/{len(order)}（未 QA {len(unchecked)}）")
+
+    def _row(rel):
+        info = latest.get(rel)
+        n_open = open_by_page.get(rel, 0)
+        if info is None:
+            return f"  {rel:36} 未QA" + (f"  open {n_open}" if n_open else "")
+        ts = str(info.get("ts", "")) or "-"
+        tot = info.get("total", "?")
+        hi = info.get("high", "?")
+        open_s = f"  open {n_open}" if n_open else ""
+        return (f"  {rel:36} {ts:16} 问题 {tot}(high {hi}){open_s}")
+
+    only_pending = getattr(args, "pending_only", False)
+    only_issues = getattr(args, "issues", False)
+
+    if only_pending:
+        rows = unchecked
+    elif only_issues:
+        rows = [rel for rel in order
+                if (latest.get(rel, {}).get("total", 0) or open_by_page.get(rel, 0))]
+    else:
+        rows = list(order)
+
+    for rel in rows:
+        print(_row(rel))
+
+    if not only_pending and not only_issues:
+        print(f"\n已 QA {len(checked)} 页；未 QA {len(unchecked)} 页；"
+              f"有未决(open)条目的页 {len(open_by_page)} 个。")
 
 
 def cmd_annotate(cfg: Config, args) -> None:
@@ -1800,6 +1912,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = mk("init", help="交互式初始化配置（从模板生成 data/config.json）")
     sp.add_argument("--force", action="store_true", help="覆盖现有配置")
     sp.add_argument("--prefs", default=None, help="初始化时导入偏好文件（user_rules/glossary/style_refs）")
+    sp.add_argument("--clone", default=None,
+                    help="以已存在实例（其 config.json）作为默认配置层：--clone <data_dir>；"
+                         "回车沿用、输入才覆盖，并继承其 glossary/style_refs")
     sp.set_defaults(func=cmd_init)
 
     sp = mk("scan", help="扫描站点镜像")
@@ -1894,6 +2009,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--page", default=None, help="限定页面")
     sp.add_argument("--dry-run", action="store_true", help="仅列出将修正的段")
     sp.set_defaults(func=cmd_qa_apply)
+
+    sp = mk("qa-status", help="聚合各页最近一次 QA 状态（只读）")
+    sp.add_argument("--pending-only", action="store_true", help="只列未 QA 的页")
+    sp.add_argument("--issues", action="store_true", help="只列有问题或未决条目的页")
+    sp.set_defaults(func=cmd_qa_status)
 
     sp = mk("annotate", help="生成译者注")
     sp.add_argument("--pages", nargs="*", help="限定页面")

@@ -109,6 +109,8 @@ python booktr-cli.py qa-review                 # 逐条检阅 QA 意见（含原
 python booktr-cli.py qa-apply                  # 对已采纳意见批量定点重译
 python booktr-cli.py qa-apply --page index.html
 python booktr-cli.py qa-apply --dry-run        # 仅列出将修正的段
+python booktr-cli.py qa-status                 # 聚合各页最近一次 QA 状态（已/未 QA、时间、问题数、open 条数）
+python booktr-cli.py qa-status --pending-only  # 只列未 QA 的页
 
 # 11) 生成译者注
 python booktr-cli.py annotate
@@ -214,6 +216,23 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 - 重建翻译实例时，先 `init --prefs <file>`，再 `scan → plan → translate`，即可恢复全部个人偏好。
 - **与翻译风格的关系**：`init` 会**先采用偏好中的 `user_rules`（若有），再追加所选翻译风格块**；风格块带幂等去重（同一风格不会重复追加）。选「标准」表示不改动（保留偏好原样的 `user_rules`）。`export-prefs` 导出的是完整 `user_rules`（含已追加的风格块）。
 
+### 基于已有实例初始化（`init --clone`）
+
+`init --clone <data_dir>` 以**另一个已存在实例的 `config.json` 作为默认配置层**（替代模板，仍深合并内置默认兜底），从而快速克隆一个配置相同的实例：
+
+- 逐项提示的默认值来自该实例，**直接回车沿用、主动输入才覆盖**（仍是完整交互式，可改任意项）。
+- **自动继承**该实例的 `glossary` 与 `style_refs`；若同时给 `--prefs`，偏好文件在其后写入并**覆盖**继承数据。
+- **`source_dir` 相对路径按新数据根重算**，始终指向同一站点（同深度复制则保持原样；不同深度自动调整）；`output_dir`/`work_dir` 保持相对（新实例自有的 out/work，从零开始）。
+- API key 会一并复制；提示中**回车保留、输入 `-` 清空**。
+- 典型用法（同配置、仅风格改为上海话）：
+
+  ```bash
+  python booktr-cli.py --data-dir ../instance/data-deepseek-v4.1-flash-sh \
+      init --clone ../instance/data-deepseek-v4.1-flash   # 交互中选「上海话」
+  ```
+
+- 优先级：**内置默认 < `--clone` 配置 < `--prefs` < 交互输入**。
+
 ## 核心机制
 
 - **逐段拼接**：在原始解码文本上定位每个可翻译文字段的字符偏移，翻译后原位拼回。除被替换的文字外，标签、注释、`tppabs` 属性、空白等字节完全不变，保证"完全相同样式"。段索引（`work/segments/*.json`）记录 `页面/段ID/源偏移/译文/引文`，为译者注与未来的浏览器插件提供锚点。
@@ -285,7 +304,11 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 
 运行过程**逐页打印进度**（`[i/N] 页面  问题数 (耗时)`）；深度检查单页 LLM 调用失败会打印 `⚠ ... LLM 深度检查失败（已跳过）` 而非静默。报告写入带时间戳的 `work/qa_reports/qa_<YYYYmmdd_HHMMSS>.json`（**每次运行都留存，不覆盖**），同时刷新稳定别名 `work/qa_report.json`；均为**逐页增量写入**。问题写入**专用队列** `work/qa_queue.json`（按 id 去重，**不再写入 `review_queue.json`**）。
 
-**无状态、按区间推进**：QA 不记录"已检查到哪"，`--start/--count` 按 `plan.order`（站点固定顺序，不受重译影响）取区间。因此分批检查即 `--start 1 --count 10` → `--start 11 --count 10` …；重译后想重查某页用 `--pages` 强制指定。
+**报告结构（version 2）**：除 `pages`（**仅有问题的页** → issue 列表，向后兼容）外，新增 `checked`——**每个被检查的页**（含 0 问题）→ `{ts,total,high,mid,low,unresolved,deep,duration_s}`；另有 `ts/scope/total_pages_checked` 本次运行元信息。因此**每页是否 QA 过、最近一次时间与结果均可聚合查询**（`qa-status`；旧版报告无 `checked`，仅能从 `pages` 推断有问题的页）。
+
+`qa-status`（只读）扫描 `work/qa_reports/*.json` 聚合各页**最近一次** QA 状态，对照 `plan.order` 列出已/未 QA、每页时间与问题数、以及 `open` 队列条数；`--pending-only` 只列未 QA 页，`--issues` 只列有问题或未决条目的页。
+
+**无状态、按区间推进**：QA 自身不维护"已检查到哪"的游标，`--start/--count` 按 `plan.order`（站点固定顺序，不受重译影响）取区间。因此分批检查即 `--start 1 --count 10` → `--start 11 --count 10` …；重译后想重查某页用 `--pages` 强制指定。**查询每页 QA 状态**用 `qa-status`（从报告 `checked` 聚合，见上）。
 
 ### QA 裁定与应用（`qa-review` / `qa-apply`）
 
@@ -323,7 +346,7 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 | `work/state.json` | 检查点 |
 | `work/review_queue.json` | 待人工审核项 |
 | `work/qa_report.json` | QA 报告（最新一次的别名） |
-| `work/qa_reports/qa_<时间戳>.json` | QA 报告归档（每次运行留存） |
+| `work/qa_reports/qa_<时间戳>.json` | QA 报告归档（每次运行留存；含 `checked` 每页状态，供 `qa-status` 聚合） |
 | `work/qa_queue.json` | QA 问题队列（裁定/应用状态） |
 | `work/llm_logs/*.json` | LLM 调用日志（含完整对话历史、task_id、context_id） |
 | `work/logs/*.md` | 导出的 Markdown 对话日志（自动或手动导出） |

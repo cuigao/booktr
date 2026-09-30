@@ -123,20 +123,98 @@ def test_cmd_init_without_prefs(tmp_cfg, tmp_path, monkeypatch):
     assert not (data_dir / "work" / "glossary.json").exists()
 
 
-def _run_init(tmp_path, monkeypatch, answers, prefs_path):
+def _run_init(tmp_path, monkeypatch, answers, prefs_path, clone=None):
     from booktr import pipeline
     from booktr.config import Config, find_project_root
-    data_dir = tmp_path / ("inst_" + str(abs(hash(str(answers) + str(prefs_path)))))
+    data_dir = tmp_path / ("inst_" + str(abs(hash(str(answers) + str(prefs_path) + str(clone)))))
     cfg = Config(root=find_project_root(), data={}, data_dir=str(data_dir))
     it = iter(answers + [""] * 40)
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(it, ""))
 
+    clone_val = str(clone) if clone else None
+
     class Args:
         force = False
         prefs = str(prefs_path) if prefs_path else None
+        clone = clone_val
 
     pipeline.cmd_init(cfg, Args())
     return json.loads((data_dir / "config.json").read_text(encoding="utf-8"))
+
+
+def _make_clone_source(root, monkeypatch):
+    """构造一个 --clone 源实例（完整 config + glossary + style_refs）。"""
+    clone = root / "cloneinst"
+    (clone / "work").mkdir(parents=True, exist_ok=True)
+    cfg = {
+        "source_dir": "../../love.life.coocan.jp",
+        "output_dir": "out", "work_dir": "work",
+        "lang": {"source": "ja", "target": "zh-Hans"},
+        "llm": {"provider": "openai-compatible",
+                "base_url": "https://ollama.com/v1",
+                "model": "deepseek-v4.1-flash:cloud",
+                "api_key": "SECRET", "api_key_required": True},
+        "user_rules": "基础规则CLONE",
+        "qa": {"deep_llm_check": True},
+        "glossary": {"path": "work/glossary.json"},
+    }
+    (clone / "config.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    (clone / "work" / "glossary.json").write_text(json.dumps(
+        [{"src": "Z", "dst": "Zed", "category": "term", "status": "confirmed"}],
+        ensure_ascii=False), encoding="utf-8")
+    (clone / "style_refs.json").write_text(json.dumps([{"src": "s", "dst": "S"}]),
+                                           encoding="utf-8")
+    return clone
+
+
+def test_init_clone_inherits_config_and_data(tmp_path, monkeypatch):
+    """--clone：配置作为默认层（model/lang/路径）、继承 glossary/style_refs、复制 api_key。"""
+    clone = _make_clone_source(tmp_path, monkeypatch)
+    # 源目录/输出/工作/源语言/目标语言/风格(2=上海话)/provider(回车=openai-compatible)
+    # base_url/model 回车 + API key 回车（保留）、N1..N3、其余开关回车
+    answers = ["", "", "", "", "", "2", "", "", "", "", "", "", "", "", "", ""]
+    saved = _run_init(tmp_path, monkeypatch, answers, None, clone=clone)
+    # 继承自 clone
+    assert saved["llm"]["model"] == "deepseek-v4.1-flash:cloud"
+    assert saved["llm"]["base_url"] == "https://ollama.com/v1"
+    assert saved["llm"]["api_key"] == "SECRET"  # 回车保留
+    assert saved["lang"]["target"] == "zh-Hans"
+    assert saved["qa"]["deep_llm_check"] is True
+    # user_rules = clone 基础 + 上海话块
+    assert "基础规则CLONE" in saved["user_rules"]
+    assert saved["user_rules"].count("## 翻译风格：上海话") == 1
+    # glossary 继承
+    inst = clone.parent / ("inst_" + str(abs(hash(str(answers) + str(None) + str(clone)))))
+    gls = json.loads((inst / "work" / "glossary.json").read_text(encoding="utf-8"))
+    assert any(it["src"] == "Z" for it in gls)
+
+
+def test_init_clone_source_dir_recomputed(tmp_path, monkeypatch):
+    """--clone：仅 source_dir 按新数据根重算（同深度=不变），output/work 保持。"""
+    clone = _make_clone_source(tmp_path, monkeypatch)
+    answers = ["", "", "", "", "", "1", "", "", "", "", "", "", "", "", "", ""]
+    saved = _run_init(tmp_path, monkeypatch, answers, None, clone=clone)
+    # tmp_path 下 clone 与 inst_* 同深度 → 相对路径不变
+    assert saved["source_dir"] == "../../love.life.coocan.jp"
+    assert saved["output_dir"] == "out"
+    assert saved["work_dir"] == "work"
+
+
+def test_init_clone_with_prefs_overrides_glossary(tmp_path, monkeypatch):
+    """--clone + --prefs：prefs 覆盖继承的 glossary。"""
+    clone = _make_clone_source(tmp_path, monkeypatch)
+    pref = tmp_path / "ov.json"
+    pref.write_text(json.dumps({
+        "version": 1, "user_rules": "覆盖规则",
+        "glossary": [{"src": "P", "dst": "Pee", "category": "term", "status": "confirmed"}],
+        "style_refs": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    answers = ["", "", "", "", "", "1", "", "", "", "", "", "", "", "", "", ""]
+    saved = _run_init(tmp_path, monkeypatch, answers, pref, clone=clone)
+    assert saved["user_rules"] == "覆盖规则"  # prefs 的 rules 作为风格基础
+    inst = clone.parent / ("inst_" + str(abs(hash(str(answers) + str(pref) + str(clone)))))
+    gls = json.loads((inst / "work" / "glossary.json").read_text(encoding="utf-8"))
+    assert [it["src"] for it in gls] == ["P"]  # 已被 prefs 覆盖，不含 clone 的 Z
 
 
 def test_init_prefs_then_style_appends(tmp_path, monkeypatch):
