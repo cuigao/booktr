@@ -93,6 +93,25 @@ def build_translate_system(
     return "\n\n".join(parts)
 
 
+def term_lines(items: list[dict]) -> list[str]:
+    """将词汇表/短语记忆条目渲染为统一的行列表（翻译与 QA 共用）。
+
+    每条为 `- src → dst`；有 note 时追加 `  └ 使用场景：note` 子行。
+    翻译（`format_term_hints`）与 QA（`build_qa_user`）复用同一模式。
+    """
+    lines: list[str] = []
+    for it in items:
+        src = it.get("src", "")
+        dst = it.get("dst", "")
+        if not src or not dst:
+            continue
+        lines.append(f"- {src} → {dst}")
+        note = it.get("note", "")
+        if note:
+            lines.append(f"  └ 使用场景：{note}")
+    return lines
+
+
 def format_term_hints(items: list[dict]) -> str:
     """将词汇表/短语记忆条目格式化为 user prompt 中的推荐译法。
 
@@ -105,15 +124,7 @@ def format_term_hints(items: list[dict]) -> str:
         "## 推荐翻译译文（供参考，请结合上下文采用合适的译法）",
         "未注明使用场景的条目为通用短语/术语译法，请按原文语境酌情采用。",
     ]
-    for it in items:
-        src = it.get("src", "")
-        dst = it.get("dst", "")
-        if not src or not dst:
-            continue
-        lines.append(f"- {src} → {dst}")
-        note = it.get("note", "")
-        if note:
-            lines.append(f"  └ 使用场景：{note}")
+    lines.extend(term_lines(items))
     return "\n".join(lines)
 
 
@@ -300,7 +311,8 @@ def build_qa_system(cfg) -> str:
 
 
 def build_qa_user(src_text: str, dst_text: str, glossary: list[dict]) -> str:
-    gl = "\n".join(f"- {g['src']} → {g['dst']}" for g in glossary) or "(空)"
+    lines = term_lines(glossary)
+    gl = "\n".join(lines) or "(空)"
     return (
         f"## 词汇表\n{gl}\n"
         f"## 原文\n|TEXT|\n{src_text}\n\n"

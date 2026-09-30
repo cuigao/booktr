@@ -303,3 +303,26 @@ def test_qa_prompt_only_lists_actionable():
     assert "low" in s
     assert "合并为一条" in s
     assert "high" in s
+
+
+def test_qa_user_includes_glossary_note():
+    """QA 词汇表与翻译词汇表模式相同：含 note 时渲染 '└ 使用场景：' 子行。"""
+    from booktr import prompts
+    gl = [{"src": "HOME", "dst": "首页", "note": "导航入口"},
+          {"src": "X", "dst": "Y"}]
+    out = prompts.build_qa_user("原文", "译文", gl)
+    gl_section = out.split("## 原文")[0]
+    assert "- HOME → 首页" in gl_section
+    assert "└ 使用场景：导航入口" in gl_section
+    # 无 note 的条目不产生使用场景行
+    assert "- X → Y" in gl_section
+    assert gl_section.count("└ 使用场景：") == 1
+
+
+def test_term_lines_shared_by_translate_and_qa():
+    """term_lines 为翻译与 QA 共用的渲染函数。"""
+    from booktr import prompts
+    items = [{"src": "A", "dst": "B", "note": "n"}]
+    assert prompts.term_lines(items) == ["- A → B", "  └ 使用场景：n"]
+    hints = prompts.format_term_hints(items)
+    assert "└ 使用场景：n" in hints
