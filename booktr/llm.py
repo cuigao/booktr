@@ -47,9 +47,19 @@ _ARRAY_KNOWN_KEYS = (
 
 
 class LLMClient:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, llm_override: dict | None = None):
+        """llm_override：覆盖 llm 配置（如 qa.supervisor），仅替换给定键。
+
+        非 None 的覆盖值优先；``api_key_required`` 为 None 时表示沿用主配置。
+        """
         self.cfg = cfg
-        llm = cfg.get("llm", default={})
+        llm = dict(cfg.get("llm", default={}))
+        if llm_override:
+            over = {k: v for k, v in llm_override.items() if v is not None}
+            # 空字符串视为"未设置"，继承主配置（api_key 例外：允许显式清空）
+            over = {k: v for k, v in over.items()
+                    if v != "" or k == "api_key"}
+            llm.update(over)
         self.provider = llm.get("provider", "mock")
         self.base_url = llm.get("base_url", "https://api.openai.com/v1").rstrip("/")
         self.model = llm.get("model", "gpt-4o-mini")
@@ -71,11 +81,14 @@ class LLMClient:
 
     # ------------------------------------------------------------------
     def chat(self, system: str, user: str, temperature: float | None = None,
-             tag: str = "chat", reasoning_effort: str | None = None) -> str:
+             tag: str = "chat", reasoning_effort: str | None = None,
+             on_delta=None) -> str:
         """单轮对话，返回文本。每次调用（含 mock）都完整记录到 llm_logs。
 
         reasoning_effort：推理模型思考等级（OpenAI 规范字段，如 "none"/"low"/
-        "high"）；空则请求体不含该字段。"""
+        "high"）；空则请求体不含该字段。
+        on_delta(kind, text)：流式实时回调（kind ∈ {"content","reasoning"}），
+        用于诊断（区分"服务停滞"与"网络切断"）。"""
         t0 = time.monotonic()
         if self.provider == "mock":
             resp = self._mock(system, user)
@@ -91,7 +104,8 @@ class LLMClient:
             raise LLMError(err)
         try:
             resp, usage, reasoning = self._openai_chat(system, user, temperature,
-                                                       reasoning_effort=reasoning_effort)
+                                                       reasoning_effort=reasoning_effort,
+                                                       on_delta=on_delta)
         except LLMError as e:
             self._log(tag, system, user, "", ok=False, error=str(e),
                       reasoning=getattr(e, "reasoning", ""),
@@ -106,10 +120,12 @@ class LLMClient:
     # ------------------------------------------------------------------
     def chat_multi(self, messages: list[dict], temperature: float | None = None,
                    tag: str = "chat_multi", task_id: str = "",
-                   context_id: str = "", reasoning_effort: str | None = None) -> str:
+                   context_id: str = "", reasoning_effort: str | None = None,
+                   on_delta=None) -> str:
         """多轮对话，messages = [{"role": "system"|"user"|"assistant", "content": ...}]。
 
         返回最后一条 assistant 消息的文本。完整记录到 llm_logs。
+        on_delta(kind, text)：流式实时回调（见 chat）。
         """
         t0 = time.monotonic()
         system = ""
@@ -139,7 +155,8 @@ class LLMClient:
             raise LLMError(err)
         try:
             resp, usage, reasoning = self._openai_chat_multi(messages, temperature,
-                                                             reasoning_effort=reasoning_effort)
+                                                             reasoning_effort=reasoning_effort,
+                                                             on_delta=on_delta)
         except LLMError as e:
             self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
                       "", ok=False, error=str(e),
@@ -157,7 +174,8 @@ class LLMClient:
 
     def _openai_chat_multi(self, messages: list[dict],
                            temperature: float | None,
-                           reasoning_effort: str | None = None) -> tuple[str, dict, str]:
+                           reasoning_effort: str | None = None,
+                           on_delta=None) -> tuple[str, dict, str]:
         """多轮对话底层调用。返回 (content, usage, reasoning)。"""
         body = {
             "model": self.model,
@@ -168,11 +186,12 @@ class LLMClient:
             body["max_tokens"] = self.max_tokens
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
-        return self._request(body, "multi")
+        return self._request(body, "multi", on_delta=on_delta)
 
     # ------------------------------------------------------------------
     def _openai_chat(self, system: str, user: str, temperature: float | None,
-                     reasoning_effort: str | None = None) -> tuple[str, dict, str]:
+                     reasoning_effort: str | None = None,
+                     on_delta=None) -> tuple[str, dict, str]:
         """单轮对话底层调用。返回 (content, usage, reasoning)。"""
         body = {
             "model": self.model,
@@ -186,9 +205,9 @@ class LLMClient:
             body["max_tokens"] = self.max_tokens
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
-        return self._request(body, "single")
+        return self._request(body, "single", on_delta=on_delta)
 
-    def _request(self, base_body: dict, kind: str) -> tuple[str, dict, str]:
+    def _request(self, base_body: dict, kind: str, on_delta=None) -> tuple[str, dict, str]:
         """统一请求入口：流式（默认）或非流式；带网络重试与"思考占满预算"翻倍重试。
 
         返回 (content, usage, reasoning)。
@@ -208,7 +227,8 @@ class LLMClient:
             body = dict(base_body)
             try:
                 if self.stream:
-                    content, reasoning, usage, finish = self._post_stream(url, headers, body)
+                    content, reasoning, usage, finish = self._post_stream(
+                        url, headers, body, on_delta=on_delta)
                 else:
                     content, reasoning, usage, finish = self._post_once(url, headers, body)
             except (requests.RequestException, ValueError, LLMError) as e:

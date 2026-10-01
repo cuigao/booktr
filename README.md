@@ -112,6 +112,13 @@ python booktr-cli.py qa-apply --dry-run        # 仅列出将修正的段
 python booktr-cli.py qa-status                 # 聚合各页最近一次 QA 状态（已/未 QA、时间、问题数、open 条数）
 python booktr-cli.py qa-status --pending-only  # 只列未 QA 的页
 
+# 10b-2) 监督式自动 QA（qa → 判官裁定 → 自动定点重译，全自动闭环）
+python booktr-cli.py qa-auto --pages today/today14.html   # 指定页全自动
+python booktr-cli.py qa-auto --start 14 --count 5         # 按 plan.order 分批
+python booktr-cli.py qa-auto --adjudicate-only            # 跳过 QA，仅裁定队列中 open 条目
+python booktr-cli.py qa-auto --no-apply                   # 只写裁决、不自动重译
+python booktr-cli.py qa-auto --dry-run                    # 跑 QA+裁定但只打印，不写不改
+
 # 10c) 段落定位（按原文/译文片段定位段号）
 python booktr-cli.py locate --page today/today90.html --src "私も無理せず"   # 从页面复制的片段
 python booktr-cli.py locate --page today/today90.html --dst "努力起床" --all  # --all 纳入未译段
@@ -307,6 +314,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 | 段落定位 | 按原文/译文片段在页面内定位段号（精确→去占位符→跨行→模糊 Dice）；`qa` 与 `rollback` 共用 | `locate` |
 | 段落回滚 | 段颗粒度版本管理：提交即版本、非线性 pick 恢复、`--op` 整命令撤销、`--dry-run` 预览、`--purge` 管理 | `rollback` |
 | 短语记忆清理 | 覆盖路径（reset/review `[d]`/qa-apply/rollback）按 `源文 ∩ 旧译文 ∖ 新译文` 对称清理短语；qa-apply 清后按同条件回写新短语（与 TM 对齐）；不纳入版本快照 | 自动 |
+| 监督式自动 QA | `qa-auto`：逐页 `qa → 监督判官逐条裁定（采纳/拒绝/跳过）→ 对采纳项自动定点重译` 的全自动闭环；判官可独立配置模型，以全站摘要+当前页全文+词汇表+风格规则为语境 | `qa.supervisor` |
 | Session ID | 页面翻译任务标识（task_id）+ 多轮对话标识（context_id） | 自动生成，写入 LLM 日志 |
 
 优先级：**词汇表 > 风格样例 > 风格规则**。
@@ -341,6 +349,18 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 配置（`qa`）：`deep_llm_check`、`queue_path`（默认 `work/qa_queue.json`）、`report_dir`（默认 `work/qa_reports`）、`reasoning_effort`（默认空=继承 `llm.reasoning_effort`）。**思考等级**：所有 LLM 调用默认**流式**（`llm.stream`），长思考不再误判超时；QA 可经 `qa.reasoning_effort` 单独覆盖思考等级（如设 `none` 关闭思考以加速，`high` 提升审查深度）。`reasoning` 内容完整记录在 `work/llm_logs/*.json`（`reasoning`/`reasoning_len`）；**失败调用**（如正文被 reasoning 截空、流式中断）也会尽量记录已累加的 `reasoning`/`reasoning_len` 与 `finish_reason`，便于事后诊断模型"纠结"的内容。
 
 > `[e]自定义意见` 已实现"覆盖意见并采纳"（`interactive_qa_plan.md` L1 的最小落地）。但 `qa-review` 仍无法**部分采纳/拆分**意见、原文划线提意见或人工直改译文，且无撤销手段。更完整的**交互式 QA 审查**设计（含上述能力与数据模型演进）见工作区文档 `instance/report/interactive_qa_plan.md`。
+
+### 监督式自动 QA（`qa-auto`）
+
+面向"想要接近人工 QA 的效果、却无力承担人工精校成本（甚至不懂日文）"的场景，`qa-auto` 逐页自动完成 **`qa → 判官裁定 → 对采纳项定点重译`** 闭环（默认全自动；`--no-apply`/`--dry-run` 可选退出）。判官是一个**独立 LLM**，以**重语境**逐条裁定 QA 问题：
+
+- **system 语境**（每轮随请求重发）：当前页上下文 + **全站页面摘要**（`include_all_summaries`，总量上限 `all_summaries_max_chars` 默认 65536）+ 词汇表（含 note）+ 风格规则 + 用户规则 + **当前页完整原文/译文**。
+- **多轮逐条**：第 1 条 user 列出全部 QA 问题并要求"先只裁决第 1 条"，其后每条一轮（`multi_turn`）。历次裁决 JSON 累积在对话历史中，为同页一致性提供锚点，避免一次性多判决的漂移。
+- **裁定** `adopt`（采纳，默认沿用 QA 原 `suggestion`；判官若给出更优版本则替换并归档到 `llm_suggestion`，标记 `source=supervisor`）/ `reject`（拒绝）/ `skip`（信息不足或未定位，保持 open 自动跳过）。
+- **容错**：单条 LLM 调用失败（网络抖动等）记 skip 并继续，不中断整页；判官响应允许值字符串内未转义引号（自动修复）。
+- **闭环**：采纳项按 `(页, 段)` 分组复用 `qa-apply` 的 `apply_qa_fix` 定点重译（同步清理旧 TM/notes/短语、重生成 out、提交段历史版本）。**判官 HTML 安全防线**：问题涉及标签/占位符时要求核对**源文本本身**，避免把 QA 幻觉（如源文即含的字面 `<`+`!` 文本）写成标签。
+
+配置（`qa.supervisor`）：`enabled`（默认 true）、`provider`/`base_url`/`model`/`api_key_env`/`api_key`/`api_key_required`（**空值继承主 `llm`**）、`temperature`（默认 0.1）、`max_tokens`、`timeout`（默认 120，短超时快速暴露抖动）、`max_retries`（默认 1）、`reasoning_effort`、`include_all_summaries`、`all_summaries_max_chars`、`multi_turn`。设计依据与实测评估见工作区报告 `instance/report/qa_auto_probe_report.md`。
 
 ## LLM 接入
 

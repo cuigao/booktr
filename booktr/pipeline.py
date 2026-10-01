@@ -13,12 +13,39 @@ from . import annotator, crawler, glossary as gl, llm as llm_mod
 from . import history as hist_mod, locate as locate_mod
 from . import planner, prefs as prefs_mod, prompts, qa, residual as residual_mod
 from . import review as review_mod, segments as seg_mod
-from . import styles as styles_mod, translate as tr, util
+from . import styles as styles_mod, supervisor as sup_mod, translate as tr, util
 from .config import DEFAULTS, Config, ensure_dirs, load_config, save_config
 
 
 def _client(cfg: Config):
     return llm_mod.LLMClient(cfg)
+
+
+def _supervisor_client(cfg: Config):
+    """判官专用 client：以 qa.supervisor 覆盖主 llm（空字段继承）。"""
+    override = cfg.get("qa", "supervisor", default={}) or {}
+    return llm_mod.LLMClient(cfg, llm_override=override)
+
+
+def _page_scope(cfg: Config, args) -> list[str]:
+    """解析目标页集合：--pages | --start/--count（按 plan.order）| 全部已译页。
+
+    与 cmd_qa 同口径。返回已译页列表（未译页被过滤）。
+    """
+    state = tr.State(cfg)
+    done_set = set(state.data.get("done_pages", []))
+    start = getattr(args, "start", None)
+    count = getattr(args, "count", None)
+    if getattr(args, "pages", None):
+        return [p for p in args.pages if p in done_set] or list(args.pages)
+    if start is not None or count is not None:
+        plan = util.read_json(os.path.join(cfg.work_dir, "plan.json"), {})
+        order = plan.get("order", [])
+        s = start if start is not None else 1
+        n = count if count is not None else 1
+        window = order[s - 1: s - 1 + n] if n > 0 else order[s - 1:]
+        return [p for p in window if p in done_set]
+    return list(state.data.get("done_pages", []))
 
 
 def cmd_scan(cfg: Config, args) -> None:
@@ -1129,6 +1156,129 @@ def cmd_qa_status(cfg: Config, args) -> None:
     if not only_pending and not only_issues:
         print(f"\n已 QA {len(checked)} 页；未 QA {len(unchecked)} 页；"
               f"有未决(open)条目的页 {len(open_by_page)} 个。")
+
+
+def cmd_qa_auto(cfg: Config, args) -> None:
+    """监督式自动 QA 闭环：qa → 判官裁定 → 对采纳项定点重译。
+
+    默认全自动（除非 --no-apply / --dry-run）。逐页：run_qa → 存档报告 →
+    并入 QA 队列 → 取该页 open 且已定位条目交监督判官逐条裁定 → 闭环时按
+    (页, 段) 分组应用 apply_qa_fix。
+    """
+    from . import qa_queue as qa_queue_mod
+
+    if not cfg.get("qa", "supervisor", "enabled", default=True):
+        print("qa.supervisor.enabled=false，监督判官未启用（如需请在 config 开启）。",
+              file=sys.stderr)
+        return
+
+    client = _client(cfg)
+    sup = _supervisor_client(cfg)
+    state = tr.State(cfg)
+    sm = util.read_json(os.path.join(cfg.work_dir, "site_map.json"), {})
+    plan = util.read_json(os.path.join(cfg.work_dir, "plan.json"), {})
+
+    # 目标页
+    if args.adjudicate_only and not args.pages and args.start is None:
+        # 仅裁定：默认只处理队列中尚有 open 条目的页
+        queue0 = qa_queue_mod.load(cfg)
+        targets = sorted({it.get("page") for it in queue0
+                          if it.get("status") == qa_queue_mod.STATUS_OPEN
+                          and it.get("page")})
+        scope = "按现有 QA 队列裁定（跳过 QA）"
+    elif args.adjudicate_only:
+        targets = _page_scope(cfg, args)
+        scope = "按现有 QA 队列裁定（跳过 QA）"
+    else:
+        targets = _page_scope(cfg, args)
+        scope = "指定范围" if (args.pages or args.start is not None) else "全部已译页"
+    if not targets:
+        print("没有可处理的已译页。")
+        return
+    print(f"qa-auto：{scope}，共 {len(targets)} 页"
+          f"（apply={'否' if (args.no_apply or args.dry_run) else '是'}）", flush=True)
+
+    guide = styles_mod.load_guide(cfg) if cfg.get("style", "rules_enabled", default=True) else ""
+    focus = cfg.get("translators_notes", "focus", default="")
+
+    if not args.adjudicate_only:
+        report_dir = cfg.get("qa", "report_dir", default="work/qa_reports")
+        os.makedirs(report_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        out_path = os.path.join(report_dir, f"qa_{ts}.json")
+        report = qa.qa_report(cfg, client, targets, out=out_path, ts=ts, scope=scope)
+        # 并入 QA 队列（与 cmd_qa 同口径；按 id 去重，保留已有状态）
+        new_items = [qa_queue_mod.make_item(rel, i, {"ts": ts, "scope": scope})
+                     for rel, issues in report["pages"].items() for i in issues]
+        added = qa_queue_mod.append_items(cfg, new_items)
+        print(f"QA 报告: 问题 {report['total_issues']}，新增入队 {added} 条（{out_path}）",
+              flush=True)
+
+    queue = qa_queue_mod.load(cfg)
+    total = {"adopt": 0, "reject": 0, "skip": 0, "applied": 0, "pages": 0}
+    for pi, rel in enumerate(targets, 1):
+        # 取该页 open 且已定位的条目
+        items = [it for it in queue if it.get("page") == rel
+                 and it.get("status") == qa_queue_mod.STATUS_OPEN
+                 and it.get("resolved") and it.get("segments")]
+        if args.max_items and args.max_items > 0:
+            items = items[:args.max_items]
+        print(f"\n[{pi}/{len(targets)}] {rel}: {len(items)} 条待裁定", flush=True)
+        if not items:
+            continue
+        verdicts, _turns = sup_mod.adjudicate_page(cfg, sup, rel, items)
+        st = sup_mod.apply_verdicts(items, verdicts,
+                                    adopted_status=qa_queue_mod.STATUS_ADOPTED,
+                                    rejected_status=qa_queue_mod.STATUS_REJECTED)
+        for v, it in zip(verdicts, items):
+            print(f"    [{it.get('severity')}] 段{it.get('segments')} "
+                  f"{v.get('verdict'):6} | {(v.get('reason') or '')[:50]}", flush=True)
+        total["adopt"] += st["adopt"]
+        total["reject"] += st["reject"]
+        total["skip"] += st["skip"]
+        total["pages"] += 1
+        if not args.dry_run:
+            qa_queue_mod.save(cfg, queue)
+
+        # 闭环：apply 采纳项
+        if not args.no_apply and not args.dry_run:
+            applied = _apply_adopted(cfg, client, state, sm, plan, rel, items,
+                                     queue, qa_queue_mod, guide, focus)
+            total["applied"] += applied
+            if applied:
+                state.save()
+                qa_queue_mod.save(cfg, queue)
+                print(f"    → 已修正 {applied} 段", flush=True)
+
+    print(f"\nqa-auto 完成：裁定 采纳 {total['adopt']} / 拒绝 {total['reject']} / "
+          f"跳过 {total['skip']}；已应用 {total['applied']} 段；涉及 {total['pages']} 页。")
+
+
+def _apply_adopted(cfg, client, state, sm, plan, rel, items, queue,
+                   qa_queue_mod, guide, focus) -> int:
+    """对 status=adopted 的条目按 (页, 段) 分组定点重译（复用 apply_qa_fix）。"""
+    adopted = [it for it in items if it.get("status") == qa_queue_mod.STATUS_ADOPTED]
+    if not adopted:
+        return 0
+    grouped: dict[str, list[dict]] = {}
+    for it in adopted:
+        for sid in it.get("segments", []) or []:
+            grouped.setdefault(str(sid), []).append(it)
+    _, _, user_rules = tr.build_context(cfg, sm, plan, rel)
+    ok = 0
+    for sid, ops in grouped.items():
+        opinions = [{"severity": o.get("severity", ""), "reason": o.get("reason", ""),
+                     "src_quote": o.get("src_quote", ""), "dst_quote": o.get("dst_quote", ""),
+                     "suggestion": o.get("suggestion", "")} for o in ops]
+        res = tr.apply_qa_fix(cfg, client, rel, sid, opinions, state, sm, plan,
+                              guide=guide, user_rules=user_rules, focus=focus)
+        if res.get("ok"):
+            ok += 1
+            for o in ops:
+                o["status"] = qa_queue_mod.STATUS_APPLIED
+        else:
+            print(f"    ✗ {rel} 段{sid}: 修正失败（占位符/空译文），保留", flush=True)
+    return ok
 
 
 def cmd_locate(cfg: Config, args) -> None:
@@ -2306,6 +2456,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--pending-only", action="store_true", help="只列未 QA 的页")
     sp.add_argument("--issues", action="store_true", help="只列有问题或未决条目的页")
     sp.set_defaults(func=cmd_qa_status)
+
+    sp = mk("qa-auto", help="监督式自动 QA 闭环：qa → 判官裁定 → 自动定点重译")
+    sp.add_argument("--pages", nargs="*", help="限定页面")
+    sp.add_argument("--start", type=int, default=None,
+                    help="按 plan.order 从第 N 篇（1 起）开始")
+    sp.add_argument("--count", type=int, default=None,
+                    help="与 --start 搭配：处理 N 篇（缺省 1；0 表示到末尾）")
+    sp.add_argument("--adjudicate-only", action="store_true",
+                    help="跳过 QA，仅裁定现有 QA 队列中的 open 条目")
+    sp.add_argument("--no-apply", action="store_true",
+                    help="写回裁决但不自动重译（留人工 qa-apply）")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="跑 QA + 裁定但只打印，不写队列、不 apply")
+    sp.add_argument("--max-items", type=int, default=0,
+                    help="每页最多裁定的条目数（0=不限）")
+    sp.set_defaults(func=cmd_qa_auto)
 
     sp = mk("annotate", help="生成译者注")
     sp.add_argument("--pages", nargs="*", help="限定页面")

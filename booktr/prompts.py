@@ -381,6 +381,86 @@ def build_qa_fix_user(cfg, src_text: str, current_translation: str,
     return "\n\n".join(parts)
 
 
+def build_supervisor_system(cfg, ctx: dict) -> str:
+    """监督判官 system：角色 + 裁定规则 + 重语境（每轮随请求重发）。
+
+    ctx：{page_ctx, summaries(dict), glossary_lines(list), style_guide,
+    user_rules, page_src, page_dst}。
+    """
+    src = lang_name(cfg.get("lang", "source", default="ja"))
+    tgt = lang_name(cfg.get("lang", "target", default="zh-Hans"))
+    parts = [
+        f"你是一名资深{src}→{tgt}翻译质量审校主编。你的职责是逐条裁定机器 QA 审核员"
+        f"发现的翻译问题，决定【采纳 / 拒绝 / 跳过】。",
+        "你将看到：全站页面摘要、当前页完整原文与完整译文、词汇表（含使用场景说明）、"
+        "翻译风格规则，以及一条待裁定的 QA 问题。",
+        "裁定原则：",
+        "- 以【当前页完整原文与译文】为第一依据，结合词汇表与风格规则判断问题是否真实成立。",
+        "- 只有当该问题的修正【确实能提升翻译质量或忠实度】时才采纳（adopt）。",
+        "- 若问题不成立、属于误报、属可接受的合理表达、或修正会引入新的偏差，则拒绝（reject）。",
+        "- 若信息不足、无法判断，或问题所指段落无法确定，则跳过（skip）。",
+        "- 采纳时，若 QA 已给出合理的建议译文，保留原建议；若你能给出更准确、可直接落地的"
+        "建议译文或更贴切的说明，则给出你的版本（adopt 的 suggestion 会用于定点重译）。",
+        "- 建议必须是具体的【目标语言】译文或明确的修改方向，不要泛泛而谈。",
+        "- 若问题涉及 HTML 标签 / 占位符：必须先核对【源文本本身】是否如此书写。若源文即含"
+        "字面标签文本（如页面本身把 `<`+`!` 当普通文字显示），译文应如实保留字面文本，"
+        "**不得**按标签增补、改写或删除；此类问题应判 reject。",
+        "输出：只输出一个 JSON 对象，不要任何额外文字或 markdown 围栏。格式：",
+        '{"verdict": "adopt|reject|skip", "reason": "简短理由", '
+        '"suggestion": "建议译文或修改方向（adopt 时填写，否则留空）"}',
+    ]
+    ctx_parts = []
+    if ctx.get("page_ctx"):
+        ctx_parts.append(f"## 当前页面信息\n{ctx['page_ctx']}")
+    summaries = ctx.get("summaries") or {}
+    if summaries:
+        lines = [f"- {k}: {v}" for k, v in summaries.items()]
+        ctx_parts.append("## 全站页面摘要（用于理解上下文与专名）\n" + "\n".join(lines))
+    if ctx.get("glossary_lines"):
+        ctx_parts.append("## 词汇表（已确认术语，含使用场景）\n"
+                         + "\n".join(ctx["glossary_lines"]))
+    if ctx.get("style_guide"):
+        ctx_parts.append(f"## 翻译风格规则\n{ctx['style_guide']}")
+    if ctx.get("user_rules"):
+        ctx_parts.append(f"## 用户附加规则\n{ctx['user_rules']}")
+    if ctx.get("page_src"):
+        ctx_parts.append(f"## 当前页完整原文（逐段，段序即阅读顺序）\n{ctx['page_src']}")
+    if ctx.get("page_dst"):
+        ctx_parts.append(f"## 当前页完整译文\n{ctx['page_dst']}")
+    return "\n\n".join(parts) + "\n\n" + "\n\n".join(ctx_parts)
+
+
+def format_supervisor_item(idx: int, item: dict) -> str:
+    """单条 QA 问题的判官视图。"""
+    segs = item.get("segments", []) or []
+    loc = f"段 {segs}" if segs else "（未定位到段）"
+    return (
+        f"[{idx}] 严重度={item.get('severity')}  位置={loc}\n"
+        f"  原因: {item.get('reason', '')}\n"
+        f"  相关原文: {item.get('src_quote', '')}\n"
+        f"  现有译文问题: {item.get('dst_quote', '')}\n"
+        f"  建议: {item.get('suggestion', '')}"
+    )
+
+
+def build_supervisor_seed_user(items: list[dict]) -> str:
+    """第 1 条 user：列出全部 QA 问题，并要求先只裁决第 1 条。"""
+    listing = "\n\n".join(format_supervisor_item(i, it)
+                          for i, it in enumerate(items, 1))
+    return (
+        "下面是本页全部待裁定 QA 问题（按序）：\n\n" + listing +
+        "\n\n---\n请先【只裁决第 1 条】。严格按指定 JSON 格式输出你的裁决，不要输出其它内容。"
+    )
+
+
+def build_supervisor_item_user(idx: int, total: int, item: dict) -> str:
+    """后续 user：裁决第 idx 条。"""
+    return (
+        f"现在裁决第 {idx}/{total} 条：\n\n" + format_supervisor_item(idx, item) +
+        "\n\n请只输出该条的 JSON 裁决，不要输出其它内容。"
+    )
+
+
 def build_translator_note_system(cfg) -> str:
     tgt = cfg.get("lang", "target", default="zh-Hans")
     tgt_name = lang_name(tgt)

@@ -110,7 +110,24 @@
     "deep_llm_check": true,
     "queue_path": "work/qa_queue.json",
     "report_dir": "work/qa_reports",
-    "reasoning_effort": ""
+    "reasoning_effort": "",
+    "supervisor": {
+      "enabled": true,
+      "provider": "",
+      "base_url": "",
+      "model": "",
+      "api_key_env": "",
+      "api_key": "",
+      "api_key_required": null,
+      "temperature": 0.1,
+      "max_tokens": null,
+      "timeout": 120,
+      "max_retries": 1,
+      "reasoning_effort": null,
+      "include_all_summaries": true,
+      "all_summaries_max_chars": 65536,
+      "multi_turn": true
+    }
   },
   "translators_notes": {
     "path": "work/translators_notes.json",
