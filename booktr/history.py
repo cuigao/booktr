@@ -303,6 +303,7 @@ def _recompute_status(segments: dict) -> str:
 def plan_restore(cfg: Config, page: str, targets: list[dict]) -> dict:
     """构建回滚计划（只读，不修改任何文件）。"""
     from . import notes as notes_mod
+    from . import phrases as phrases_mod
     from . import tm as tm_mod
 
     tm_all = util.read_jsonl(tm_mod._path(cfg))
@@ -342,6 +343,9 @@ def plan_restore(cfg: Config, page: str, targets: list[dict]) -> dict:
                 flags[k] = f"{a}→{b}"
         if cur_state.get("confidence") != to_state.get("confidence"):
             flags["confidence"] = f"{cur_state.get('confidence')}→{to_state.get('confidence')}"
+        # 短语记忆对称清理（仅当旧译法确实被改变）
+        ph_remove = phrases_mod.segment_removals(
+            cfg, ver.get("src_text", "") or "", from_t or "", to_t or "")
         per_seg.append({
             "sid": sid, "skipped": False,
             "src_text": ver.get("src_text", ""),
@@ -358,6 +362,7 @@ def plan_restore(cfg: Config, page: str, targets: list[dict]) -> dict:
             "flags_change": flags,
             "tm": tm_plan,
             "notes": notes_plan,
+            "phrases": ph_remove,
             "cache_present": bool(cur_cache),
             "version": ver,
         })
@@ -388,6 +393,8 @@ def plan_restore(cfg: Config, page: str, targets: list[dict]) -> dict:
                                 if not s.get("skipped")),
             "notes_add": sum(len(s["notes"]["add"]) for s in per_seg
                              if not s.get("skipped")),
+            "phrases_remove": sum(len(s.get("phrases", [])) for s in per_seg
+                                  if not s.get("skipped")),
         },
     }
 
@@ -415,9 +422,15 @@ def apply_plan(cfg: Config, plan: dict) -> dict:
     page = plan["page"]
     op_id = new_op_id("rollback")
 
+    from . import phrases as phrases_mod
+
     tm_all = util.read_jsonl(tm_mod._path(cfg))
     notes_all = notes_mod.all_notes(cfg)
     tm_dirty = notes_dirty = False
+    ph_keys = set()
+    for s in plan["segments"]:
+        if not s.get("skipped"):
+            ph_keys.update(s.get("phrases", []) or [])
 
     state = tr.State(cfg)
     pstate = state.page(page)
@@ -507,6 +520,11 @@ def apply_plan(cfg: Config, plan: dict) -> dict:
         _rewrite_tm(cfg, tm_all)
     if notes_dirty:
         _rewrite_notes(cfg, notes_all)
+    if ph_keys:
+        ph_data = phrases_mod.load(cfg)
+        for k in ph_keys:
+            ph_data.pop(k, None)
+        phrases_mod.save(cfg, ph_data)
 
     # 追加 rollback 版本（提交即版本）
     for seg in plan["segments"]:
@@ -641,10 +659,14 @@ def format_plan(plan: dict) -> str:
                         if tm["skipped_collisions"] else ""))
         nt = seg["notes"]
         lines.append(f"    笔记: -{len(nt['remove'])} +{len(nt['add'])}")
+        ph = seg.get("phrases", []) or []
+        if ph:
+            lines.append(f"    短语记忆: -{len(ph)}")
     t = plan["totals"]
     lines.append("")
     lines.append(f"合计: 恢复 {t['segments']} 段（跳过 {t['skipped']}） | "
                  f"TM -{t['tm_remove']} +{t['tm_add']}"
                  + (f" ⚠{t['tm_skipped']}" if t["tm_skipped"] else "")
-                 + f" | 笔记 -{t['notes_remove']} +{t['notes_add']}")
+                 + f" | 笔记 -{t['notes_remove']} +{t['notes_add']}"
+                 + f" | 短语 -{t.get('phrases_remove', 0)}")
     return "\n".join(lines)

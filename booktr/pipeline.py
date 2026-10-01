@@ -617,6 +617,34 @@ def cmd_regenerate(cfg: Config, args) -> None:
     print(f"\n重生成完成: {ok_count}/{len(pages)}")
 
 
+def _segment_source_map(cfg: Config, rel: str) -> dict:
+    seg_cache_path = os.path.join(cfg.get("segments_dir", default=""),
+                                  rel.replace("/", "__") + ".json")
+    raw = util.read_json(seg_cache_path, {}) if os.path.exists(seg_cache_path) else {}
+    scache = raw.get("segments", raw) if isinstance(raw, dict) else raw
+    return {str(it.get("id")): it.get("text", "")
+            for it in scache if isinstance(it, dict)}
+
+
+def _purge_phrases_for_segments(cfg: Config, rel: str, sids, segs: dict,
+                                dry_run: bool = False) -> int:
+    """按 reset 语义（to="" 译文被清除）清理目标段的短语记忆。"""
+    from . import phrases as phrases_mod
+
+    src_map = _segment_source_map(cfg, rel)
+    total = 0
+    for sid in sids:
+        src = src_map.get(str(sid), "")
+        cur = (segs.get(str(sid), {}) or {}).get("translation") or ""
+        if not src or not cur:
+            continue
+        if dry_run:
+            total += len(phrases_mod.segment_removals(cfg, src, cur, ""))
+        else:
+            total += phrases_mod.purge_for_segment(cfg, src, cur, "")
+    return total
+
+
 def cmd_reset(cfg: Config, args) -> None:
     """重置指定页面或段，使下次 translate 重新翻译。
 
@@ -658,15 +686,18 @@ def cmd_reset(cfg: Config, args) -> None:
         if target is None:
             n_tm = 0 if keep_tm else tm_mod.purge_page(cfg, rel, dry_run=True)
             n_notes = 0 if keep_notes else notes_mod.purge_page(cfg, rel, dry_run=True)
+            n_ph = _purge_phrases_for_segments(cfg, rel, list(segs.keys()), segs,
+                                               dry_run=True)
             desc = "（整页）"
         else:
             n_tm = 0 if keep_tm else tm_mod.purge_segments(cfg, rel, target, dry_run=True)
             n_notes = 0 if keep_notes else notes_mod.purge_segments(cfg, rel, target, dry_run=True)
+            n_ph = _purge_phrases_for_segments(cfg, rel, target, segs, dry_run=True)
             desc = f" 段 {target}"
         tm_txt = "保留" if keep_tm else f"{n_tm} 条"
         notes_txt = "保留" if keep_notes else f"{n_notes} 条"
-        print(f"  {rel}{desc}  翻译记忆 {tm_txt}、翻译笔记 {notes_txt}")
-        plans.append((rel, target, n_tm, n_notes))
+        print(f"  {rel}{desc}  翻译记忆 {tm_txt}、翻译笔记 {notes_txt}、短语记忆 {n_ph} 条")
+        plans.append((rel, target, n_tm, n_notes, n_ph))
 
     if not args.yes:
         if input(f"确认重置 {len(pages)} 页？[y/N] ").strip().lower() not in ("y", "yes"):
@@ -674,22 +705,24 @@ def cmd_reset(cfg: Config, args) -> None:
             return
 
     reset_op = hist_mod.new_op_id("reset")
-    total_tm = total_notes = 0
-    for rel, target, _n_tm, _n_notes in plans:
+    total_tm = total_notes = total_ph = 0
+    for rel, target, _n_tm, _n_notes, _n_ph in plans:
         pstate = state.page(rel)
         segs = pstate.get("segments", {})
 
-        # 清理 TM / notes（预览已算过条数，实际执行）
+        # 清理 TM / notes / 短语记忆（预览已算过条数，实际执行）
         if target is None:
             if not keep_tm:
                 total_tm += tm_mod.purge_page(cfg, rel)
             if not keep_notes:
                 total_notes += notes_mod.purge_page(cfg, rel)
+            total_ph += _purge_phrases_for_segments(cfg, rel, list(segs.keys()), segs)
         else:
             if not keep_tm:
                 total_tm += tm_mod.purge_segments(cfg, rel, target)
             if not keep_notes:
                 total_notes += notes_mod.purge_segments(cfg, rel, target)
+            total_ph += _purge_phrases_for_segments(cfg, rel, target, segs)
 
         # 覆盖前先提交各段当前版本（提交即版本，供回滚）
         if target is None:
@@ -729,8 +762,9 @@ def cmd_reset(cfg: Config, args) -> None:
         print(f"  已重置: {rel}{desc}")
 
     state.save()
-    if total_tm or total_notes:
-        print(f"已清理翻译记忆: {total_tm} 条 / 翻译笔记: {total_notes} 条")
+    if total_tm or total_notes or total_ph:
+        print(f"已清理翻译记忆: {total_tm} 条 / 翻译笔记: {total_notes} 条 / "
+              f"短语记忆: {total_ph} 条")
     print(f"\n重置完成，下次 translate 将重译指定内容")
 
 

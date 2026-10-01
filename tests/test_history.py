@@ -29,10 +29,13 @@ def _file_bytes(path):
 
 def _snapshot_cfg_files(cfg):
     """快照 state/segments/tm/notes/out 的字节，用于 dry-run 无副作用断言。"""
+    from booktr import phrases as phrases_mod
+
     files = [
         os.path.join(cfg.work_dir, "state.json"),
         tm_mod._path(cfg),
         os.path.join(cfg.work_dir, "notes.jsonl"),
+        phrases_mod._path(cfg),
         os.path.join(cfg.work_dir, "segments", "page1.html.json"),
         os.path.join(cfg.output_dir, "page1.html"),
     ]
@@ -171,15 +174,23 @@ def test_rollback_restores_page_status_and_done_pages(tmp_cfg, tmp_path):
 
 def test_dry_run_no_side_effects(tmp_cfg, tmp_path):
     """dry-run 计划构建不得修改任何文件（核心保证）。"""
+    from booktr import phrases as phrases_mod
+
     _translate(tmp_cfg, tmp_path)
     sid = "1"
     st = tr.State(tmp_cfg)
+    cur = st.page("page1.html")["segments"][sid]["translation"]
     st.page("page1.html")["segments"][sid]["translation"] = "覆盖后"
     st.save()
+    # 造一条会被回滚清理的短语：key 在本段源文、dst=覆盖后（旧译文）、恢复后消失
+    src1 = next(s.text for s in tr.seg_mod.segments_for_page(tmp_cfg, "page1.html")
+                if str(s.id) == sid)
+    phrases_mod.add(tmp_cfg, src1, "覆盖后")
 
     before = _snapshot_cfg_files(tmp_cfg)
     targets = hist.resolve_targets(tmp_cfg, "page1.html", sids=[1])
     plan = hist.plan_restore(tmp_cfg, "page1.html", targets)
+    assert plan["totals"]["phrases_remove"] >= 1  # 计划确实涉及短语清理
     hist.format_plan(plan)
     after = _snapshot_cfg_files(tmp_cfg)
     assert before == after

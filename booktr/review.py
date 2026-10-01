@@ -131,11 +131,19 @@ def interactive_review(cfg: Config, prompt: str = None, max_items: int = 0,
             if not is_qa:
                 changed_pages.add(it["page"])
         elif act == "d":
-            # 删除前预览将清理的 TM / notes，并二次确认
+            # 删除前预览将清理的 TM / notes / 短语记忆，并二次确认
+            from . import phrases as phrases_mod
+
             sid = str(it["segment_id"])
             n_tm = tm_mod.purge_segments(cfg, it["page"], [sid], dry_run=True)
             n_notes = notes_mod.purge_segments(cfg, it["page"], [sid], dry_run=True)
-            print(f"将删除该段译文，并清理：翻译记忆 {n_tm} 条、翻译笔记 {n_notes} 条")
+            _st = State(cfg)
+            cur_tr = (_st.page(it["page"]).get("segments", {}).get(sid, {}) or {}) \
+                .get("translation") or ""
+            src_text = it.get("src", "")
+            n_ph = len(phrases_mod.segment_removals(cfg, src_text, cur_tr, ""))
+            print(f"将删除该段译文，并清理：翻译记忆 {n_tm} 条、翻译笔记 {n_notes} 条、"
+                  f"短语记忆 {n_ph} 条")
             if confirm is None:
                 ans = input("确认删除该段并清理？[y/N] ").strip().lower()
             else:
@@ -145,9 +153,10 @@ def interactive_review(cfg: Config, prompt: str = None, max_items: int = 0,
                 print("已跳过（未删除、未清理）。")
                 handled += 1
                 continue
-            # 清理 TM / notes
+            # 清理 TM / notes / 短语记忆
             tm_mod.purge_segments(cfg, it["page"], [sid])
             notes_mod.purge_segments(cfg, it["page"], [sid])
+            phrases_mod.purge_for_segment(cfg, src_text, cur_tr, "")
             it["status"] = "deleted"
             # 删除该段翻译，标记为 pending（使 --next 可重译）
             state = State(cfg)

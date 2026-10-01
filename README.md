@@ -306,6 +306,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 | 译者注 | 跨页关联/趣味发现 → 外部 JSON | `annotate` |
 | 段落定位 | 按原文/译文片段在页面内定位段号（精确→去占位符→跨行→模糊 Dice）；`qa` 与 `rollback` 共用 | `locate` |
 | 段落回滚 | 段颗粒度版本管理：提交即版本、非线性 pick 恢复、`--op` 整命令撤销、`--dry-run` 预览、`--purge` 管理 | `rollback` |
+| 短语记忆清理 | 覆盖路径（reset/review `[d]`/qa-apply/rollback）按 `源文 ∩ 旧译文 ∖ 新译文` 对称清理短语；qa-apply 清后按同条件回写新短语（与 TM 对齐）；不纳入版本快照 | 自动 |
 | Session ID | 页面翻译任务标识（task_id）+ 多轮对话标识（context_id） | 自动生成，写入 LLM 日志 |
 
 优先级：**词汇表 > 风格样例 > 风格规则**。

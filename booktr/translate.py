@@ -786,22 +786,8 @@ def translate_page(
                     )
             if tm_on and t and util.normalize_ws(t) != util.normalize_ws(chk):
                 tm_mod.add(cfg, chk, t, rel, seg.id)
-            if not data.get("untrusted") and t and chk_plain:
-                # 占位符只在首或尾的 chunk 才记录短语记忆
-                ph_positions = [m.start() for m in re.finditer(r'\[\[P\d+\]\]', chk)]
-                if not ph_positions:
-                    save = True
-                else:
-                    last_end = max(p + len('[[P0]]') for p in ph_positions)
-                    all_at_edges = all(
-                        p == 0 or p + len('[[P0]]') >= len(chk) - 1
-                        for p in ph_positions
-                    )
-                    save = all_at_edges
-                if save:
-                    t_plain = re.sub(r"\[\[P\d+\]\]", "", t).strip()
-                    if t_plain and "|TEXT|" not in t_plain and "|DST|" not in t_plain:
-                        phrases_mod.add(cfg, chk_plain, t_plain)
+            if not data.get("untrusted") and t:
+                phrases_mod.learn(cfg, chk, t)
 
             # 摘要接力：达到轮次上限时触发
             if summary_on and history_count >= max_history:
@@ -1030,6 +1016,9 @@ def apply_qa_fix(cfg: Config, client, rel: str, sid: str, opinions: list[dict],
     if cfg.get("tm", "enabled", default=True) \
             and util.normalize_ws(new_t) != util.normalize_ws(seg.text):
         tm_mod.add(cfg, seg.text, new_t, rel, seg.id)
+    # 短语记忆：对称清理（仅当旧译法确实改变）+ 回写新短语（与 TM 对齐）
+    phrases_mod.purge_for_segment(cfg, seg.text, current, new_t)
+    phrases_mod.learn(cfg, seg.text, new_t)
 
     seg.translation = new_t
     seg.confidence = float(data.get("confidence") or 0.9)
