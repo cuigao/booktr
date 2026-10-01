@@ -10,6 +10,7 @@ import sys
 import time
 
 from . import annotator, crawler, glossary as gl, llm as llm_mod
+from . import history as hist_mod, locate as locate_mod
 from . import planner, prefs as prefs_mod, prompts, qa, residual as residual_mod
 from . import review as review_mod, segments as seg_mod
 from . import styles as styles_mod, translate as tr, util
@@ -672,6 +673,7 @@ def cmd_reset(cfg: Config, args) -> None:
             print("已取消")
             return
 
+    reset_op = hist_mod.new_op_id("reset")
     total_tm = total_notes = 0
     for rel, target, _n_tm, _n_notes in plans:
         pstate = state.page(rel)
@@ -688,6 +690,15 @@ def cmd_reset(cfg: Config, args) -> None:
                 total_tm += tm_mod.purge_segments(cfg, rel, target)
             if not keep_notes:
                 total_notes += notes_mod.purge_segments(cfg, rel, target)
+
+        # 覆盖前先提交各段当前版本（提交即版本，供回滚）
+        if target is None:
+            for sid in list(segs.keys()):
+                hist_mod.commit(cfg, rel, sid, "reset", reset_op, state=state)
+        else:
+            for sid in target:
+                if sid in segs:
+                    hist_mod.commit(cfg, rel, sid, "reset", reset_op, state=state)
 
         if target is None:
             # 方式 A：整页重置
@@ -829,6 +840,7 @@ def cmd_audit_terms(cfg: Config, args) -> None:
         print("词汇表和短语记忆为空，无需审计")
         return
 
+    audit_op = hist_mod.new_op_id("audit")
     updated_count = 0
     updated_pages = set()
 
@@ -857,6 +869,8 @@ def cmd_audit_terms(cfg: Config, args) -> None:
                 continue
 
             if not args.dry_run:
+                # 覆盖前提交当前版本（供回滚）
+                hist_mod.commit(cfg, rel, sid, "audit", audit_op, state=state)
                 # 更新 state.json
                 seg_data["translation"] = new_translation
                 # 不更新 needs_human，留给用户 review
@@ -1081,6 +1095,189 @@ def cmd_qa_status(cfg: Config, args) -> None:
     if not only_pending and not only_issues:
         print(f"\n已 QA {len(checked)} 页；未 QA {len(unchecked)} 页；"
               f"有未决(open)条目的页 {len(open_by_page)} 个。")
+
+
+def cmd_locate(cfg: Config, args) -> None:
+    """按原文/译文片段定位页面内的翻译段落（通用查询）。"""
+    if not args.src and not args.dst:
+        print("请用 --src 或 --dst 指定要定位的片段。", file=sys.stderr)
+        sys.exit(2)
+    res = locate_mod.locate_for_page(
+        cfg, args.page, src_frag=args.src or "", dst_frag=args.dst or "",
+        include_untranslated=args.all, top=args.top)
+    if args.json:
+        print(json.dumps({"page": args.page, "results": res},
+                         ensure_ascii=False, indent=2))
+        return
+    if not res:
+        print(f"未定位到段落（{args.page}）。可尝试更长的片段或用 --all。")
+        return
+    print(f"页面 {args.page} 命中 {len(res)} 段：")
+    for r in res:
+        print(f"  段{r['sid']}  [{r['method']} {r['score']}]")
+        print(f"    原文: {r['src'][:100]}")
+        print(f"    译文: {r['dst'][:100]}")
+
+
+def cmd_rollback(cfg: Config, args) -> None:
+    """段颗粒度回滚：从历史版本恢复（默认先预览再确认）。"""
+    # 维护子命令
+    if args.purge:
+        page = None if args.all else args.page
+        keep = args.keep_last
+        info = hist_mod.purge(cfg, page=page, keep_last=keep, dry_run=args.dry_run)
+        if args.dry_run:
+            print(f"[dry-run] 将处理 {info['files']} 个历史文件"
+                  + (f"，每段保留最近 {keep} 版" if keep is not None else "（整页/全部删除）"))
+        else:
+            print(f"历史清理：处理 {info['files']} 文件，"
+                  f"删除版本 {info['removed_versions']}，删除文件 {info['removed_files']}")
+        return
+    if args.backfill:
+        n = hist_mod.backfill(cfg, dry_run=args.dry_run)
+        if args.dry_run:
+            print(f"[dry-run] 将为 {n} 段补录 v1 历史版本")
+        else:
+            print(f"已补录 {n} 段历史版本")
+        return
+
+    if not args.page:
+        print("请用 --page 指定页面。", file=sys.stderr)
+        sys.exit(2)
+
+    # --list / --list-ops
+    if args.list:
+        _rollback_list(cfg, args.page, args.json)
+        return
+    if args.list_ops:
+        for e in hist_mod.ops(cfg, args.page):
+            print(f"  {e['op_id']}  ts={e['ts']}  {e['op']}  段 {e['sids']}")
+        return
+
+    # 交互模式
+    if args.interactive:
+        _rollback_interactive(cfg, args.page)
+        return
+
+    # 解析目标
+    targets = hist_mod.resolve_targets(
+        cfg, args.page, sids=args.segments,
+        src_frag=args.src or "", dst_frag=args.dst or "",
+        op=args.op, include_untranslated=False)
+    if not targets:
+        print("未找到可回滚的目标（检查 --segments/--src/--op，或用 --list）。")
+        return
+
+    # 指定版本（仅单段选择器）
+    if args.version and len(targets) == 1:
+        sid = str(targets[0]["sid"])
+        v = _pick_version(cfg, args.page, sid, args.version)
+        if v is None:
+            print(f"版本不存在: {args.version}", file=sys.stderr)
+            sys.exit(2)
+        targets[0]["to_version"] = v["id"]
+
+    plan = hist_mod.plan_restore(cfg, args.page, targets)
+    if args.json:
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        if args.dry_run:
+            return
+    else:
+        print(hist_mod.format_plan(plan))
+        print()
+
+    if args.dry_run:
+        print("dry-run：未做任何修改。")
+        return
+    if plan["totals"]["segments"] == 0:
+        print("无可恢复段（全部跳过）。")
+        return
+    if not args.yes:
+        if input(f"确认回滚 {plan['totals']['segments']} 段？[y/N] ").strip().lower() \
+                not in ("y", "yes"):
+            print("已取消")
+            return
+    res = hist_mod.apply_plan(cfg, plan)
+    print(f"\n已恢复 {res['restored']} 段；"
+          + ("out 已重生成。" if res["out_regenerated"] else "⚠ out 重生成失败（段缓存缺失？）。"))
+
+
+def _pick_version(cfg: Config, page: str, sid: str, selector: str) -> dict | None:
+    """按版本 id 或序号（1 起，负数为从末尾倒数）选取版本。"""
+    vs = hist_mod.versions(cfg, page, sid)
+    if not vs:
+        return None
+    if selector.lstrip("-").isdigit():
+        i = int(selector)
+        if i < 0:
+            i = len(vs) + i + 1
+        if 1 <= i <= len(vs):
+            return vs[i - 1]
+        return None
+    return hist_mod.get_version(cfg, page, sid, selector)
+
+
+def _rollback_list(cfg: Config, page: str, as_json: bool) -> None:
+    data = hist_mod._load(cfg, page)
+    segs = data.get("segments", {})
+    if as_json:
+        print(json.dumps(segs, ensure_ascii=False, indent=2))
+        return
+    if not segs:
+        print(f"{page} 无历史版本。")
+        return
+    state_raw = util.read_json(cfg.get("state", "path", default="work/state.json"), {})
+    pseg = (state_raw.get("pages", {}).get(page, {}) or {}).get("segments", {})
+    for sid in sorted(segs, key=lambda s: (len(s), s)):
+        cur = (pseg.get(sid, {}) or {}).get("translation")
+        print(f"段{sid}  当前: {(cur or '（空/未译）')[:60]}")
+        for i, v in enumerate(segs[sid], 1):
+            t = (v.get("state", {}).get("translation") or "（空）")
+            mark = " *" if t == cur else ""
+            print(f"  [{i:>3}] {v.get('id')}  {v.get('ts')}  "
+                  f"{v.get('op'):<12} {v.get('author'):<5} "
+                  f"{(t or '')[:50]}{mark}")
+    print("（* 为与当前一致；用 `--segments N --version <id|序号>` 恢复）")
+
+
+def _rollback_interactive(cfg: Config, page: str) -> None:
+    """逐段查看历史并选择恢复（n/p 翻页，r 恢复，q 退出）。"""
+    data = hist_mod._load(cfg, page)
+    segs = data.get("segments", {})
+    if not segs:
+        print(f"{page} 无历史版本。")
+        return
+    state_raw = util.read_json(cfg.get("state", "path", default="work/state.json"), {})
+    pseg = (state_raw.get("pages", {}).get(page, {}) or {}).get("segments", {})
+    sid_list = sorted(segs, key=lambda s: (len(s), s))
+    for sid in sid_list:
+        vs = segs[sid]
+        cur = (pseg.get(sid, {}) or {}).get("translation") or ""
+        print("\n" + "=" * 70)
+        print(f"段{sid}  历史 {len(vs)} 版")
+        print("  当前译文: " + (cur[:160] or "（空/未译）"))
+        i = 0
+        while True:
+            v = vs[i]
+            t = v.get("state", {}).get("translation") or ""
+            meta = (f"  [{i + 1}/{len(vs)}] {v.get('id')} {v.get('ts')} "
+                    f"{v.get('op')}/{v.get('author')}")
+            print(meta)
+            print("    " + hist_mod.inline_diff(cur, t))
+            act = input("  [n]下一版 [p]上一版 [r]恢复到该版 [q]退出 > ").strip().lower()
+            if act == "q":
+                return
+            if act == "n":
+                i = min(i + 1, len(vs) - 1)
+            elif act == "p":
+                i = max(i - 1, 0)
+            elif act == "r":
+                targets = [{"sid": sid, "to_version": v["id"], "note": "interactive"}]
+                plan = hist_mod.plan_restore(cfg, page, targets)
+                res = hist_mod.apply_plan(cfg, plan)
+                print(f"  已恢复 {res['restored']} 段；"
+                      + ("out 已重生成。" if res["out_regenerated"] else "⚠ out 重生成失败。"))
+                break
 
 
 def cmd_annotate(cfg: Config, args) -> None:
@@ -1371,6 +1568,8 @@ def _build_clean_items(cfg: Config, args) -> list[_CleanItem]:
                    lambda c: _count_jsonl(c, "tm.jsonl")),
         _CleanItem("segments", "段缓存", "segments", "dir",
                    lambda c: _count_dir_files(c, "segments")),
+        _CleanItem("segment_history", "段历史版本", "segment_history", "dir",
+                   lambda c: _count_dir_files(c, "segment_history"), default=False),
         _CleanItem("summaries", "页面摘要", "summaries", "dir",
                    lambda c: _count_dir_files(c, "summaries")),
         _CleanItem("llm_logs", "LLM 日志", "llm_logs", "dir",
@@ -2007,6 +2206,35 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("pages", nargs="*", help="页面路径，如 profile/profile.html")
     sp.add_argument("--all", action="store_true", help="重新生成所有已处理页")
     sp.set_defaults(func=cmd_regenerate)
+
+    sp = mk("locate", help="按原文/译文片段定位页面内的翻译段落")
+    sp.add_argument("--page", required=True, help="页面路径，如 today/today90.html")
+    sp.add_argument("--src", default="", help="原文片段（从页面复制）")
+    sp.add_argument("--dst", default="", help="译文片段（从页面复制）")
+    sp.add_argument("--top", type=int, default=5, help="模糊匹配返回条数（默认 5）")
+    sp.add_argument("--all", action="store_true", help="纳入未翻译段")
+    sp.add_argument("--json", action="store_true", help="输出 JSON")
+    sp.set_defaults(func=cmd_locate)
+
+    sp = mk("rollback", help="段颗粒度回滚（从历史版本恢复，默认先预览再确认）")
+    sp.add_argument("--page", default=None, help="页面路径")
+    sp.add_argument("--segments", type=int, nargs="*", default=None, help="目标段号")
+    sp.add_argument("--src", default="", help="按原文片段定位目标段")
+    sp.add_argument("--dst", default="", help="按译文片段定位目标段")
+    sp.add_argument("--op", default=None, help="撤销指定 op_id 一次命令的全部改动")
+    sp.add_argument("--version", default=None, help="指定版本 id 或序号（仅单段）")
+    sp.add_argument("--list", action="store_true", help="列出该页各段历史版本")
+    sp.add_argument("--list-ops", action="store_true", help="列出该页命令调用 op_id")
+    sp.add_argument("--interactive", action="store_true", help="交互浏览并恢复")
+    sp.add_argument("--purge", action="store_true", help="清理历史（配 --page/--all）")
+    sp.add_argument("--keep-last", type=int, default=None,
+                    help="purge 时每段保留最近 N 版（缺省整页删除）")
+    sp.add_argument("--all", action="store_true", help="purge 时处理全部页面")
+    sp.add_argument("--backfill", action="store_true", help="为已有译文补录 v1 版本")
+    sp.add_argument("--dry-run", action="store_true", help="仅预览，不做修改")
+    sp.add_argument("--json", action="store_true", help="以 JSON 输出计划")
+    sp.add_argument("-y", "--yes", action="store_true", help="跳过确认")
+    sp.set_defaults(func=cmd_rollback)
 
     sp = mk("reset", help="重置指定页面或段，使下次 translate 重新翻译（并清理对应 TM/笔记）")
     sp.add_argument("pages", nargs="*", help="页面路径，如 today/today4.html")

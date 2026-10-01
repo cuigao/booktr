@@ -127,6 +127,10 @@
     "dir": "work/summaries"
   },
   "segments_dir": "work/segments",
+  "segment_history": {
+    "enabled": true,
+    "dir": "work/segment_history"
+  },
   "llm_logs": {
     "dir": "work/llm_logs",
     "auto_export": true,

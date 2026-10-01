@@ -115,6 +115,7 @@ DEFAULTS: dict[str, Any] = {
     "state": {"path": "work/state.json"},
     "summaries": {"dir": "work/summaries"},
     "segments_dir": "work/segments",
+    "segment_history": {"enabled": True, "dir": "work/segment_history"},
     "llm_logs": {
         "dir": "work/llm_logs",
         "auto_export": True,

@@ -112,6 +112,22 @@ python booktr-cli.py qa-apply --dry-run        # 仅列出将修正的段
 python booktr-cli.py qa-status                 # 聚合各页最近一次 QA 状态（已/未 QA、时间、问题数、open 条数）
 python booktr-cli.py qa-status --pending-only  # 只列未 QA 的页
 
+# 10c) 段落定位（按原文/译文片段定位段号）
+python booktr-cli.py locate --page today/today90.html --src "私も無理せず"   # 从页面复制的片段
+python booktr-cli.py locate --page today/today90.html --dst "努力起床" --all  # --all 纳入未译段
+
+# 10d) 段落回滚（段颗粒度版本管理；默认先预览再确认）
+python booktr-cli.py rollback --page today/today90.html --list             # 列出各段历史版本
+python booktr-cli.py rollback --page today/today90.html --list-ops         # 列出命令调用 op_id
+python booktr-cli.py rollback --page today/today90.html --segments 2       # 恢复到上一个不同版本（先预览）
+python booktr-cli.py rollback --page today/today90.html --src "私も無理せず"  # 用片段定位目标段
+python booktr-cli.py rollback --page today/today90.html --op op_..._reset  # 撤销一次 reset 的整页改动
+python booktr-cli.py rollback --page today/today90.html --segments 2 --version ver_xxxx
+python booktr-cli.py rollback --page today/today90.html --dry-run          # 仅预览（译文/TM/笔记/状态）
+python booktr-cli.py rollback --page today/today90.html --interactive      # 交互浏览版本并恢复
+python booktr-cli.py rollback --backfill                                   # 为已有译文补录 v1 版本
+python booktr-cli.py rollback --page today/today90.html --purge --keep-last 20  # 历史管理
+
 # 11) 生成译者注
 python booktr-cli.py annotate
 
@@ -288,6 +304,8 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 | 词汇/短语审计 | `audit-terms` 用新词汇表/短语记忆重建已译段（按占位符边界精确匹配），同步 state+段缓存并重生成 out | `audit-terms` |
 | 残留检测 | `check-residual` 只读扫描已译段，列出译文残留的源语言片段（当前仅日语·平假名），逐项给出 reset 命令供人工核验后手动重译；不自动重译 | `check-residual` |
 | 译者注 | 跨页关联/趣味发现 → 外部 JSON | `annotate` |
+| 段落定位 | 按原文/译文片段在页面内定位段号（精确→去占位符→跨行→模糊 Dice）；`qa` 与 `rollback` 共用 | `locate` |
+| 段落回滚 | 段颗粒度版本管理：提交即版本、非线性 pick 恢复、`--op` 整命令撤销、`--dry-run` 预览、`--purge` 管理 | `rollback` |
 | Session ID | 页面翻译任务标识（task_id）+ 多轮对话标识（context_id） | 自动生成，写入 LLM 日志 |
 
 优先级：**词汇表 > 风格样例 > 风格规则**。
@@ -346,6 +364,7 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 | `work/notes.jsonl` | 翻译笔记（追加式，可溯源） |
 | `work/translators_notes.json` | 译者注（锚定页面+偏移+引文） |
 | `work/segments/*.json` | 每页段索引（源偏移↔译文↔引文） |
+| `work/segment_history/*.json` | 每页段历史版本（提交即版本；供 `rollback` 恢复） |
 | `work/state.json` | 检查点 |
 | `work/review_queue.json` | 待人工审核项 |
 | `work/qa_report.json` | QA 报告（最新一次的别名） |

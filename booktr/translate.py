@@ -8,6 +8,7 @@ import time
 from collections import Counter
 
 from . import glossary as gl
+from . import history as hist_mod
 from . import llm as llm_mod
 from . import notes as notes_mod
 from . import phrases as phrases_mod
@@ -595,6 +596,7 @@ def translate_page(
     _epoch_ms = lambda: int(time.time() * 1000)
     page_key = rel.replace("/", "_").replace(".html", "")
     task_id = f"tsk_{_epoch_ms()}_{page_key}"
+    op_id = hist_mod.new_op_id("translate")
     context_seq = 0
     context_id = f"ctx_{_epoch_ms()}_{page_key}_{context_seq}"
 
@@ -604,6 +606,7 @@ def translate_page(
     history_count = 0  # 当前对话中的翻译轮数
     pending_translations: list[str] = []  # 用于摘要的已译段落
     flagged = []  # 需要页面级重翻译的 chunk
+    committed_sids: list[str] = []  # 本次翻译新产出的段（用于提交历史版本）
 
     for seg_idx, seg in enumerate(segs, 1):
         sid = str(seg.id)
@@ -834,6 +837,7 @@ def translate_page(
         if seg_repaired:
             seg_state["repaired"] = True
             seg_state["repair_methods"] = list(seg_repair_methods)
+        committed_sids.append(sid)
         if needs_human:
             result["review_count"] += 1
             pstate["status"] = STATUS["review"]
@@ -957,6 +961,11 @@ def translate_page(
             pstate["status"] = STATUS["done"]
 
     _save_segment_index(cfg, rel, segs)
+
+    # 提交本次翻译的段版本（段缓存已写，快照完整；同一页面翻译共享 op_id）
+    for sid in sorted(set(committed_sids + [str(i["sid"]) for i in flagged])):
+        hist_mod.commit(cfg, rel, sid, "translate", op_id, state=state)
+
     out_html = seg_mod.reassemble(html, segs)
     seg_mod.write_page_output(cfg, rel, out_html)
 
@@ -1032,6 +1041,8 @@ def apply_qa_fix(cfg: Config, client, rel: str, sid: str, opinions: list[dict],
     seg_state["untrusted"] = False
 
     _save_segment_index(cfg, rel, segs)
+    hist_mod.commit(cfg, rel, str(sid), "qa-apply",
+                    hist_mod.new_op_id("qa-apply"), state=state)
     out_html = seg_mod.reassemble(html, segs)
     seg_mod.write_page_output(cfg, rel, out_html)
     return {"ok": True, "sid": sid, "translation": new_t}
