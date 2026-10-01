@@ -99,6 +99,41 @@ def run_qa(cfg: Config, client, rel: str) -> list[dict]:
     return issues
 
 
+def new_report(ts: str, scope: str) -> dict:
+    """构造 version 2 空报告（供 qa_report 与 qa-auto 共用）。"""
+    return {
+        "version": 2,
+        "ts": ts,
+        "scope": scope,
+        "pages": {},
+        "checked": {},
+        "total_issues": 0,
+        "high": 0,
+        "unresolved": 0,
+        "total_pages_checked": 0,
+    }
+
+
+def record_checked(report: dict, rel: str, issues: list, duration_s: float,
+                   deep: bool, ts: str = "") -> None:
+    """把一页的 QA 结果并入报告（checked + pages + 聚合），原地修改。"""
+    n_high = sum(1 for x in issues if x.get("severity") == "high")
+    n_mid = sum(1 for x in issues if x.get("severity") == "mid")
+    n_low = sum(1 for x in issues if x.get("severity") == "low")
+    n_unres = sum(1 for x in issues if not x.get("resolved", True))
+    report.setdefault("checked", {})[rel] = {
+        "ts": ts or report.get("ts", ""), "total": len(issues), "high": n_high,
+        "mid": n_mid, "low": n_low, "unresolved": n_unres, "deep": deep,
+        "duration_s": round(duration_s, 1),
+    }
+    report["total_pages_checked"] = report.get("total_pages_checked", 0) + 1
+    if issues:
+        report.setdefault("pages", {})[rel] = issues
+        report["total_issues"] = report.get("total_issues", 0) + len(issues)
+        report["high"] = report.get("high", 0) + n_high
+        report["unresolved"] = report.get("unresolved", 0) + n_unres
+
+
 def qa_report(cfg: Config, client, rels: list[str],
               out: str | None = None, ts: str = "",
               scope: str = "") -> dict:
@@ -114,17 +149,7 @@ def qa_report(cfg: Config, client, rels: list[str],
       unresolved,deep,duration_s}``，用于聚合"每页 QA 状态/最近时间"。
     - ``ts``/``scope``/``total_pages_checked``：本次运行的元信息。
     """
-    report = {
-        "version": 2,
-        "ts": ts,
-        "scope": scope,
-        "pages": {},
-        "checked": {},
-        "total_issues": 0,
-        "high": 0,
-        "unresolved": 0,
-        "total_pages_checked": 0,
-    }
+    report = new_report(ts, scope)
     alias = os.path.join(cfg.work_dir, "qa_report.json")
     deep = cfg.get("qa", "deep_llm_check", default=True)
     total = len(rels)
@@ -132,21 +157,7 @@ def qa_report(cfg: Config, client, rels: list[str],
         t0 = time.monotonic()
         issues = run_qa(cfg, client, rel)
         dt = time.monotonic() - t0
-        n_high = sum(1 for x in issues if x["severity"] == "high")
-        n_mid = sum(1 for x in issues if x["severity"] == "mid")
-        n_low = sum(1 for x in issues if x["severity"] == "low")
-        n_unres = sum(1 for x in issues if not x.get("resolved", True))
-        report["checked"][rel] = {
-            "ts": ts, "total": len(issues), "high": n_high, "mid": n_mid,
-            "low": n_low, "unresolved": n_unres, "deep": deep,
-            "duration_s": round(dt, 1),
-        }
-        report["total_pages_checked"] += 1
-        if issues:
-            report["pages"][rel] = issues
-            report["total_issues"] += len(issues)
-            report["high"] += n_high
-            report["unresolved"] += n_unres
+        record_checked(report, rel, issues, dt, deep, ts)
         util.write_json(alias, report)  # 增量落盘，长跑中断不丢失
         if out:
             util.write_json(out, report)

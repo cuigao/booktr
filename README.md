@@ -113,8 +113,10 @@ python booktr-cli.py qa-status                 # 聚合各页最近一次 QA 状
 python booktr-cli.py qa-status --pending-only  # 只列未 QA 的页
 
 # 10b-2) 监督式自动 QA（qa → 判官裁定 → 自动定点重译，全自动闭环）
+python booktr-cli.py qa-auto                          # 默认：处理所有【未 QA】的已译页（可续跑）
 python booktr-cli.py qa-auto --pages today/today14.html   # 指定页全自动
 python booktr-cli.py qa-auto --start 14 --count 5         # 按 plan.order 分批
+python booktr-cli.py qa-auto --all                        # 纳入全部已译页（含已 QA）
 python booktr-cli.py qa-auto --adjudicate-only            # 跳过 QA，仅裁定队列中 open 条目
 python booktr-cli.py qa-auto --no-apply                   # 只写裁决、不自动重译
 python booktr-cli.py qa-auto --dry-run                    # 跑 QA+裁定但只打印，不写不改
@@ -360,7 +362,9 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 - **容错**：单条 LLM 调用失败（网络抖动等）记 skip 并继续，不中断整页；判官响应允许值字符串内未转义引号（自动修复）。
 - **闭环**：采纳项按 `(页, 段)` 分组复用 `qa-apply` 的 `apply_qa_fix` 定点重译（同步清理旧 TM/notes/短语、重生成 out、提交段历史版本）。**判官 HTML 安全防线**：问题涉及标签/占位符时要求核对**源文本本身**，避免把 QA 幻觉（如源文即含的字面 `<`+`!` 文本）写成标签。
 
-配置（`qa.supervisor`）：`enabled`（默认 true）、`provider`/`base_url`/`model`/`api_key_env`/`api_key`/`api_key_required`（**空值继承主 `llm`**）、`temperature`（默认 0.1）、`max_tokens`、`timeout`（默认 120，短超时快速暴露抖动）、`max_retries`（默认 1）、`reasoning_effort`、`include_all_summaries`、`all_summaries_max_chars`、`multi_turn`。设计依据与实测评估见工作区报告 `instance/report/qa_auto_probe_report.md`；阶段 0 的探针/评估脚本留存于 [`tools/qa_auto_probe/`](tools/qa_auto_probe/README.md)（`judge` 判官校准 / `e2e` 端到端 / `analyze` 问题级复现率分析）。
+**运行范围与续跑**：默认只处理**尚未 QA 过的已译页**（`--all` 可纳入已 QA 页；`--pages/--start/--count` 显式指定）。**逐页独立容错与增量落盘**——某页出错只记录并跳过，不中断整批；因"已完成页才计入报告"，中断后**重跑同一命令即自动续跑**。每次运行的逐页统计与错误写入 `work/qa_auto_runs/qa_auto_<ts>.{log,json}`（`qa.auto_log_dir` 可配）。
+
+配置（`qa.supervisor`）：`enabled`（默认 true）、`provider`/`base_url`/`model`/`api_key_env`/`api_key`/`api_key_required`（**空值继承主 `llm`**）、`temperature`（默认 0.1）、`max_tokens`、`timeout`（默认 120，短超时快速暴露抖动）、`max_retries`（默认 1）、`reasoning_effort`、`include_all_summaries`、`all_summaries_max_chars`、`multi_turn`、`log`（判官调用是否写 `llm_logs`，默认 true；判官 system 很大，长跑可设 false 省磁盘）。设计依据与实测评估见工作区报告 `instance/report/qa_auto_probe_report.md`；阶段 0 的探针/评估脚本留存于 [`tools/qa_auto_probe/`](tools/qa_auto_probe/README.md)（`judge` 判官校准 / `e2e` 端到端 / `analyze` 问题级复现率分析）。
 
 ## LLM 接入
 

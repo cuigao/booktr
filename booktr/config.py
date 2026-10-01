@@ -120,7 +120,9 @@ DEFAULTS: dict[str, Any] = {
                "include_all_summaries": True,
                "all_summaries_max_chars": 65536,
                "multi_turn": True,
-           }},
+               "log": True,  # 判官调用是否写 llm_logs（体量大时可关）
+           },
+           "auto_log_dir": "work/qa_auto_runs"},
     "translators_notes": {"path": "work/translators_notes.json", "focus": ""},
     "review": {"path": "work/review_queue.json", "auto_regenerate": True},
     "state": {"path": "work/state.json"},

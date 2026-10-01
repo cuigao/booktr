@@ -199,6 +199,71 @@ def test_qa_auto_closed_loop_applies(tmp_cfg, tmp_path, monkeypatch):
     assert any(s.translation for s in segs)
 
 
+def _mkargs(**kw):
+    base = dict(pages=None, start=None, count=None, adjudicate_only=False,
+                all=False, no_apply=False, dry_run=False, max_items=0)
+    base.update(kw)
+    return type("A", (), base)()
+
+
+def test_qa_auto_default_scope_skips_qaed(tmp_cfg, tmp_path):
+    from booktr import pipeline, qa as qa_mod
+    st = _seed_translated(tmp_cfg, tmp_path)
+    # 制造 page1.html 已 QA 的证据（checked）
+    rep_dir = tmp_cfg.get("qa", "report_dir", default="")
+    os.makedirs(rep_dir, exist_ok=True)
+    with open(os.path.join(rep_dir, "qa_20260101_000000.json"), "w", encoding="utf-8") as f:
+        json.dump({"version": 2, "checked": {"page1.html": {"total": 0}}}, f)
+    # done_pages 需含 page1
+    st.save()
+    targets, scope = pipeline._qa_auto_targets(tmp_cfg, _mkargs())
+    assert "page1.html" not in targets
+    assert "未 QA" in scope
+    # --all 纳入
+    targets_all, scope_all = pipeline._qa_auto_targets(tmp_cfg, _mkargs(all=True))
+    assert "page1.html" in targets_all
+
+
+def test_qa_auto_page_error_continues(tmp_cfg, tmp_path, monkeypatch):
+    from booktr import pipeline, qa as qa_mod
+    _seed_translated(tmp_cfg, tmp_path)
+
+    calls = {"n": 0}
+
+    def boom(cfg, client, rel):
+        calls["n"] += 1
+        raise RuntimeError("decode fail")
+
+    monkeypatch.setattr(qa_mod, "run_qa", boom)
+    monkeypatch.setattr(pipeline, "_client", lambda cfg: FakeLLM.default())
+    monkeypatch.setattr(pipeline, "_supervisor_client", lambda cfg: FakeLLM.default())
+    # 目标页显式指定（不依赖 done 状态）
+    pipeline.cmd_qa_auto(tmp_cfg, _mkargs(pages=["page1.html"]))
+    # 出错被记录到 run json，且未抛出中断
+    run_dir = tmp_cfg.get("qa", "auto_log_dir", default="")
+    files = [f for f in os.listdir(run_dir) if f.endswith(".json")]
+    assert files, "run json should be written"
+    data = json.load(open(os.path.join(run_dir, sorted(files)[-1]), encoding="utf-8"))
+    assert "error" in data["pages"]["page1.html"]
+
+
+def test_llm_log_toggle(tmp_cfg):
+    cfg = Config(root=tmp_cfg.root, data={
+        "llm": {"provider": "mock"},
+        "llm_logs": {"dir": "work/llm_logs"},
+    }, data_dir=tmp_cfg.data_dir)
+    d = cfg.get("llm_logs", "dir", default="")
+    os.makedirs(d, exist_ok=True)
+    # 关闭日志：不落盘
+    off = llm_mod.LLMClient(cfg, log_enabled=False)
+    off.chat("sys JSON 只输出 JSON", "|TEXT|\nhi")
+    assert os.listdir(d) == []
+    # 打开日志：落盘
+    on = llm_mod.LLMClient(cfg)
+    on.chat("sys JSON 只输出 JSON", "|TEXT|\nhi")
+    assert any(f.endswith(".json") for f in os.listdir(d))
+
+
 def test_qa_auto_disabled(tmp_cfg, tmp_path, capsys):
     from booktr import pipeline
     cfg = tmp_cfg

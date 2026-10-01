@@ -126,8 +126,10 @@
       "reasoning_effort": null,
       "include_all_summaries": true,
       "all_summaries_max_chars": 65536,
-      "multi_turn": true
-    }
+      "multi_turn": true,
+      "log": true
+    },
+    "auto_log_dir": "work/qa_auto_runs"
   },
   "translators_notes": {
     "path": "work/translators_notes.json",

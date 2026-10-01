@@ -47,12 +47,15 @@ _ARRAY_KNOWN_KEYS = (
 
 
 class LLMClient:
-    def __init__(self, cfg: Config, llm_override: dict | None = None):
+    def __init__(self, cfg: Config, llm_override: dict | None = None,
+                 log_enabled: bool = True):
         """llm_override：覆盖 llm 配置（如 qa.supervisor），仅替换给定键。
 
         非 None 的覆盖值优先；``api_key_required`` 为 None 时表示沿用主配置。
+        log_enabled=False 时本 client 的调用不写 llm_logs（用于体量很大的判官调用）。
         """
         self.cfg = cfg
+        self.log_enabled = bool(log_enabled)
         llm = dict(cfg.get("llm", default={}))
         if llm_override:
             over = {k: v for k, v in llm_override.items() if v is not None}
@@ -432,6 +435,8 @@ class LLMClient:
              task_id: str = "", context_id: str = "", reasoning: str = "",
              finish_reason: str | None = None) -> None:
         """完整记录一次 LLM 调用（成功或失败，含 mock）。"""
+        if not self.log_enabled:
+            return
         d = self.cfg.get("llm_logs", "dir", default="")
         if not d:
             return
