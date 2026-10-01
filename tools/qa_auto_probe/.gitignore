@@ -1,0 +1,5 @@
+# 运行输出（结果 JSON / 日志）不入库；仅 _samples/analysis.txt 留档
+_out/
+logs/
+__pycache__/
+*.pyc

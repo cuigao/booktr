@@ -360,7 +360,7 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 - **容错**：单条 LLM 调用失败（网络抖动等）记 skip 并继续，不中断整页；判官响应允许值字符串内未转义引号（自动修复）。
 - **闭环**：采纳项按 `(页, 段)` 分组复用 `qa-apply` 的 `apply_qa_fix` 定点重译（同步清理旧 TM/notes/短语、重生成 out、提交段历史版本）。**判官 HTML 安全防线**：问题涉及标签/占位符时要求核对**源文本本身**，避免把 QA 幻觉（如源文即含的字面 `<`+`!` 文本）写成标签。
 
-配置（`qa.supervisor`）：`enabled`（默认 true）、`provider`/`base_url`/`model`/`api_key_env`/`api_key`/`api_key_required`（**空值继承主 `llm`**）、`temperature`（默认 0.1）、`max_tokens`、`timeout`（默认 120，短超时快速暴露抖动）、`max_retries`（默认 1）、`reasoning_effort`、`include_all_summaries`、`all_summaries_max_chars`、`multi_turn`。设计依据与实测评估见工作区报告 `instance/report/qa_auto_probe_report.md`。
+配置（`qa.supervisor`）：`enabled`（默认 true）、`provider`/`base_url`/`model`/`api_key_env`/`api_key`/`api_key_required`（**空值继承主 `llm`**）、`temperature`（默认 0.1）、`max_tokens`、`timeout`（默认 120，短超时快速暴露抖动）、`max_retries`（默认 1）、`reasoning_effort`、`include_all_summaries`、`all_summaries_max_chars`、`multi_turn`。设计依据与实测评估见工作区报告 `instance/report/qa_auto_probe_report.md`；阶段 0 的探针/评估脚本留存于 [`tools/qa_auto_probe/`](tools/qa_auto_probe/README.md)（`judge` 判官校准 / `e2e` 端到端 / `analyze` 问题级复现率分析）。
 
 ## LLM 接入
 
