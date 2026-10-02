@@ -470,11 +470,14 @@ def build_supervisor_item_user(idx: int, total: int, item: dict) -> str:
     )
 
 
-def build_term_review_system(cfg) -> str:
-    """术语候选语义辨析（terms-scan）：判定候选是否值得入术语表并给建议译名。"""
+def build_term_review_system(cfg, strict: bool = False) -> str:
+    """术语候选语义辨析（terms-scan）：判定候选是否值得入术语表并给建议译名。
+
+    strict=True：低频批次收严（宁缺毋滥），用于两遍策略的 Pass2。
+    """
     src = lang_name(cfg.get("lang", "source", default="ja"))
     tgt = lang_name(cfg.get("lang", "target", default="zh-Hans"))
-    return (
+    body = (
         f"你是{src}→{tgt}翻译项目的术语审校。下面给出若干**机械抽取的候选词条**"
         f"（含出现频次、页数、以及若干原文上下文片段），请逐条判断它是否值得进入"
         f"**术语表**（用于保证全文译法一致、避免歧义）。\n"
@@ -498,6 +501,11 @@ def build_term_review_system(cfg) -> str:
         "\"note\": \"依据说明\"}]}\n"
         "只输出 JSON，不要额外文字。"
     )
+    if strict:
+        body += ("\n\n本批为**低频候选**（出现次数较低），误收代价高，请**从严**："
+                 "仅当确属专名/领域词/必要的高频自有词时才 keep，凡有疑义一律 drop。"
+                 "注意排除机械切分产生的片段/跑串（如跨标签粘连的文本）。")
+    return body
 
 
 def build_term_review_user(candidates: list[dict]) -> str:

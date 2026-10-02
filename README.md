@@ -374,14 +374,15 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 
 ```bash
 python booktr-cli.py terms-scan --no-llm          # 仅机械初筛 → work/term_candidates.json
-python booktr-cli.py terms-scan                   # 初筛 + 语义辨析 → work/term_reviewed.json
+python booktr-cli.py terms-scan                   # 两遍初筛 + 语义辨析 → work/term_reviewed.json
 python booktr-cli.py terms-scan --write           # 辨析终稿并入 glossary（auto-candidate）
-python booktr-cli.py terms-scan --algo all --top 300   # 指定算法/规模
+python booktr-cli.py terms-scan --no-pass2        # 只跑 Pass1（高频）
 ```
 
 - **机械初筛**（`booktr/terms.py`，无新依赖、纯 Python）：`runs`（最大脚本串频次，含**片假名·拉丁混排**如 `プライベートCD`）、`repeat_lines`（跨页重复整行/模板）；另提供 `cvalue`/`bpe`/`entropy`/`pmi` 可插拔（本规模语料噪声偏大，默认关闭）。每候选含 `src/script/count/pages/**contexts**`（≤3 条源文窗口）。
-- **LLM 语义辨析**：把候选（含上下文）+ **现行词汇表** + 用户规则交主 LLM，按"专名/站点固定用语/**专业·领域词**/高频自有词 → keep；日常可直译、片段/缩写、套话 → drop"判定，产出 `{src, dst, note, category}`。注入现行词汇表以避免与既有译法冲突。
-- **配置**（`terms_scan`）：`algorithms`（默认 `["runs","repeat_lines"]`）、`min_count`、`min_pages`、`context_chars`、`max_len`、`top`。
+- **两遍策略**（避免低频稀释高频）：**Pass1** `count ≥ band_split`（默认 7）用一般提示词；**Pass2**（默认开）`min_count ≤ count < band_split`、仅 `kana/latin`、按 **maximality** 去掉 Pass1 已确认词的子串，用**收严**提示词并**注入 Pass1 保留清单**（跨遍一致性）。合并去重后产出终稿。
+- **LLM 语义辨析**：候选（含上下文）+ **现行词汇表** + 用户规则（Pass2 另加 Pass1 清单）交主 LLM，按"专名/站点固定用语/**专业·领域词**/高频自有词 → keep；日常可直译、片段/缩写、套话 → drop"判定，产出 `{src, dst, note, category}`。
+- **配置**（`terms_scan`）：`algorithms`（默认 `["runs","repeat_lines"]`）、`band_split`（默认 7）、`two_pass`（默认 true）、`min_count`（Pass2 下限，默认 3）、`pass2_scripts`（默认 `["kana","latin"]`）、`pass2_strict`（默认 true）、`min_pages`、`context_chars`、`max_len`、`top`。
 - 旧版 `extract-terms`（逐页 6000 字符截断的 LLM 抽取）保留兼容，但推荐使用 `terms-scan`。
 
 ## LLM 接入

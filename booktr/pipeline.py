@@ -425,23 +425,38 @@ def cmd_terms_scan(cfg: Config, args) -> None:
         algos = tuple(cfg.get("terms_scan", "algorithms",
                               default=list(terms_mod.DEFAULT_ALGOS)))
     pages = args.pages or None
-    cands = terms_mod.extract(
-        cfg, pages=pages, algos=algos,
+    band_split = args.band_split if args.band_split is not None \
+        else cfg.get("terms_scan", "band_split", default=7)
+    pass2 = not args.no_pass2
+    p2_scripts = tuple((args.pass2_scripts or
+                        cfg.get("terms_scan", "pass2_scripts",
+                                default=["kana", "latin"])))
+    client = None if args.no_llm else _client(cfg)
+    res = terms_mod.scan(
+        cfg, client, pages=pages, algos=algos, band_split=band_split,
         min_count=args.min_count, min_pages=args.min_pages,
-        context_chars=args.context_chars, max_len=args.max_len, top=args.top)
+        context_chars=args.context_chars, max_len=args.max_len,
+        pass2=pass2, pass2_scripts=p2_scripts,
+        pass2_strict=cfg.get("terms_scan", "pass2_strict", default=True))
     cand_path = os.path.join(cfg.work_dir, "term_candidates.json")
-    util.write_json(cand_path, cands)
-    print(f"初筛候选：{len(cands)} 条 → {cand_path}")
-    for c in cands[:20]:
-        print(f"  {c['count']:4d}x {len(c['pages']):3d}pg [{c['script']}] {c['src']}")
+    util.write_json(cand_path, {
+        "pass1": res["pass1_candidates"], "pass2": res["pass2_candidates"]})
+    print(f"Pass1 候选：{len(res['pass1_candidates'])} 条"
+          f"（count>={band_split}）")
+    if pass2:
+        print(f"Pass2 候选：{len(res['pass2_candidates'])} 条"
+              f"（{args.min_count}<=count<{band_split}，脚本 {','.join(p2_scripts)}）")
+    print(f"→ {cand_path}")
     if args.no_llm:
         return
-    client = _client(cfg)
-    reviewed = terms_mod.review(cfg, client, cands)
+    print(f"\nPass1 保留：{len(res['pass1'])} 条")
+    if pass2:
+        print(f"Pass2 保留：{len(res['pass2'])} 条")
+    reviewed = res["reviewed"]
     rev_path = os.path.join(cfg.work_dir, "term_reviewed.json")
     util.write_json(rev_path, reviewed)
-    print(f"\n语义辨析保留：{len(reviewed)} 条 → {rev_path}")
-    for t in reviewed[:30]:
+    print(f"合并去重后共 {len(reviewed)} 条 → {rev_path}")
+    for t in reviewed[:40]:
         print(f"  [{t['category']}] {t['src']} → {t['dst']}  ({t['note'][:30]})")
     if args.write:
         conflicts = gl.merge_candidates(cfg, reviewed)
@@ -2483,11 +2498,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--algo", default=None,
                     help="初筛算法：缺省用 config.terms_scan.algorithms；"
                          "all | runs,repeat_lines,cvalue,bpe,entropy,pmi")
-    sp.add_argument("--min-count", type=int, default=3, help="最小出现次数")
+    sp.add_argument("--min-count", type=int, default=3,
+                    help="Pass2 频次下限（默认 3；Pass1 由 --band-split 决定）")
+    sp.add_argument("--band-split", type=int, default=None,
+                    help="两遍分界：Pass1 count>=此值，Pass2 低于此值（默认 7）")
+    sp.add_argument("--no-pass2", action="store_true",
+                    help="只跑 Pass1（高频），跳过 Pass2")
+    sp.add_argument("--pass2-scripts", default=None,
+                    help="Pass2 仅保留的脚本，逗号分隔（默认 kana,latin）")
     sp.add_argument("--min-pages", type=int, default=2, help="最小涉及页数")
     sp.add_argument("--context-chars", type=int, default=40, help="上下文窗口字符数")
     sp.add_argument("--max-len", type=int, default=40, help="候选最大长度")
-    sp.add_argument("--top", type=int, default=0, help="最多候选数（0=不限）")
     sp.add_argument("--no-llm", action="store_true", help="仅初筛，不做语义辨析")
     sp.add_argument("--write", action="store_true",
                     help="把辨析终稿并入词汇表（status=auto-candidate）")

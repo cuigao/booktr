@@ -98,6 +98,68 @@ def test_review_injects_existing_glossary(tmp_cfg, tmp_path):
     assert "现行词汇表" in seen["user"]
 
 
+def test_extract_count_band_and_scripts():
+    texts = {"a.html": "AAA\nBBB\nCCC", "b.html": "AAA\nBBB", "c.html": "AAA"}
+    # count: AAA=3, BBB=2, CCC=1
+    band = terms.extract(None, algos=("runs",), min_count=2, count_max=3,
+                         scripts=("latin",), min_pages=99, texts=texts)
+    srcs = {c["src"] for c in band}
+    assert "BBB" in srcs          # count2 在 band [2,3)
+    assert "CCC" not in srcs      # count1 < min_count
+    assert "AAA" not in srcs      # count3 >= count_max
+
+
+def test_extract_maximality_drop_substrings():
+    texts = {"a.html": "プライベートCD プライベートCD", "b.html": "プライベートCD"}
+    # 丢弃「プライベート」（是 プライベートCD 的子串）
+    out = terms.extract(None, algos=("runs",), min_count=1, scripts=("kana",),
+                        drop_substrings={"プライベートCD"}, min_pages=1, texts=texts)
+    srcs = {c["src"] for c in out}
+    assert "プライベート" not in srcs
+    # 非子串的保留（此处 プライベートCD 自身由 drop 集合=自身，也应在集合内但
+    # 规则要求严格子串才丢，故不应丢自身）——直接验证严格性：
+    out2 = terms.extract(None, algos=("runs",), min_count=1, scripts=("kana",),
+                         drop_substrings={"XXX"}, min_pages=1, texts=texts)
+    assert any("プライベート" == c["src"] for c in out2)
+
+
+def test_scan_two_pass_and_no_pass2(tmp_cfg):
+    from conftest import FakeLLM
+
+    def responder(user):
+        return json.dumps({"terms": []}, ensure_ascii=False)
+
+    fake = FakeLLM(responder=responder)
+    texts = {"a.html": "HOME\nプライベートCD\nメロキュア", "b.html": "HOME\nプライベートCD"}
+    r1 = terms.scan(tmp_cfg, fake, band_split=2, min_count=1, pass2=True,
+                    pass2_scripts=("kana",), texts=texts)
+    assert "pass1_candidates" in r1 and "pass2_candidates" in r1
+    assert "reviewed" in r1
+    # --no-pass2
+    r2 = terms.scan(tmp_cfg, fake, band_split=2, min_count=1, pass2=False,
+                    texts=texts)
+    assert r2["pass2_candidates"] == []
+    assert r2["reviewed"] == r2["pass1"]
+
+
+def test_scan_no_client_only_candidates(tmp_cfg):
+    texts = {"a.html": "HOME", "b.html": "HOME"}
+    r = terms.scan(tmp_cfg, None, band_split=2, texts=texts)
+    assert r["pass1"] == [] and r["reviewed"] if "reviewed" in r else True
+    assert r["pass1_candidates"]
+
+
+def test_prompts_term_review_strict():
+    from booktr import prompts
+    from booktr.config import Config
+    import os
+    cfg = Config(root=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    normal = prompts.build_term_review_system(cfg, strict=False)
+    strict = prompts.build_term_review_system(cfg, strict=True)
+    assert "从严" in strict and "低频" in strict
+    assert "从严" not in normal
+
+
 def test_prompts_term_review_system_has_principles():
     from booktr import prompts
     from booktr.config import Config

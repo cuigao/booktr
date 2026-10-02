@@ -217,6 +217,8 @@ DEFAULT_ALGOS = ("runs", "repeat_lines")
 
 def extract(cfg: Config, pages: list[str] | None = None,
             algos=DEFAULT_ALGOS, min_count: int = 3, min_pages: int = 2,
+            count_max: int | None = None, scripts: tuple | None = None,
+            drop_substrings: set | None = None,
             context_chars: int = 40, max_len: int = 40, top: int = 0,
             texts: dict[str, str] | None = None) -> list[dict]:
     """机械初筛候选。
@@ -224,6 +226,11 @@ def extract(cfg: Config, pages: list[str] | None = None,
     返回列表，每项 ``{src, script, count, pages, contexts, algos, score}``。
     ``count`` 为合并后最大出现次数；``pages`` 为出现页列表；``contexts`` 为
     源文窗口片段（最多 3 条，方案 a）。
+
+    - ``count_max``：频带上限（含下不含上，用于两遍分带）。
+    - ``scripts``：仅保留的脚本类型（如 ``("kana","latin")``）。
+    - ``drop_substrings``：maximality——丢弃是这些词（已归一）子串的候选
+      （避免 Pass2 与 Pass1 重叠）。
     """
     if texts is None:
         texts = _load_texts(cfg, pages)
@@ -264,10 +271,19 @@ def extract(cfg: Config, pages: list[str] | None = None,
             prev["count"] = max(prev["count"], rec["count"])
             prev["algos"] = list(set(prev["algos"]) | set(rec["algos"]))
 
+    drop_norm = {re.sub(r"\s+", "", s).lower() for s in (drop_substrings or set())}
     out = []
     for rec in by_norm.values():
         if rec["count"] < min_count and len(rec["pages"]) < min_pages:
             continue
+        if count_max is not None and rec["count"] >= count_max:
+            continue
+        if scripts is not None and rec["script"] not in scripts:
+            continue
+        if drop_norm:
+            n = re.sub(r"\s+", "", rec["src"]).lower()
+            if any(n != k and n in k for k in drop_norm):
+                continue  # maximality：被更长保留词包含
         rec["pages"] = sorted(rec["pages"])
         rec["contexts"] = _contexts(texts, rec["src"], context_chars, limit=3)
         out.append(rec)
@@ -296,21 +312,28 @@ def _contexts(texts: dict[str, str], term: str, pad: int, limit: int = 3) -> lis
 # LLM 语义辨析
 # --------------------------------------------------------------------------
 def review(cfg: Config, client, candidates: list[dict],
-           batch_size: int = 40) -> list[dict]:
+           batch_size: int = 40, strict: bool = False,
+           prior_terms: list[str] | None = None) -> list[dict]:
     """分批交 LLM 判定候选价值，返回保留项 [{src, dst, note, category, reason}]。
 
     注入**现行词汇表**与**用户规则**，避免与既有译法冲突（如把已定保留原形的
     「岡崎」误改为「冈崎」）。
+
+    - ``strict``：低频批次收严（宁缺毋滥）——Pass2 用。
+    - ``prior_terms``：Pass1 已确认术语，注入以提供跨遍一致性参考（Pass2 用）。
     """
     from . import glossary as gl
 
     existing = gl.load(cfg)
     user_rules = cfg.get("user_rules", default="") or ""
-    sysp = prompts.build_term_review_system(cfg)
+    sysp = prompts.build_term_review_system(cfg, strict=strict)
     base_extra = ""
     if existing:
         base_extra += "\n\n## 现行词汇表（已确认，勿冲突）\n" + "\n".join(
             prompts.term_lines([e for e in existing if e.get("status") == "confirmed"]))
+    if prior_terms:
+        base_extra += "\n\n## 已确认术语（Pass1 保留，供一致性参考；同类应同判）\n" + \
+            "\n".join(f"- {t}" for t in prior_terms)
     if user_rules:
         base_extra += f"\n\n## 用户附加规则\n{user_rules}"
     kept: list[dict] = []
@@ -332,3 +355,59 @@ def review(cfg: Config, client, candidates: list[dict],
                     "reason": t.get("reason", ""),
                 })
     return kept
+
+
+def _dedup_reviewed(items: list[dict]) -> list[dict]:
+    """按 src 去重（归一空白+小写，保留含空格原形），后者补前者缺失字段。"""
+    by: dict[str, dict] = {}
+    for t in items:
+        n = re.sub(r"\s+", "", t.get("src", "")).lower()
+        if n not in by:
+            by[n] = dict(t)
+            continue
+        prev = by[n]
+        if " " in t.get("src", "") and " " not in prev.get("src", ""):
+            merged = dict(t)
+            for k, v in prev.items():
+                merged.setdefault(k, v)
+            by[n] = merged
+        else:
+            for k, v in t.items():
+                prev.setdefault(k, v)
+    return list(by.values())
+
+
+def scan(cfg: Config, client=None, *, pages: list[str] | None = None,
+         algos=DEFAULT_ALGOS, band_split: int = 7, min_count: int = 3,
+         min_pages: int = 2, context_chars: int = 40, max_len: int = 40,
+         pass2: bool = True, pass2_scripts=("kana", "latin"),
+         pass2_strict: bool = True, batch_size: int = 40,
+         texts: dict | None = None) -> dict:
+    """两遍初筛 + 辨析。返回 {pass1_candidates, pass1, pass2_candidates, pass2, reviewed}。
+
+    Pass1：``count >= band_split``，一般提示词。
+    Pass2（可选）：``min_count <= count < band_split``、仅 ``pass2_scripts``、
+    maximality（去掉 Pass1 已确认词的子串），收严提示词并注入 Pass1 清单。
+    ``client`` 为 None 时仅做机械初筛（不辨析）。
+    """
+    if texts is None:
+        texts = _load_texts(cfg, pages)
+    p1 = extract(cfg, algos=algos, min_count=band_split, min_pages=min_pages,
+                 context_chars=context_chars, max_len=max_len, texts=texts)
+    result = {"pass1_candidates": p1, "pass1": [], "pass2_candidates": [], "pass2": []}
+    if client is None:
+        return result
+    result["pass1"] = review(cfg, client, p1, batch_size=batch_size)
+    if not pass2:
+        result["reviewed"] = _dedup_reviewed(result["pass1"])
+        return result
+    p1_src = [t["src"] for t in result["pass1"]]
+    p2 = extract(cfg, algos=algos, min_count=min_count, count_max=band_split,
+                 min_pages=min_pages, scripts=tuple(pass2_scripts),
+                 drop_substrings=set(p1_src), context_chars=context_chars,
+                 max_len=max_len, texts=texts)
+    result["pass2_candidates"] = p2
+    result["pass2"] = review(cfg, client, p2, batch_size=batch_size,
+                             strict=pass2_strict, prior_terms=p1_src)
+    result["reviewed"] = _dedup_reviewed(result["pass1"] + result["pass2"])
+    return result

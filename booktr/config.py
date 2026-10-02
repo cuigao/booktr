@@ -100,7 +100,11 @@ DEFAULTS: dict[str, Any] = {
     },
     "terms_scan": {
         "algorithms": ["runs", "repeat_lines"],
-        "min_count": 3,
+        "band_split": 7,        # Pass1: count>=此值；Pass2: min_count<=count<此值
+        "two_pass": True,       # 是否进行 Pass2（低频补充）
+        "min_count": 3,         # Pass2 频次下限
+        "pass2_scripts": ["kana", "latin"],
+        "pass2_strict": True,   # Pass2 收严（宁缺毋滥）
         "min_pages": 2,
         "context_chars": 40,
         "max_len": 40,
