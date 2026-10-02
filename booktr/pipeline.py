@@ -2603,7 +2603,18 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _configure_console() -> None:
+    """把 stdout/stderr 切到 UTF-8 并容错，避免 Windows GBK 控制台遇到
+    `⚠`/`｢`/`〜` 等字符抛 UnicodeEncodeError 而中断整批处理。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _configure_console()
     args = build_parser().parse_args(argv)
     cfg = load_config(data_dir=args.data_dir)
     ensure_dirs(cfg)

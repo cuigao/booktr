@@ -120,7 +120,7 @@
       "api_key": "",
       "api_key_required": null,
       "temperature": 0.1,
-      "max_tokens": null,
+      "max_tokens": 131072,
       "timeout": 120,
       "max_retries": 1,
       "reasoning_effort": null,

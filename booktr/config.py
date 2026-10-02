@@ -115,7 +115,7 @@ DEFAULTS: dict[str, Any] = {
                "enabled": True,
                "provider": "", "base_url": "", "model": "",
                "api_key_env": "", "api_key": "", "api_key_required": None,
-               "temperature": 0.1, "max_tokens": None, "timeout": 120,
+               "temperature": 0.1, "max_tokens": 131072, "timeout": 120,
                "max_retries": 1, "reasoning_effort": None,
                "include_all_summaries": True,
                "all_summaries_max_chars": 65536,

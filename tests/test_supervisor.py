@@ -97,6 +97,105 @@ def test_adjudicate_page_multiturn(tmp_cfg, tmp_path):
     assert fake.calls == 2  # 多轮：每条一次调用
 
 
+class _Recorder:
+    """记录每次 chat_multi 的 messages；按 responder(messages) 返回或抛错。"""
+
+    def __init__(self, responder):
+        self.responder = responder
+        self.calls: list[list] = []
+
+    def chat_multi(self, messages, **kw):
+        self.calls.append([dict(m) for m in messages])
+        return self.responder(messages)
+
+
+def _items(n):
+    return [{"id": str(i), "segments": [i], "severity": "low",
+             "reason": f"r{i}", "src_quote": f"src{i}", "dst_quote": f"dst{i}",
+             "suggestion": f"sug{i}"} for i in range(1, n + 1)]
+
+
+def test_adjudicate_retry_does_not_reuse_seed_first_prompt(tmp_cfg, tmp_path):
+    """单条失败后，下一条的 ask 不得再含 seed 的"第 1 条"指令，且须指向正确条目。"""
+    write_sample_site(tmp_path)
+    items = _items(3)
+    seq = {"n": 0}
+
+    def responder(messages):
+        seq["n"] += 1
+        if seq["n"] == 2:  # 第 2 条失败
+            raise llm_mod.LLMError("boom")
+        # 回显当前所问序号（第 1 次→1，第 3 次→3）
+        want = 1 if seq["n"] == 1 else 3
+        return '{"index": %d, "verdict": "reject", "reason": "ok"}' % want
+
+    rec = _Recorder(responder)
+    verdicts, _ = sup.adjudicate_page(tmp_cfg, rec, "page1.html", items)
+    assert verdicts[0]["verdict"] == "reject"
+    assert verdicts[1]["verdict"] == "skip"   # 第 2 条失败
+    assert verdicts[2]["verdict"] == "reject"
+    # 第 3 次调用（最后一条）的 user 应指向第 3 条，且不含 seed 的"只裁决第 1 条"
+    last = rec.calls[-1]
+    last_user = last[-1]["content"]
+    assert "现在裁决第 3/3 条" in last_user
+    assert "只裁决第 1 条" not in last_user
+    # seed（含全量列表）只作为历史出现一次，绝不在最后 user 里与第 3 条混合
+    assert sum(1 for m in last if "只裁决第 1 条" in m["content"]) <= 1
+
+
+def test_adjudicate_index_echo_mismatch_skips(tmp_cfg, tmp_path):
+    write_sample_site(tmp_path)
+    items = _items(2)
+    fake = FakeLLM(sequence=[
+        '{"index": 1, "verdict": "adopt", "reason": "ok", "suggestion": "x"}',
+        '{"index": 1, "verdict": "adopt", "reason": "wrong", "suggestion": "y"}',
+    ])
+    verdicts, _ = sup.adjudicate_page(tmp_cfg, fake, "page1.html", items)
+    assert verdicts[0]["verdict"] == "adopt"
+    assert verdicts[1]["verdict"] == "skip"   # 索引回显不符
+
+
+def test_relevance_guard_detects_drift():
+    items = [
+        {"reason": "AAA BBB 漏译", "suggestion": "补译 AAA 内容",
+         "src_quote": "AAA", "dst_quote": "AAA"},
+        {"reason": "CCC DDD 用词不当", "suggestion": "改为 CCC 说法",
+         "src_quote": "CCC", "dst_quote": "CCC"},
+    ]
+    # 响应明显是第 1 条的内容 → 判给第 2 条时应被守门拦下
+    assert sup.relevance_ok("补译 AAA 内容", 1, items) is False
+    assert sup.relevance_ok("改为 CCC 说法", 1, items) is True
+    # 越界不阻断
+    assert sup.relevance_ok("anything", 9, items) is True
+
+
+def test_adjudicate_relevance_guard_skips(tmp_cfg, tmp_path):
+    write_sample_site(tmp_path)
+    items = [
+        {"id": "1", "segments": [1], "severity": "high", "reason": "AAA漏译",
+         "src_quote": "AAA", "dst_quote": "AAA", "suggestion": "补译AAA"},
+        {"id": "2", "segments": [2], "severity": "low", "reason": "BBB用词",
+         "src_quote": "BBB", "dst_quote": "BBB", "suggestion": "改BBB"},
+    ]
+    # 第 2 问却返回第 1 条的内容，且无 index 字段
+    fake = FakeLLM(sequence=[
+        '{"index": 1, "verdict": "adopt", "reason": "ok", "suggestion": "补译AAA"}',
+        '{"verdict": "adopt", "reason": "AAA漏译", "suggestion": "补译AAA内容"}',
+    ])
+    verdicts, _ = sup.adjudicate_page(tmp_cfg, fake, "page1.html", items)
+    assert verdicts[1]["verdict"] == "skip"
+
+
+def test_supervisor_max_tokens_override(tmp_cfg):
+    cfg = Config(root=tmp_cfg.root, data={
+        "llm": {"provider": "openai-compatible", "model": "m", "max_tokens": 4096},
+        "qa": {"supervisor": {"max_tokens": 131072}},
+    }, data_dir=tmp_cfg.data_dir)
+    from booktr import llm as llm_mod2
+    cli = llm_mod2.LLMClient(cfg, llm_override=cfg.get("qa", "supervisor", default={}))
+    assert cli.max_tokens == 131072
+
+
 def test_adjudicate_page_network_error_skips(tmp_cfg, tmp_path):
     write_sample_site(tmp_path)
 

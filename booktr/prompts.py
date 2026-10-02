@@ -406,8 +406,9 @@ def build_supervisor_system(cfg, ctx: dict) -> str:
         "字面标签文本（如页面本身把 `<`+`!` 当普通文字显示），译文应如实保留字面文本，"
         "**不得**按标签增补、改写或删除；此类问题应判 reject。",
         "输出：只输出一个 JSON 对象，不要任何额外文字或 markdown 围栏。格式：",
-        '{"verdict": "adopt|reject|skip", "reason": "简短理由", '
-        '"suggestion": "建议译文或修改方向（adopt 时填写，否则留空）"}',
+        '{"index": 本条问题序号（整数）, "verdict": "adopt|reject|skip", '
+        '"reason": "简短理由", "suggestion": "建议译文或修改方向（adopt 时填写，否则留空）"}',
+        "注意：`index` 必须等于本次所问问题的序号；不得回答其它序号的问题。",
     ]
     ctx_parts = []
     if ctx.get("page_ctx"):

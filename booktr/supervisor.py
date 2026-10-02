@@ -114,8 +114,14 @@ def parse_verdict(resp: str) -> dict:
     v = (d.get("verdict") or "").strip().lower()
     if v not in (VERDICT_ADOPT, VERDICT_REJECT, VERDICT_SKIP):
         v = VERDICT_SKIP
-    return {"verdict": v, "reason": d.get("reason", ""),
-            "suggestion": d.get("suggestion", "")}
+    out = {"verdict": v, "reason": d.get("reason", ""),
+           "suggestion": d.get("suggestion", "")}
+    if "index" in d:
+        try:
+            out["index"] = int(d["index"])
+        except (TypeError, ValueError):
+            pass
+    return out
 
 
 def _call(client, messages, tag, on_delta=None):
@@ -127,7 +133,11 @@ def adjudicate_page(cfg: Config, client, rel: str,
     """对一页的 QA 条目逐条裁定。返回 (verdicts, turns)。
 
     - 多轮：system 携带重语境；第 1 条 user 列出全部并要求只裁决第 1 条；
-      其后逐条询问。
+      其后逐条询问。历史累积的历次裁决为同页一致性提供锚点。
+    - **提问现场拼装**：每条的请求 = `已提交历史 + 当前条目 usr`，其中 seed
+      （"只裁决第 1 条"）仅用于开篇，**不作为重试基底**。单条失败时不提交历史、
+      直接进入下一条，避免"seed(第 1 条) + 第 i 条"并存导致答错条目。
+    - **索引回显校验**：要求判官返回 `index`；回显不等于当前序号则记 skip。
     - 逐条容错：单条 LLM 失败记 skip 并继续（网络抖动场景不中断整页）。
     """
     if not items:
@@ -135,12 +145,22 @@ def adjudicate_page(cfg: Config, client, rel: str,
     ctx = build_context(cfg, rel)
     system = prompts.build_supervisor_system(cfg, ctx)
     tag = f"judge_{rel.replace('/', '_')}"
-    messages = [
+    n = len(items)
+    # 已提交的多轮历史（仅成功条目追加 assistant）
+    history: list[dict] = [
         {"role": "system", "content": system},
         {"role": "user", "content": prompts.build_supervisor_seed_user(items)},
     ]
     verdicts: list[dict] = []
     turns: list[dict] = []
+
+    def _record(it, v, extra=None):
+        rec = {**v, "item_id": it.get("id"), "segments": it.get("segments"),
+               "severity": it.get("severity")}
+        if extra:
+            rec.update(extra)
+        verdicts.append(rec)
+
     for i, it in enumerate(items, 1):
         t0 = time.monotonic()
         first = {"t": None}
@@ -149,35 +169,77 @@ def adjudicate_page(cfg: Config, client, rel: str,
             if first["t"] is None:
                 first["t"] = round(time.monotonic() - t0, 1)
 
+        ask = history + [{"role": "user",
+                          "content": prompts.build_supervisor_item_user(i, n, it)}]
         try:
-            resp = _call(client, messages, tag, on_delta=on_delta)
+            resp = _call(client, ask, tag, on_delta=on_delta)
         except llm_mod.LLMError as e:
             v = {"verdict": VERDICT_SKIP,
                  "reason": f"网络错误: {str(e)[:120]}", "suggestion": ""}
-            verdicts.append({**v, "item_id": it.get("id"),
-                             "segments": it.get("segments"),
-                             "severity": it.get("severity")})
+            _record(it, v)
             turns.append({"turn": i, "error": str(e)[:200]})
-            # 出错后重置对话，避免半截历史污染后续
-            messages = [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompts.build_supervisor_seed_user(items)},
-            ]
+            # 不提交历史、不注入 seed；下一条 ask 自然只指向该条
             continue
         v = parse_verdict(resp)
+        # 索引回显校验：不符则判 skip（防答错条目）
+        idx = v.get("index")
+        if idx is not None and idx != i:
+            v = {"verdict": VERDICT_SKIP,
+                 "reason": f"索引回显不符（返回 {idx}，应为 {i}）", "suggestion": ""}
+        # 相关性守门：响应明显指向同页其它条目 → 判 skip（留人工），不覆盖建议
+        elif not relevance_ok((v.get("reason", "") + " " + v.get("suggestion", "")),
+                              i - 1, items):
+            v = {"verdict": VERDICT_SKIP,
+                 "reason": "响应与本条相关性不足（疑似漂移到其它条目）",
+                 "suggestion": "", "guard_failed": True}
         verdicts.append({**v, "item_id": it.get("id"),
                          "segments": it.get("segments"),
                          "severity": it.get("severity")})
         turns.append({"turn": i, "assistant": resp, "parsed": v,
                       "first_token_s": first["t"],
                       "duration_s": round(time.monotonic() - t0, 1)})
-        messages.append({"role": "assistant", "content": resp})
-        if i < len(items):
-            messages.append({
-                "role": "user",
-                "content": prompts.build_supervisor_item_user(i + 1, len(items), items[i]),
-            })
+        # 仅把成功的（未被判 skip）回答作为历史锚点；但仍提交 assistant 以保持对话连续
+        history.append({"role": "assistant", "content": resp})
     return verdicts, turns
+
+
+def _lcs(a: str, b: str) -> int:
+    a, b = a or "", b or ""
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for i in range(1, len(a) + 1):
+        cur = [0] * (len(b) + 1)
+        ai = a[i - 1]
+        for j in range(1, len(b) + 1):
+            if ai == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best:
+                    best = cur[j]
+        prev = cur
+    return best
+
+
+def _profile(it: dict) -> str:
+    return " ".join([it.get("reason", "") or "", it.get("suggestion", "") or "",
+                     it.get("src_quote", "") or "", it.get("dst_quote", "") or ""])
+
+
+def relevance_ok(resp: str, idx: int, items: list[dict], margin: int = 6) -> bool:
+    """判官响应是否确实针对第 ``idx`` 条（0 起），而非漂移到同页其它条目。
+
+    以"响应文本与该条 profile（reason+suggestion+src/dst 引文）的 LCS 相似度"
+    为准：若某**其它**条目的相似度明显高于被问条目（差距 ≥ margin），判为漂移。
+    ``idx`` 越界或无法判断时返回 True（不阻断）。
+    """
+    resp = (resp or "").strip()
+    if not resp or not (0 <= idx < len(items)):
+        return True
+    scores = [_lcs(resp, _profile(it)) for it in items]
+    asked = scores[idx]
+    other = max([s for k, s in enumerate(scores) if k != idx], default=0)
+    return not (asked < other and other - asked >= margin)
 
 
 def apply_verdicts(items: list[dict], verdicts: list[dict],
@@ -188,7 +250,7 @@ def apply_verdicts(items: list[dict], verdicts: list[dict],
     - adopt：默认沿用 QA 原 suggestion；若判官给出不同且非空的 suggestion，则
       归档原值到 llm_suggestion/llm_reason 并采用判官版本，标记 source="supervisor"。
     - reject：置 rejected。
-    - skip：保持 open（不动）。
+    - skip：保持/置回 open（不动建议）。
     """
     stats = {"adopt": 0, "reject": 0, "skip": 0}
     for it, v in zip(items, verdicts):
@@ -208,5 +270,6 @@ def apply_verdicts(items: list[dict], verdicts: list[dict],
             it["status"] = rejected_status
             stats["reject"] += 1
         else:
+            # skip：保持 open 留人工处理（不覆盖建议）
             stats["skip"] += 1
     return stats
