@@ -44,12 +44,128 @@ def item_issue_match(it: dict, iss: dict, threshold: float = 0.6) -> tuple[bool,
     return score >= threshold, score
 
 
+def _lcs(a: str, b: str) -> int:
+    a, b = a or "", b or ""
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for i in range(1, len(a) + 1):
+        cur = [0] * (len(b) + 1)
+        ai = a[i - 1]
+        for j in range(1, len(b) + 1):
+            if ai == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best:
+                    best = cur[j]
+        prev = cur
+    return best
+
+
+def audit_drift(data_dir: str, out_dir: str) -> list[str]:
+    """审计某实例的判官日志，检测三类漂移信号（只读）。
+
+    1. **重置态调用**：某页非首次调用却形态为 `[system, user]`（历史中断，
+       即"重试复用 seed"bug 的特征）。
+    2. **索引回显不符**：判官返回的 `index` ≠ 本次所问序号。
+    3. **响应错位**：响应文本与同页其它条目 profile 的 LCS 明显高于被问条目。
+
+    返回人类可读报告行（同时写 `out_dir/drift_audit.txt`）。
+    """
+    import glob
+    import datetime
+    from collections import defaultdict
+
+    ld = os.path.join(data_dir, "work", "llm_logs")
+    q = _read_json_opt(os.path.join(data_dir, "work", "qa_queue.json"), [])
+    bypage: dict[str, list] = defaultdict(list)
+    for it in q:
+        bypage[it.get("page", "")].append(it)
+
+    per_page: dict[str, list] = defaultdict(list)
+    for f in glob.glob(os.path.join(ld, "judge_*.json")):
+        base = os.path.basename(f)
+        key = base[6:base.find("_2")] if "_2" in base else base
+        try:
+            e = json.load(open(f, encoding="utf-8"))
+        except Exception:
+            continue
+        per_page[key].append((os.path.getmtime(f), e, base))
+
+    out = ["# 判官漂移审计", f"\n数据目录: {data_dir}"]
+    n_calls = n_reset = n_idx = n_mis = 0
+    for key, cs in sorted(per_page.items()):
+        cs.sort(key=lambda x: x[0])
+        page = key.replace("_", "/", 1) if key.endswith(".html") else key
+        items = bypage.get(page) or _items_from_page(bypage, key)
+        for idx, (ts, e, base) in enumerate(cs):
+            n_calls += 1
+            msgs = e.get("messages") or []
+            roles = [m["role"] for m in msgs]
+            t = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+            if idx > 0 and roles[:2] == ["system", "user"] and len(roles) == 2:
+                n_reset += 1
+                out.append(f"[重置态] {key} {t} call#{idx + 1} roles={roles}")
+            p = e.get("parsed") or {}
+            lu = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
+            m = re.search(r"\u73b0\u5728\u88c1\u51b3\u7b2c (\d+)/", lu)
+            asked = int(m.group(1)) if m else (1 if roles[:2] == ["system", "user"] else None)
+            ri = p.get("index")
+            if asked and ri and ri != asked:
+                n_idx += 1
+                out.append(f"[索引不符] {key} {t} asked={asked} index={ri}")
+            if asked and items and 0 < asked <= len(items):
+                resp = (p.get("reason", "") + " " + p.get("suggestion", "")).strip()
+                if resp:
+                    prof = lambda it: " ".join(  # noqa: E731
+                        [it.get("reason", ""), it.get("suggestion", ""),
+                         it.get("src_quote", ""), it.get("dst_quote", "")])
+                    scores = [_lcs(resp, prof(it)) for it in items]
+                    best = max(range(len(scores)), key=lambda k: scores[k])
+                    # 仅当"响应几乎不匹配被问条目、却明显匹配其它条目"才判错位，
+                    # 避免同页条目共享词汇（如人名）导致的误报。
+                    if best != asked - 1 and scores[asked - 1] < 6 \
+                            and scores[best] >= 10:
+                        n_mis += 1
+                        out.append(f"[响应错位] {key} {t} asked={asked} "
+                                   f"best_match=item{best + 1} "
+                                   f"({scores[asked - 1]}->{scores[best]})")
+    out.insert(2, f"\n调用 {n_calls} | 重置态 {n_reset} | 索引不符 {n_idx} | 响应错位 {n_mis}")
+    os.makedirs(out_dir, exist_ok=True)
+    p = os.path.join(out_dir, "drift_audit.txt")
+    open(p, "w", encoding="utf-8").write("\n".join(out))
+    print("\n".join(out))
+    print("\n留存:", p)
+    return out
+
+
+def _read_json_opt(path, default):
+    try:
+        return json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _items_from_page(bypage, key):
+    for pg, its in bypage.items():
+        if pg.replace("/", "_").split(".")[0] == key.split(".")[0]:
+            return its
+    return []
+
+
 def main():
-    ap = argparse.ArgumentParser(description="qa-auto e2e 结果分析")
-    ap.add_argument("--result", required=True, help="e2e_result.json 路径")
+    ap = argparse.ArgumentParser(description="qa-auto 结果分析 / 判官漂移审计")
+    ap.add_argument("--result", default=None, help="e2e_result.json 路径")
+    ap.add_argument("--audit", default=None, help="改为审计模式：指向实例 data_dir")
     ap.add_argument("--out-dir", default=os.path.dirname(os.path.abspath(__file__)))
     ap.add_argument("--threshold", type=float, default=0.6, help="问题级复现相似度阈值")
     args = ap.parse_args()
+
+    if args.audit:
+        audit_drift(args.audit, args.out_dir)
+        return
+    if not args.result:
+        ap.error("需要 --result <e2e_result.json> 或 --audit <data_dir>")
 
     res = json.load(open(args.result, encoding="utf-8"))
     agg = {"adopted": 0, "adopted_recur": 0, "rejected": 0, "rejected_recur": 0,

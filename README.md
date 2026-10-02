@@ -357,14 +357,15 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 面向"想要接近人工 QA 的效果、却无力承担人工精校成本（甚至不懂日文）"的场景，`qa-auto` 逐页自动完成 **`qa → 判官裁定 → 对采纳项定点重译`** 闭环（默认全自动；`--no-apply`/`--dry-run` 可选退出）。判官是一个**独立 LLM**，以**重语境**逐条裁定 QA 问题：
 
 - **system 语境**（每轮随请求重发）：当前页上下文 + **全站页面摘要**（`include_all_summaries`，总量上限 `all_summaries_max_chars` 默认 65536）+ 词汇表（含 note）+ 风格规则 + 用户规则 + **当前页完整原文/译文**。
-- **多轮逐条**：第 1 条 user 列出全部 QA 问题并要求"先只裁决第 1 条"，其后每条一轮（`multi_turn`）。历次裁决 JSON 累积在对话历史中，为同页一致性提供锚点，避免一次性多判决的漂移。
+- **多轮逐条**：第 1 条 user 列出全部 QA 问题并要求"先只裁决第 1 条"，其后每条一轮（`multi_turn`）。历次裁决 JSON 累积在对话历史中，为同页一致性提供锚点，避免一次性多判决的漂移。**提问现场拼装**：每条的请求 = 已提交历史 + 当前条目；单条失败时**不提交历史、不注入 seed**，避免"seed(第 1 条) + 第 i 条"并存导致答错条目。
+- **索引回显 + 相关性守门**：判官须返回 `index`；回显不等于当前序号、或响应明显指向同页其它条目时，该条判 `skip`（留人工），不覆盖建议。
 - **裁定** `adopt`（采纳，默认沿用 QA 原 `suggestion`；判官若给出更优版本则替换并归档到 `llm_suggestion`，标记 `source=supervisor`）/ `reject`（拒绝）/ `skip`（信息不足或未定位，保持 open 自动跳过）。
 - **容错**：单条 LLM 调用失败（网络抖动等）记 skip 并继续，不中断整页；判官响应允许值字符串内未转义引号（自动修复）。
 - **闭环**：采纳项按 `(页, 段)` 分组复用 `qa-apply` 的 `apply_qa_fix` 定点重译（同步清理旧 TM/notes/短语、重生成 out、提交段历史版本）。**判官 HTML 安全防线**：问题涉及标签/占位符时要求核对**源文本本身**，避免把 QA 幻觉（如源文即含的字面 `<`+`!` 文本）写成标签。
 
 **运行范围与续跑**：默认只处理**尚未 QA 过的已译页**（`--all` 可纳入已 QA 页；`--pages/--start/--count` 显式指定）。**逐页独立容错与增量落盘**——某页出错只记录并跳过，不中断整批；因"已完成页才计入报告"，中断后**重跑同一命令即自动续跑**。每次运行的逐页统计与错误写入 `work/qa_auto_runs/qa_auto_<ts>.{log,json}`（`qa.auto_log_dir` 可配）。
 
-配置（`qa.supervisor`）：`enabled`（默认 true）、`provider`/`base_url`/`model`/`api_key_env`/`api_key`/`api_key_required`（**空值继承主 `llm`**）、`temperature`（默认 0.1）、`max_tokens`、`timeout`（默认 120，短超时快速暴露抖动）、`max_retries`（默认 1）、`reasoning_effort`、`include_all_summaries`、`all_summaries_max_chars`、`multi_turn`、`log`（判官调用是否写 `llm_logs`，默认 true；判官 system 很大，长跑可设 false 省磁盘）。设计依据与实测评估见工作区报告 `instance/report/qa_auto_probe_report.md`；阶段 0 的探针/评估脚本留存于 [`tools/qa_auto_probe/`](tools/qa_auto_probe/README.md)（`judge` 判官校准 / `e2e` 端到端 / `analyze` 问题级复现率分析）。
+配置（`qa.supervisor`）：`enabled`（默认 true）、`provider`/`base_url`/`model`/`api_key_env`/`api_key`/`api_key_required`（**空值继承主 `llm`**）、`temperature`（默认 0.1）、`max_tokens`（默认 131072；正文因 reasoning 截空时自动翻倍，上限 `llm.max_tokens_ceiling`）、`timeout`（默认 120，短超时快速暴露抖动）、`max_retries`（默认 1）、`reasoning_effort`、`include_all_summaries`、`all_summaries_max_chars`、`multi_turn`、`log`（判官调用是否写 `llm_logs`，默认 true；判官 system 很大，长跑可设 false 省磁盘）。判官漂移可离线审计：`python tools/qa_auto_probe/analyze.py --audit <data_dir>`。设计依据与实测评估见工作区报告 `instance/report/qa_auto_probe_report.md`；阶段 0 的探针/评估脚本留存于 [`tools/qa_auto_probe/`](tools/qa_auto_probe/README.md)（`judge` 判官校准 / `e2e` 端到端 / `analyze` 问题级复现率分析）。
 
 ## LLM 接入
 
