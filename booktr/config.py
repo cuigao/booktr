@@ -98,6 +98,14 @@ DEFAULTS: dict[str, Any] = {
         "auto_extract": True,
         "extract_pages_limit": 0,  # 0 = 全部页面
     },
+    "terms_scan": {
+        "algorithms": ["runs", "repeat_lines"],
+        "min_count": 3,
+        "min_pages": 2,
+        "context_chars": 40,
+        "max_len": 40,
+        "top": 0,
+    },
     "style": {
         "refs_path": "style_refs.json",
         "guide_path": "work/style_guide.md",

@@ -470,6 +470,49 @@ def build_supervisor_item_user(idx: int, total: int, item: dict) -> str:
     )
 
 
+def build_term_review_system(cfg) -> str:
+    """术语候选语义辨析（terms-scan）：判定候选是否值得入术语表并给建议译名。"""
+    src = lang_name(cfg.get("lang", "source", default="ja"))
+    tgt = lang_name(cfg.get("lang", "target", default="zh-Hans"))
+    return (
+        f"你是{src}→{tgt}翻译项目的术语审校。下面给出若干**机械抽取的候选词条**"
+        f"（含出现频次、页数、以及若干原文上下文片段），请逐条判断它是否值得进入"
+        f"**术语表**（用于保证全文译法一致、避免歧义）。\n"
+        "判定原则：\n"
+        "- 属于**专名**（人名/团体/作品·曲目·专辑/节目/地名/场馆/产品·品牌/活动）、"
+        "**站点固定用语**（导航/栏目/站点名）、**专业或领域词**，或**高频出现且用词"
+        "偏差会影响理解或全文一致性**的自有说法 → 保留（keep）。\n"
+        "  - **专业/领域词**示例（均应 keep，以保证全文用词一致）：音乐制作类"
+        "（`ディレクター`=制作人/总监、`プロデューサー`=制作人、`アレンジャー`=编曲者、"
+        "`コーラス`=和声、`アレンジ`=编曲、`マキシ`=Maxi单曲）、出版发行类"
+        "（`ジャケット`=封面、`プレス`=压盘、`譜面`=乐谱、`セルフカバー`=自我翻唱）。\n"
+        "- 属于**日常通用词汇、可逐字直译**，或仅为**片段/通用缩写、语法套话**，"
+        "或**信息密度低且偏差不影响理解** → 丢弃（drop）。\n"
+        "- 依据上下文与常识判断，不必拘泥于字面；不确定时倾向 drop（宁缺毋滥）。\n"
+        f"- 对保留项给出**建议译文**（{tgt}）：拉丁字母一般保留原形；片假名优先还原"
+        "官方英文原形，否则音译并附原文；汉字专名一般保留原形；并给简短 note 说明依据"
+        "（可为空）。\n"
+        "输出 JSON：{\"terms\": [{\"src\": \"原文\", \"keep\": true/false, "
+        "\"dst\": \"建议译文\", \"category\": "
+        "\"person|group|work|show|place|brand|term|nav|other\", "
+        "\"note\": \"依据说明\"}]}\n"
+        "只输出 JSON，不要额外文字。"
+    )
+
+
+def build_term_review_user(candidates: list[dict]) -> str:
+    """候选批次视图。"""
+    lines = []
+    for c in candidates:
+        head = (f"- 【{c.get('src')}】 频次{c.get('count', '?')} 页数"
+                f"{len(c.get('pages', []) or [])} 脚本[{c.get('script', '?')}]")
+        ctx = c.get("contexts") or []
+        if ctx:
+            head += "\n    " + "\n    ".join(f"…{x}…" for x in ctx[:3])
+        lines.append(head)
+    return "## 候选词条\n" + "\n".join(lines)
+
+
 def build_translator_note_system(cfg) -> str:
     tgt = cfg.get("lang", "target", default="zh-Hans")
     tgt_name = lang_name(tgt)

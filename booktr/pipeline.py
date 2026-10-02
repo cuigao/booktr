@@ -13,7 +13,8 @@ from . import annotator, crawler, glossary as gl, llm as llm_mod
 from . import history as hist_mod, locate as locate_mod
 from . import planner, prefs as prefs_mod, prompts, qa, residual as residual_mod
 from . import review as review_mod, segments as seg_mod
-from . import styles as styles_mod, supervisor as sup_mod, translate as tr, util
+from . import styles as styles_mod, supervisor as sup_mod, terms as terms_mod
+from . import translate as tr, util
 from .config import DEFAULTS, Config, ensure_dirs, load_config, save_config
 
 
@@ -412,6 +413,41 @@ def cmd_extract_terms(cfg: Config, args) -> None:
     if args.interactive and conflicts:
         for c in conflicts:
             print(f"  冲突: {c['src']} -> {c.get('dst')} (已存在其他译文)")
+
+
+def cmd_terms_scan(cfg: Config, args) -> None:
+    """术语初筛（机械）→ LLM 语义辨析 → 可选并入词汇表。"""
+    if args.algo == "all":
+        algos = tuple(terms_mod.ALGOS)
+    elif args.algo:
+        algos = tuple(a for a in args.algo.split(",") if a)
+    else:
+        algos = tuple(cfg.get("terms_scan", "algorithms",
+                              default=list(terms_mod.DEFAULT_ALGOS)))
+    pages = args.pages or None
+    cands = terms_mod.extract(
+        cfg, pages=pages, algos=algos,
+        min_count=args.min_count, min_pages=args.min_pages,
+        context_chars=args.context_chars, max_len=args.max_len, top=args.top)
+    cand_path = os.path.join(cfg.work_dir, "term_candidates.json")
+    util.write_json(cand_path, cands)
+    print(f"初筛候选：{len(cands)} 条 → {cand_path}")
+    for c in cands[:20]:
+        print(f"  {c['count']:4d}x {len(c['pages']):3d}pg [{c['script']}] {c['src']}")
+    if args.no_llm:
+        return
+    client = _client(cfg)
+    reviewed = terms_mod.review(cfg, client, cands)
+    rev_path = os.path.join(cfg.work_dir, "term_reviewed.json")
+    util.write_json(rev_path, reviewed)
+    print(f"\n语义辨析保留：{len(reviewed)} 条 → {rev_path}")
+    for t in reviewed[:30]:
+        print(f"  [{t['category']}] {t['src']} → {t['dst']}  ({t['note'][:30]})")
+    if args.write:
+        conflicts = gl.merge_candidates(cfg, reviewed)
+        print(f"\n已并入词汇表（auto-candidate）: 新增 {len(reviewed) - len(conflicts)} 条；"
+              f"冲突 {len(conflicts)} 条。")
+        print("请人工确认（`add-term`）后才会用于翻译。")
 
 
 def cmd_style_extract(cfg: Config, args) -> None:
@@ -2441,6 +2477,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = mk("style-extract", help="从 style_refs 提炼风格规则")
     sp.set_defaults(func=cmd_style_extract)
+
+    sp = mk("terms-scan", help="术语初筛（机械）→ LLM 语义辨析（零词条起步）")
+    sp.add_argument("--pages", nargs="*", help="限定页面")
+    sp.add_argument("--algo", default=None,
+                    help="初筛算法：缺省用 config.terms_scan.algorithms；"
+                         "all | runs,repeat_lines,cvalue,bpe,entropy,pmi")
+    sp.add_argument("--min-count", type=int, default=3, help="最小出现次数")
+    sp.add_argument("--min-pages", type=int, default=2, help="最小涉及页数")
+    sp.add_argument("--context-chars", type=int, default=40, help="上下文窗口字符数")
+    sp.add_argument("--max-len", type=int, default=40, help="候选最大长度")
+    sp.add_argument("--top", type=int, default=0, help="最多候选数（0=不限）")
+    sp.add_argument("--no-llm", action="store_true", help="仅初筛，不做语义辨析")
+    sp.add_argument("--write", action="store_true",
+                    help="把辨析终稿并入词汇表（status=auto-candidate）")
+    sp.set_defaults(func=cmd_terms_scan)
 
     sp = mk("translate", help="逐页翻译")
     sp.add_argument("--pages", nargs="*", help="限定翻译的页面")

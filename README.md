@@ -304,6 +304,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 | 工具 | 说明 | 配置 |
 |---|---|---|
 | 词汇表 | 人工预置 + `extract-terms` LLM 自动抽取候选（需确认）；confirmed 默认 `read_only=true`（短 chunk 精确机械替换，跳过 LLM）；长句经宽松匹配注入 user prompt 作推荐译法 | `glossary.path` |
+| 术语初筛辨析 | `terms-scan`：零词条起步，机械算法（脚本串/跨页模板/n-gram 等）抽高频候选 → LLM 语义辨析判定价值并给建议译名 → 并入词汇表（auto-candidate，待人工确认）；`extract-terms` 为旧版逐页抽取，保留兼容 | `terms_scan` |
 | 翻译记忆 TM | 双语片段缓存，跨页复用 | `tm.enabled` |
 | 短语记忆 | 导航短语精确匹配复用；自动学习；长句经宽松匹配注入 user prompt 作推荐译法 | `phrases.max_len` |
 | 风格指南 | `style-extract` 从对照样例提炼规则注入 | `style.rules_enabled` |
@@ -366,6 +367,22 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 **运行范围与续跑**：默认只处理**尚未 QA 过的已译页**（`--all` 可纳入已 QA 页；`--pages/--start/--count` 显式指定）。**逐页独立容错与增量落盘**——某页出错只记录并跳过，不中断整批；因"已完成页才计入报告"，中断后**重跑同一命令即自动续跑**。每次运行的逐页统计与错误写入 `work/qa_auto_runs/qa_auto_<ts>.{log,json}`（`qa.auto_log_dir` 可配）。
 
 配置（`qa.supervisor`）：`enabled`（默认 true）、`provider`/`base_url`/`model`/`api_key_env`/`api_key`/`api_key_required`（**空值继承主 `llm`**）、`temperature`（默认 0.1）、`max_tokens`（默认 131072；正文因 reasoning 截空时自动翻倍，上限 `llm.max_tokens_ceiling`）、`timeout`（默认 120，短超时快速暴露抖动）、`max_retries`（默认 1）、`reasoning_effort`、`include_all_summaries`、`all_summaries_max_chars`、`multi_turn`、`log`（判官调用是否写 `llm_logs`，默认 true；判官 system 很大，长跑可设 false 省磁盘）。判官漂移可离线审计：`python tools/qa_auto_probe/analyze.py --audit <data_dir>`。设计依据与实测评估见工作区报告 `instance/report/qa_auto_probe_report.md`；阶段 0 的探针/评估脚本留存于 [`tools/qa_auto_probe/`](tools/qa_auto_probe/README.md)（`judge` 判官校准 / `e2e` 端到端 / `analyze` 问题级复现率分析）。
+
+### 术语初筛与辨析（`terms-scan`）
+
+**零词条起步**：从原文全站机械抽取高频候选 → LLM 语义辨析判定价值并给建议译名 → 并入词汇表（`status=auto-candidate`，**人工确认后**才用于翻译）。
+
+```bash
+python booktr-cli.py terms-scan --no-llm          # 仅机械初筛 → work/term_candidates.json
+python booktr-cli.py terms-scan                   # 初筛 + 语义辨析 → work/term_reviewed.json
+python booktr-cli.py terms-scan --write           # 辨析终稿并入 glossary（auto-candidate）
+python booktr-cli.py terms-scan --algo all --top 300   # 指定算法/规模
+```
+
+- **机械初筛**（`booktr/terms.py`，无新依赖、纯 Python）：`runs`（最大脚本串频次，含**片假名·拉丁混排**如 `プライベートCD`）、`repeat_lines`（跨页重复整行/模板）；另提供 `cvalue`/`bpe`/`entropy`/`pmi` 可插拔（本规模语料噪声偏大，默认关闭）。每候选含 `src/script/count/pages/**contexts**`（≤3 条源文窗口）。
+- **LLM 语义辨析**：把候选（含上下文）+ **现行词汇表** + 用户规则交主 LLM，按"专名/站点固定用语/**专业·领域词**/高频自有词 → keep；日常可直译、片段/缩写、套话 → drop"判定，产出 `{src, dst, note, category}`。注入现行词汇表以避免与既有译法冲突。
+- **配置**（`terms_scan`）：`algorithms`（默认 `["runs","repeat_lines"]`）、`min_count`、`min_pages`、`context_chars`、`max_len`、`top`。
+- 旧版 `extract-terms`（逐页 6000 字符截断的 LLM 抽取）保留兼容，但推荐使用 `terms-scan`。
 
 ## LLM 接入
 
