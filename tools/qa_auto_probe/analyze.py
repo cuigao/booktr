@@ -96,11 +96,12 @@ def audit_drift(data_dir: str, out_dir: str) -> list[str]:
     n_calls = n_reset = n_idx = n_mis = 0
     for key, cs in sorted(per_page.items()):
         cs.sort(key=lambda x: x[0])
-        page = key.replace("_", "/", 1) if key.endswith(".html") else key
-        items = bypage.get(page) or _items_from_page(bypage, key)
         for idx, (ts, e, base) in enumerate(cs):
-            n_calls += 1
             msgs = e.get("messages") or []
+            seed = next((m["content"] for m in msgs if m["role"] == "user"
+                         and "\u5f85\u88c1\u5b9a QA \u95ee\u9898" in m["content"]), "")
+            items = _parse_seed_items(seed) if seed else []
+            n_calls += 1
             roles = [m["role"] for m in msgs]
             t = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
             if idx > 0 and roles[:2] == ["system", "user"] and len(roles) == 2:
@@ -122,10 +123,12 @@ def audit_drift(data_dir: str, out_dir: str) -> list[str]:
                          it.get("src_quote", ""), it.get("dst_quote", "")])
                     scores = [_lcs(resp, prof(it)) for it in items]
                     best = max(range(len(scores)), key=lambda k: scores[k])
-                    # 仅当"响应几乎不匹配被问条目、却明显匹配其它条目"才判错位，
-                    # 避免同页条目共享词汇（如人名）导致的误报。
-                    if best != asked - 1 and scores[asked - 1] < 6 \
-                            and scores[best] >= 10:
+                    # 仅当"响应几乎完全不匹配被问条目、却强烈匹配其它条目"才判
+                    # 错位；同页多条共享词汇（如人名「岡崎」）会造成误报，故要求
+                    # 被问条目得分极低（<3）且与最佳条目差距显著（≥12）。
+                    if best != asked - 1 and scores[asked - 1] < 3 \
+                            and scores[best] >= 12 \
+                            and scores[best] - scores[asked - 1] >= 12:
                         n_mis += 1
                         out.append(f"[响应错位] {key} {t} asked={asked} "
                                    f"best_match=item{best + 1} "
@@ -151,6 +154,29 @@ def _items_from_page(bypage, key):
         if pg.replace("/", "_").split(".")[0] == key.split(".")[0]:
             return its
     return []
+
+
+def _parse_seed_items(seed: str) -> list[dict]:
+    """从 seed user 文本解析被判定的条目列表（含 reason/src/dst/suggestion）。
+
+    以 `[i] 严重度=... 位置=...` 分块，逐块抓取字段，供相关性比对使用
+    （避免用整页队列顺序导致索引用错位）。
+    """
+    items = []
+    blocks = re.split(r"\n(?=\[\d+\] \u4e25\u91cd\u5ea6=)", seed or "")
+    for b in blocks:
+        if not re.match(r"\s*\[\d+\] \u4e25\u91cd\u5ea6=", b):
+            continue
+        def grab(label):
+            m = re.search(label + r"[:\uff1a]\s*(.*)", b)
+            return m.group(1).strip() if m else ""
+        items.append({
+            "reason": grab("\u539f\u56e0"),
+            "src_quote": grab("\u76f8\u5173\u539f\u6587"),
+            "dst_quote": grab("\u73b0\u6709\u8bd1\u6587\u95ee\u9898"),
+            "suggestion": grab("\u5efa\u8bae"),
+        })
+    return items
 
 
 def main():
