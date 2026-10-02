@@ -135,15 +135,25 @@ def build_context(cfg: Config, site_map: dict, plan: dict, rel: str,
     related = [prior_ctx, time_ctx, link_ctx]
     prior_ctx = "\n\n".join(x for x in related if x)
 
+    user_rules = effective_user_rules(cfg)
+    return page_ctx, prior_ctx, user_rules
+
+
+def effective_user_rules(cfg: Config) -> str:
+    """生效的用户规则 = config.user_rules + 末尾 10 条用户注入笔记。
+
+    翻译、QA、监督判官三处共享同一口径，避免各阶段策略不一致。
+    """
+    from . import notes as notes_mod
+
     user_rules = cfg.get("user_rules", default="") or ""
-    # 用户注入的笔记并入用户规则（优先）
     user_notes = [
         n for n in notes_mod.all_notes(cfg) if n.get("created_by") == "user"
     ]
     if user_notes:
         note_lines = [f"- {n.get('summary', '')}" for n in user_notes[-10:]]
         user_rules = (user_rules + "\n\n## 用户注入信息\n" + "\n".join(note_lines)).strip()
-    return page_ctx, prior_ctx, user_rules
+    return user_rules
 
 
 def build_translation_context(cfg: Config, rel: str, chk: str, page_ctx: str) -> str:

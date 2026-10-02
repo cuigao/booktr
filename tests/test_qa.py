@@ -396,3 +396,50 @@ def test_term_lines_shared_by_translate_and_qa():
     assert prompts.term_lines(items) == ["- A → B", "  └ 使用场景：n"]
     hints = prompts.format_term_hints(items)
     assert "└ 使用场景：n" in hints
+
+
+def test_qa_system_includes_user_rules():
+    """B：build_qa_system 原样追加 user_rules（无额外措辞）。"""
+    from booktr import prompts
+    from booktr.config import Config
+    import os
+    cfg = Config(root=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # 默认（无 user_rules）→ 不含该节，且旧行为不变
+    base = prompts.build_qa_system(cfg)
+    assert "用户附加规则" not in base
+    rule = "英文/拉丁字母不翻译；人名应译出中文"
+    s = prompts.build_qa_system(cfg, rule)
+    assert "## 用户附加规则" in s
+    assert rule in s  # 原样包含
+    # 不引入"禁止外推"之类额外措辞
+    assert "禁止" not in s and "不得外推" not in s
+
+
+def test_run_qa_passes_user_rules_to_llm(tmp_cfg, tmp_path):
+    """B：run_qa 把生效 user_rules 传入 QA system。"""
+    _write_translated(tmp_cfg, tmp_path)
+    tmp_cfg.set(True, "qa", "deep_llm_check")
+    tmp_cfg.set("SENTINEL-RULE-42", "user_rules")
+
+    class SysRec:
+        system = ""
+
+        def chat(self, system, user, **k):
+            SysRec.system = system
+            return '{"issues": []}'
+
+    qa.run_qa(tmp_cfg, SysRec(), "page1.html")
+    assert "SENTINEL-RULE-42" in SysRec.system
+    assert "## 用户附加规则" in SysRec.system
+
+
+def test_effective_user_rules_shared(tmp_cfg):
+    """effective_user_rules = config.user_rules + 用户注入笔记（末 10 条）。"""
+    from booktr import translate as tr
+    from booktr import notes as notes_mod
+    tmp_cfg.set("BASE-RULE", "user_rules")
+    notes_mod.add_user(tmp_cfg, "注入笔记甲")
+    rules = tr.effective_user_rules(tmp_cfg)
+    assert "BASE-RULE" in rules
+    assert "注入笔记甲" in rules
+    assert "## 用户注入信息" in rules

@@ -293,8 +293,13 @@ def build_style_guide_user(refs: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_qa_system(cfg) -> str:
-    return (
+def build_qa_system(cfg, user_rules: str = "") -> str:
+    """QA 审核系统提示词。
+
+    user_rules 非空时**原样**追加（与翻译/判官共享同一套用户规则，避免 QA
+    仅凭词汇表条目外推而误报）。
+    """
+    parts = [
         "你是翻译质量审核员。审查以下维度：术语与词汇表一致性、HTML/占位符安全"
         "（[[Px]] 是否被删改）、漏译、误译、生硬表达。\n"
         "不要逐句复述译文。\n"
@@ -306,8 +311,11 @@ def build_qa_system(cfg) -> str:
         "输出 JSON：{\"issues\": [{\"severity\": \"high|mid|low\", "
         "\"reason\": \"问题原因\", \"src_quote\": \"有问题的原文片段\", "
         "\"dst_quote\": \"有问题的译文片段\", \"suggestion\": \"建议译文或修改方向\"}]}\n"
-        "没有问题则 issues 为空数组。只输出 JSON。"
-    )
+        "没有问题则 issues 为空数组。只输出 JSON。",
+    ]
+    if user_rules:
+        parts.append(f"## 用户附加规则\n{user_rules}")
+    return "\n\n".join(parts)
 
 
 def build_qa_user(src_text: str, dst_text: str, glossary: list[dict]) -> str:

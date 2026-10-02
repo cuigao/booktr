@@ -14,6 +14,7 @@ from . import glossary as gl
 from . import llm as llm_mod
 from . import prompts
 from . import segments as seg_mod
+from . import translate as tr
 from . import util
 from .config import Config
 
@@ -72,7 +73,8 @@ def run_qa(cfg: Config, client, rel: str) -> list[dict]:
         src_all = "\n".join(s.text for s in segs if s.translation)
         dst_all = "\n".join(s.translation or "" for s in segs if s.translation)
         if src_all.strip():
-            sysp = prompts.build_qa_system(cfg)
+            user_rules = tr.effective_user_rules(cfg)
+            sysp = prompts.build_qa_system(cfg, user_rules)
             usr = prompts.build_qa_user(src_all[:6000], dst_all[:6000], gl_confirmed)
             try:
                 eff = (cfg.get("qa", "reasoning_effort", default="")
