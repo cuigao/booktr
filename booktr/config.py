@@ -105,6 +105,7 @@ DEFAULTS: dict[str, Any] = {
         "min_count": 3,         # Pass2 频次下限
         "pass2_scripts": ["kana", "latin"],
         "pass2_strict": True,   # Pass2 收严（宁缺毋滥）
+        "reasoning_effort": "low",  # 分类任务，低思考即可（避免逐批深思考拖时）
         "min_pages": 2,
         "context_chars": 40,
         "max_len": 40,

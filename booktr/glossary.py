@@ -1,13 +1,15 @@
 """词汇表：读写、去重、冲突检测、LLM 候选追加。"""
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
 from . import util
 from .config import Config
 
-CATEGORIES = ("person", "song", "album", "show", "place", "term", "other")
+CATEGORIES = ("person", "song", "album", "show", "place", "term", "other",
+              "group", "work", "brand", "nav")
 
 
 def load(cfg: Config) -> list[dict]:
@@ -95,6 +97,73 @@ def merge_candidates(cfg: Config, candidates: list[dict]) -> list[dict]:
         )
     save(cfg, items)
     return conflicts
+
+
+def import_confirmed(cfg: Config, entries: list[dict],
+                     author: str = "user") -> dict:
+    """批量以 confirmed 合入词汇表（供术语人工审核后应用）。
+
+    每条取 ``src/dst/category/note``；已存在同 src 则更新（dst 不同记冲突），
+    否则追加。统一 ``status="confirmed"``、``read_only=True``。
+
+    返回 ``{"added","updated","conflicts":[{src,from,to}],"skipped":[...]}``。
+    与 ``add_term`` 不同：不清理 TM/notes/phrases（翻译前为空）。
+    """
+    items = load(cfg)
+    by_src = {it["src"]: it for it in items}
+    added = updated = 0
+    conflicts: list[dict] = []
+    skipped: list[str] = []
+    for e in entries:
+        src = (e.get("src") or "").strip()
+        if not src:
+            skipped.append(repr(e)[:80])
+            continue
+        dst = (e.get("dst") or "").strip()
+        cat = e.get("category") or "other"
+        if cat not in CATEGORIES:
+            cat = "other"
+        note = e.get("note", "")
+        if src in by_src:
+            it = by_src[src]
+            old = it.get("dst", "")
+            if old != dst:
+                conflicts.append({"src": src, "from": old, "to": dst})
+            it["dst"] = dst
+            it["category"] = cat
+            it["note"] = note
+            it["status"] = "confirmed"
+            it["read_only"] = True
+            it["updated"] = author
+            updated += 1
+        else:
+            it = {
+                "src": src, "dst": dst, "category": cat, "note": note,
+                "status": "confirmed", "read_only": True,
+                "confidence": e.get("confidence", 1.0),
+                "usage_count": 0, "author": author,
+            }
+            items.append(it)
+            by_src[src] = it
+            added += 1
+    save(cfg, items)
+    return {"added": added, "updated": updated,
+            "conflicts": conflicts, "skipped": skipped}
+
+
+def backup(cfg: Config, suffix: str = "") -> str:
+    """把当前 glossary 备份到 ``<path>.<时间戳>[.<suffix>].bak``，返回备份路径。"""
+    import time
+    path = cfg.get("glossary", "path", default="work/glossary.json")
+    if not os.path.exists(path):
+        return ""
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    bak = f"{path}.{ts}{('.' + suffix) if suffix else ''}.bak"
+    with open(path, "r", encoding="utf-8") as f:
+        data = f.read()
+    with open(bak, "w", encoding="utf-8") as f:
+        f.write(data)
+    return bak
 
 
 def _normalize_match(text: str) -> str:

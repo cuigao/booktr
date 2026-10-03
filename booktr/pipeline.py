@@ -432,12 +432,21 @@ def cmd_terms_scan(cfg: Config, args) -> None:
                         cfg.get("terms_scan", "pass2_scripts",
                                 default=["kana", "latin"])))
     client = None if args.no_llm else _client(cfg)
+
+    def _prog(pass_name, done, total, kept, error=""):
+        tail = f"  ! {error}" if error else ""
+        print(f"  [{pass_name}] 批 {done}/{total}  本批保留 {kept}{tail}", flush=True)
+
     res = terms_mod.scan(
         cfg, client, pages=pages, algos=algos, band_split=band_split,
         min_count=args.min_count, min_pages=args.min_pages,
         context_chars=args.context_chars, max_len=args.max_len,
         pass2=pass2, pass2_scripts=p2_scripts,
-        pass2_strict=cfg.get("terms_scan", "pass2_strict", default=True))
+        pass2_strict=cfg.get("terms_scan", "pass2_strict", default=True),
+        reasoning_effort=(args.reasoning_effort if args.reasoning_effort
+                          else cfg.get("terms_scan", "reasoning_effort",
+                                       default="low")) or None,
+        progress=_prog, cache_dir=cfg.work_dir)
     cand_path = os.path.join(cfg.work_dir, "term_candidates.json")
     util.write_json(cand_path, {
         "pass1": res["pass1_candidates"], "pass2": res["pass2_candidates"]})
@@ -458,11 +467,65 @@ def cmd_terms_scan(cfg: Config, args) -> None:
     print(f"合并去重后共 {len(reviewed)} 条 → {rev_path}")
     for t in reviewed[:40]:
         print(f"  [{t['category']}] {t['src']} → {t['dst']}  ({t['note'][:30]})")
+    if args.emit_review:
+        manual = os.path.join(cfg.work_dir, "term_review_manual.json")
+        with open(manual, "w", encoding="utf-8") as f:
+            f.write(terms_mod.to_manual_lines(reviewed))
+        print(f"已导出人工审核文件：{manual}（一行一条；改后运行 terms-apply）")
     if args.write:
         conflicts = gl.merge_candidates(cfg, reviewed)
         print(f"\n已并入词汇表（auto-candidate）: 新增 {len(reviewed) - len(conflicts)} 条；"
               f"冲突 {len(conflicts)} 条。")
         print("请人工确认（`add-term`）后才会用于翻译。")
+
+
+def cmd_terms_review(cfg: Config, args) -> None:
+    """从 terms-scan 终稿导出"一行一条"的人工审核文件（不含状态字段）。"""
+    src_path = args.__dict__.get("from") or os.path.join(
+        cfg.work_dir, "term_reviewed.json")
+    if not os.path.exists(src_path):
+        print(f"未找到 {src_path}（先运行 terms-scan）。", file=sys.stderr)
+        return
+    reviewed = util.read_json(src_path, [])
+    out_path = args.out or os.path.join(cfg.work_dir, "term_review_manual.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(terms_mod.to_manual_lines(reviewed))
+    print(f"已导出人工审核文件：{out_path}（{len(reviewed)} 条，一行一条）")
+    print("请逐行删除/修改/新增，然后运行 `terms-apply` 以 confirmed 合入词汇表。")
+
+
+def cmd_terms_apply(cfg: Config, args) -> None:
+    """把人工审核修改后的词条以 confirmed 合入词汇表（先备份）。"""
+    from . import glossary as gl_mod
+
+    path = args.path or os.path.join(cfg.work_dir, "term_review_manual.json")
+    if not os.path.exists(path):
+        print(f"未找到 {path}（先运行 terms-review）。", file=sys.stderr)
+        return
+    text = open(path, encoding="utf-8").read()
+    entries, skipped = terms_mod.parse_manual(text)
+    print(f"解析 {path}：有效 {len(entries)} 条，跳过 {len(skipped)} 行")
+    for s in skipped:
+        print(f"  ⚠ 跳过: {s}")
+    if args.dry_run:
+        for e in entries[:40]:
+            print(f"  {e.get('src')} → {e.get('dst')} [{e.get('category')}]")
+        print("dry-run：未写入。")
+        return
+    if not entries:
+        print("没有有效条目，未写入。")
+        return
+    bak = gl_mod.backup(cfg)
+    if bak:
+        print(f"已备份词汇表 → {bak}")
+    res = gl_mod.import_confirmed(cfg, entries)
+    print(f"已合入（confirmed）：新增 {res['added']}，更新 {res['updated']}，"
+          f"跳过 {len(res['skipped'])}")
+    if res["conflicts"]:
+        print(f"⚠ {len(res['conflicts'])} 条覆盖了既有不同译文，请确认：")
+        for c in res["conflicts"][:50]:
+            print(f"  {c['src']}: 「{c['from']}」→「{c['to']}」")
+    print("如误操作可回滚：用上面的备份文件覆盖回去。")
 
 
 def cmd_style_extract(cfg: Config, args) -> None:
@@ -2509,10 +2572,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--min-pages", type=int, default=2, help="最小涉及页数")
     sp.add_argument("--context-chars", type=int, default=40, help="上下文窗口字符数")
     sp.add_argument("--max-len", type=int, default=40, help="候选最大长度")
+    sp.add_argument("--reasoning-effort", default=None,
+                    help="辨析思考等级 none/low/high（默认取 config，缺省 low）")
     sp.add_argument("--no-llm", action="store_true", help="仅初筛，不做语义辨析")
+    sp.add_argument("--emit-review", action="store_true",
+                    help="辨析后导出「一行一条」的人工审核文件（term_review_manual.json）")
     sp.add_argument("--write", action="store_true",
                     help="把辨析终稿并入词汇表（status=auto-candidate）")
     sp.set_defaults(func=cmd_terms_scan)
+
+    sp = mk("terms-review", help="从 terms-scan 终稿导出人工审核文件（一行一条）")
+    sp.add_argument("--from", dest="from", default=None,
+                    help="源文件（默认 work/term_reviewed.json）")
+    sp.add_argument("--out", default=None,
+                    help="输出路径（默认 work/term_review_manual.json）")
+    sp.set_defaults(func=cmd_terms_review)
+
+    sp = mk("terms-apply", help="把人工审核后的词条以 confirmed 合入词汇表（先备份）")
+    sp.add_argument("path", nargs="?", default=None,
+                    help="人工审核文件（默认 work/term_review_manual.json）")
+    sp.add_argument("--dry-run", action="store_true", help="仅预览，不写入")
+    sp.set_defaults(func=cmd_terms_apply)
 
     sp = mk("translate", help="逐页翻译")
     sp.add_argument("--pages", nargs="*", help="限定翻译的页面")

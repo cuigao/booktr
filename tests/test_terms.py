@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from booktr import terms
 from booktr import util
@@ -100,11 +101,11 @@ def test_review_injects_existing_glossary(tmp_cfg, tmp_path):
 
 def test_extract_count_band_and_scripts():
     texts = {"a.html": "AAA\nBBB\nCCC", "b.html": "AAA\nBBB", "c.html": "AAA"}
-    # count: AAA=3, BBB=2, CCC=1
+    # count: AAA=3, BBB=2, CCC=1；pages: AAA=3, BBB=2, CCC=1
     band = terms.extract(None, algos=("runs",), min_count=2, count_max=3,
-                         scripts=("latin",), min_pages=99, texts=texts)
+                         scripts=("latin",), min_pages=2, texts=texts)
     srcs = {c["src"] for c in band}
-    assert "BBB" in srcs          # count2 在 band [2,3)
+    assert "BBB" in srcs          # count2 在 band [2,3) 且 pages2>=2
     assert "CCC" not in srcs      # count1 < min_count
     assert "AAA" not in srcs      # count3 >= count_max
 
@@ -147,6 +148,74 @@ def test_scan_no_client_only_candidates(tmp_cfg):
     r = terms.scan(tmp_cfg, None, band_split=2, texts=texts)
     assert r["pass1"] == [] and r["reviewed"] if "reviewed" in r else True
     assert r["pass1_candidates"]
+
+
+def test_manual_lines_format_and_order():
+    items = [{"src": "HOME", "dst": "首页", "category": "nav", "note": "导航",
+              "status": "x", "confidence": 0.5}]
+    txt = terms.to_manual_lines(items)
+    lines = txt.splitlines()
+    assert lines[0] == "[" and lines[-1] == "]"
+    assert len(lines) == 3
+    rec = __import__("json").loads(lines[1].rstrip(",").strip())
+    assert list(rec.keys()) == ["src", "dst", "category", "note"]  # 顺序固定
+    assert "status" not in rec and "confidence" not in rec
+
+
+def test_parse_manual_tolerant():
+    text = ('[\n'
+            '  {"src": "A", "dst": "a", "category": "term", "note": ""},\n'
+            '  {"src": "B", "dst": "b", "category": "nav", "note": "n"},\n'
+            '  broken line\n'
+            '  {"dst": "no-src", "category": "term"},\n'
+            ']\n')
+    entries, skipped = terms.parse_manual(text)
+    assert {e["src"] for e in entries} == {"A", "B"}
+    assert len(skipped) == 2  # broken + no-src
+
+
+def test_import_confirmed_add_update_conflict(tmp_cfg):
+    from booktr import glossary as gl
+    gl.add_term(tmp_cfg, "HOME", "首页", category="nav", note="old")
+    res = gl.import_confirmed(tmp_cfg, [
+        {"src": "HOME", "dst": "主页", "category": "nav", "note": "new"},   # update+conflict
+        {"src": "PHOTO DIARY", "dst": "PHOTO DIARY", "category": "nav"},     # add
+        {"src": "", "dst": "x"},                                             # skip
+    ])
+    assert res["added"] == 1 and res["updated"] == 1
+    assert res["conflicts"] == [{"src": "HOME", "from": "首页", "to": "主页"}]
+    items = {e["src"]: e for e in gl.load(tmp_cfg)}
+    assert items["HOME"]["dst"] == "主页" and items["HOME"]["status"] == "confirmed"
+    assert items["HOME"]["read_only"] is True
+    assert items["PHOTO DIARY"]["status"] == "confirmed"
+
+
+def test_glossary_backup(tmp_cfg):
+    from booktr import glossary as gl
+    gl.add_term(tmp_cfg, "X", "Y")
+    bak = gl.backup(tmp_cfg)
+    assert bak and os.path.exists(bak)
+    assert open(bak, encoding="utf-8").read() == \
+        open(tmp_cfg.get("glossary", "path", default=""), encoding="utf-8").read()
+
+
+def test_cmd_terms_review_and_apply(tmp_cfg, tmp_path):
+    from booktr import pipeline, glossary as gl, util
+    # 造一份 reviewed 终稿
+    util.write_json(os.path.join(tmp_cfg.work_dir, "term_reviewed.json"), [
+        {"src": "HOME", "dst": "首页", "category": "nav", "note": ""},
+        {"src": "メール", "dst": "邮件", "category": "term", "note": ""},
+    ])
+    pipeline.cmd_terms_review(tmp_cfg, type("A", (), {"from": None, "out": None})())
+    manual = os.path.join(tmp_cfg.work_dir, "term_review_manual.json")
+    assert os.path.exists(manual)
+    # 人工：删除 メール 行
+    lines = [ln for ln in open(manual, encoding="utf-8").read().splitlines()
+             if "メール" not in ln]
+    open(manual, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+    pipeline.cmd_terms_apply(tmp_cfg, type("A", (), {"path": None, "dry_run": False})())
+    items = {e["src"] for e in gl.load(tmp_cfg)}
+    assert "HOME" in items and "メール" not in items
 
 
 def test_prompts_term_review_strict():

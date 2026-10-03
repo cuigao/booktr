@@ -382,8 +382,26 @@ python booktr-cli.py terms-scan --no-pass2        # 只跑 Pass1（高频）
 - **机械初筛**（`booktr/terms.py`，无新依赖、纯 Python）：`runs`（最大脚本串频次，含**片假名·拉丁混排**如 `プライベートCD`）、`repeat_lines`（跨页重复整行/模板）；另提供 `cvalue`/`bpe`/`entropy`/`pmi` 可插拔（本规模语料噪声偏大，默认关闭）。每候选含 `src/script/count/pages/**contexts**`（≤3 条源文窗口）。
 - **两遍策略**（避免低频稀释高频）：**Pass1** `count ≥ band_split`（默认 7）用一般提示词；**Pass2**（默认开）`min_count ≤ count < band_split`、仅 `kana/latin`、按 **maximality** 去掉 Pass1 已确认词的子串，用**收严**提示词并**注入 Pass1 保留清单**（跨遍一致性）。合并去重后产出终稿。
 - **LLM 语义辨析**：候选（含上下文）+ **现行词汇表** + 用户规则（Pass2 另加 Pass1 清单）交主 LLM，按"专名/站点固定用语/**专业·领域词**/高频自有词 → keep；日常可直译、片段/缩写、套话 → drop"判定，产出 `{src, dst, note, category}`。
-- **配置**（`terms_scan`）：`algorithms`（默认 `["runs","repeat_lines"]`）、`band_split`（默认 7）、`two_pass`（默认 true）、`min_count`（Pass2 下限，默认 3）、`pass2_scripts`（默认 `["kana","latin"]`）、`pass2_strict`（默认 true）、`min_pages`、`context_chars`、`max_len`、`top`。
+- **配置**（`terms_scan`）：`algorithms`（默认 `["runs","repeat_lines"]`）、`band_split`（默认 7）、`two_pass`（默认 true）、`min_count`（Pass2 下限，默认 3）、`pass2_scripts`（默认 `["kana","latin"]`）、`pass2_strict`（默认 true）、`reasoning_effort`（默认 low）、`min_pages`、`context_chars`、`max_len`、`top`。
 - 旧版 `extract-terms`（逐页 6000 字符截断的 LLM 抽取）保留兼容，但推荐使用 `terms-scan`。
+
+#### 人工审核 → 确认合入（`terms-review` / `terms-apply`）
+
+`terms-scan` 的终稿默认只作"建议"，需人工审核后再以 **confirmed** 合入词汇表：
+
+```bash
+python booktr-cli.py terms-scan --emit-review   # 辨析后直接导出人工审核文件
+#   或：python booktr-cli.py terms-review        # 从 work/term_reviewed.json 导出
+#   → work/term_review_manual.json：一行一条，字段顺序 src/dst/category/note
+#   人工编辑：删行=拒绝、改行=编辑、加行=新增（无状态字段干扰）
+python booktr-cli.py terms-apply --dry-run      # 预览
+python booktr-cli.py terms-apply                # 备份 glossary 后以 confirmed 合入
+```
+
+- 审核文件**一行一条**（含自身花括号与尾逗号），末条多余逗号容错；坏行/空 src **跳过并告警**。
+- `terms-apply` **先备份** `work/glossary.json.<ts>.bak` 再写入，可随时回滚（覆盖回备份即可）。
+- 同名 src 若译文不同 → **覆盖为人工值并列出冲突**提示确认。
+- 合入为 `status=confirmed`（`read_only=true`）：此后精确整段机械替换 + 软注入作推荐译法。
 
 ## LLM 接入
 

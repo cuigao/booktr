@@ -10,6 +10,7 @@ n-gram 统计等），再交 **LLM 语义辨析**判定价值并给出建议译�
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -274,8 +275,8 @@ def extract(cfg: Config, pages: list[str] | None = None,
     drop_norm = {re.sub(r"\s+", "", s).lower() for s in (drop_substrings or set())}
     out = []
     for rec in by_norm.values():
-        if rec["count"] < min_count and len(rec["pages"]) < min_pages:
-            continue
+        if rec["count"] < min_count or len(rec["pages"]) < min_pages:
+            continue  # 需同时满足：count>=min_count 且 pages>=min_pages
         if count_max is not None and rec["count"] >= count_max:
             continue
         if scripts is not None and rec["script"] not in scripts:
@@ -313,7 +314,9 @@ def _contexts(texts: dict[str, str], term: str, pad: int, limit: int = 3) -> lis
 # --------------------------------------------------------------------------
 def review(cfg: Config, client, candidates: list[dict],
            batch_size: int = 40, strict: bool = False,
-           prior_terms: list[str] | None = None) -> list[dict]:
+           prior_terms: list[str] | None = None,
+           progress=None, cache_path: str | None = None,
+           reasoning_effort: str | None = None) -> list[dict]:
     """分批交 LLM 判定候选价值，返回保留项 [{src, dst, note, category, reason}]。
 
     注入**现行词汇表**与**用户规则**，避免与既有译法冲突（如把已定保留原形的
@@ -321,6 +324,9 @@ def review(cfg: Config, client, candidates: list[dict],
 
     - ``strict``：低频批次收严（宁缺毋滥）——Pass2 用。
     - ``prior_terms``：Pass1 已确认术语，注入以提供跨遍一致性参考（Pass2 用）。
+    - ``progress``：``progress(done, total, batch_kept)`` 回调，逐批上报。
+    - ``cache_path``：非空时**逐批增量写入**该 JSON（供长跑中断后续跑/审计）。
+    - ``reasoning_effort``：思考等级；分类任务建议 `none`/`low`，避免逐批深思考拖时。
     """
     from . import glossary as gl
 
@@ -337,16 +343,22 @@ def review(cfg: Config, client, candidates: list[dict],
     if user_rules:
         base_extra += f"\n\n## 用户附加规则\n{user_rules}"
     kept: list[dict] = []
-    for i in range(0, len(candidates), batch_size):
+    n_batches = (len(candidates) + batch_size - 1) // batch_size
+    for bi, i in enumerate(range(0, len(candidates), batch_size), 1):
         batch = candidates[i:i + batch_size]
         usr = prompts.build_term_review_user(batch) + base_extra
         try:
-            resp = client.chat(sysp, usr, temperature=0.2, tag="term_review")
+            resp = client.chat(sysp, usr, temperature=0.2, tag="term_review",
+                               reasoning_effort=reasoning_effort or None)
             data = llm_mod.parse_json_response(resp)
-        except llm_mod.LLMError:
+        except llm_mod.LLMError as e:
+            if progress:
+                progress(bi, n_batches, 0, error=str(e)[:80])
             continue
+        batch_kept = 0
         for t in data.get("terms", []) or []:
             if t.get("src") and t.get("keep", True) is not False:
+                batch_kept += 1
                 kept.append({
                     "src": t["src"],
                     "dst": t.get("dst", ""),
@@ -354,7 +366,57 @@ def review(cfg: Config, client, candidates: list[dict],
                     "category": t.get("category", "term"),
                     "reason": t.get("reason", ""),
                 })
+        if progress:
+            progress(bi, n_batches, batch_kept)
+        if cache_path:
+            util.write_json(cache_path, {"done_batches": bi,
+                                         "total_batches": n_batches, "kept": kept})
     return kept
+
+
+_MANUAL_FIELDS = ("src", "dst", "category", "note")
+
+
+def to_manual_lines(items: list[dict]) -> str:
+    """把词条渲染为"一行一条"的人工审核 JSON 文本。
+
+    顶层仅 ``[`` / ``]``；每条一行、含自身花括号与行尾逗号（末条亦带），
+    字段顺序 ``src/dst/category/note``。人工删行=拒绝、改行=编辑、加行=新增。
+    """
+    lines = ["["]
+    for it in items:
+        rec = {k: it.get(k, "") for k in _MANUAL_FIELDS}
+        lines.append("  " + json.dumps(rec, ensure_ascii=False) + ",")
+    lines.append("]")
+    return "\n".join(lines) + "\n"
+
+
+def parse_manual(text: str) -> tuple[list[dict], list[str]]:
+    """容错解析人工审核文件。返回 (entries, skipped)。
+
+    允许行尾多余逗号（末条逗号），按行解析、坏行记入 skipped 并跳过。
+    """
+    entries: list[dict] = []
+    skipped: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line in ("[", "]"):
+            continue
+        if line.endswith(","):
+            line = line[:-1].strip()
+        if not (line.startswith("{") and line.endswith("}")):
+            skipped.append(raw[:100])
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            skipped.append(raw[:100])
+            continue
+        if not isinstance(obj, dict) or not obj.get("src"):
+            skipped.append(raw[:100])
+            continue
+        entries.append(obj)
+    return entries, skipped
 
 
 def _dedup_reviewed(items: list[dict]) -> list[dict]:
@@ -382,6 +444,8 @@ def scan(cfg: Config, client=None, *, pages: list[str] | None = None,
          min_pages: int = 2, context_chars: int = 40, max_len: int = 40,
          pass2: bool = True, pass2_scripts=("kana", "latin"),
          pass2_strict: bool = True, batch_size: int = 40,
+         reasoning_effort: str | None = None,
+         progress=None, cache_dir: str | None = None,
          texts: dict | None = None) -> dict:
     """两遍初筛 + 辨析。返回 {pass1_candidates, pass1, pass2_candidates, pass2, reviewed}。
 
@@ -397,7 +461,12 @@ def scan(cfg: Config, client=None, *, pages: list[str] | None = None,
     result = {"pass1_candidates": p1, "pass1": [], "pass2_candidates": [], "pass2": []}
     if client is None:
         return result
-    result["pass1"] = review(cfg, client, p1, batch_size=batch_size)
+    cache1 = os.path.join(cache_dir, "term_review_pass1.json") if cache_dir else None
+    p1_prog = (lambda d, t, k, error="":
+               progress("pass1", d, t, k, error)) if progress else None
+    result["pass1"] = review(cfg, client, p1, batch_size=batch_size,
+                             progress=p1_prog, cache_path=cache1,
+                             reasoning_effort=reasoning_effort)
     if not pass2:
         result["reviewed"] = _dedup_reviewed(result["pass1"])
         return result
@@ -407,7 +476,12 @@ def scan(cfg: Config, client=None, *, pages: list[str] | None = None,
                  drop_substrings=set(p1_src), context_chars=context_chars,
                  max_len=max_len, texts=texts)
     result["pass2_candidates"] = p2
+    cache2 = os.path.join(cache_dir, "term_review_pass2.json") if cache_dir else None
+    p2_prog = (lambda d, t, k, error="":
+               progress("pass2", d, t, k, error)) if progress else None
     result["pass2"] = review(cfg, client, p2, batch_size=batch_size,
-                             strict=pass2_strict, prior_terms=p1_src)
+                             strict=pass2_strict, prior_terms=p1_src,
+                             progress=p2_prog, cache_path=cache2,
+                             reasoning_effort=reasoning_effort)
     result["reviewed"] = _dedup_reviewed(result["pass1"] + result["pass2"])
     return result

@@ -95,6 +95,7 @@
     "min_count": 3,
     "pass2_scripts": ["kana", "latin"],
     "pass2_strict": true,
+    "reasoning_effort": "low",
     "min_pages": 2,
     "context_chars": 40,
     "max_len": 40,
