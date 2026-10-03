@@ -258,7 +258,7 @@ def test_qa_auto_dry_run_no_queue_change(tmp_cfg, tmp_path, capsys):
 
     args = type("A", (), dict(pages=["page1.html"], start=None, count=None,
                               adjudicate_only=False, no_apply=False,
-                              dry_run=True, max_items=0))()
+                              dry_run=True, max_items=0, only_ids=None))()
     pipeline.cmd_qa_auto(cfg, args)
     assert qq.load(cfg) == []  # dry-run 不写队列
 
@@ -288,7 +288,7 @@ def test_qa_auto_closed_loop_applies(tmp_cfg, tmp_path, monkeypatch):
 
     args = type("A", (), dict(pages=["page1.html"], start=None, count=None,
                               adjudicate_only=True, no_apply=False,
-                              dry_run=False, max_items=0))()
+                              dry_run=False, max_items=0, only_ids=None))()
     pipeline.cmd_qa_auto(cfg, args)
     queue = qq.load(cfg)
     assert queue[0]["status"] == "applied"
@@ -298,9 +298,52 @@ def test_qa_auto_closed_loop_applies(tmp_cfg, tmp_path, monkeypatch):
     assert any(s.translation for s in segs)
 
 
+def test_qa_auto_only_ids_filters(tmp_cfg, tmp_path, monkeypatch):
+    from booktr import pipeline
+    _seed_translated(tmp_cfg, tmp_path)
+    cfg = tmp_cfg
+    cfg.set("mock", "qa", "supervisor", "provider")
+    it1 = qq.make_item("page1.html", {
+        "severity": "low", "reason": "生硬，翻译腔", "src_quote": "a",
+        "dst_quote": "a", "suggestion": "s1", "segments": [1], "resolved": True})
+    it2 = qq.make_item("page1.html", {
+        "severity": "low", "reason": "全角标点未保持原样", "src_quote": "b",
+        "dst_quote": "b", "suggestion": "s2", "segments": [1], "resolved": True})
+    qq.append_items(cfg, [it1, it2])
+    ids_file = os.path.join(cfg.work_dir, "ids.json")
+    with open(ids_file, "w", encoding="utf-8") as f:
+        json.dump([it2["id"]], f)  # 只裁 it2
+
+    class AdoptLLM(FakeLLM):
+        def _next(self, system, user):
+            return '{"verdict":"adopt","reason":"ok","suggestion":"s2"}'
+
+    monkeypatch.setattr(pipeline, "_supervisor_client", lambda c: AdoptLLM())
+    monkeypatch.setattr(pipeline, "_client", lambda c: FakeLLM.default())
+    args = _mkargs(adjudicate_only=True, no_apply=True, only_ids=ids_file)
+    pipeline.cmd_qa_auto(cfg, args)
+    by_id = {x["id"]: x for x in qq.load(cfg)}
+    assert by_id[it2["id"]]["status"] == "adopted"
+    assert by_id[it1["id"]].get("status") == "open"  # 未被裁决
+
+
+def test_load_id_filter_formats(tmp_cfg, tmp_path):
+    from booktr import pipeline
+    os.makedirs(tmp_cfg.work_dir, exist_ok=True)
+    p1 = os.path.join(tmp_cfg.work_dir, "a.json")
+    p2 = os.path.join(tmp_cfg.work_dir, "b.json")
+    with open(p1, "w", encoding="utf-8") as f:
+        json.dump(["x", "y"], f)
+    with open(p2, "w", encoding="utf-8") as f:
+        json.dump([{"id": "z"}, {"no_id": 1}], f)
+    assert pipeline._load_id_filter(p1) == {"x", "y"}
+    assert pipeline._load_id_filter(p2) == {"z"}
+
+
 def _mkargs(**kw):
     base = dict(pages=None, start=None, count=None, adjudicate_only=False,
-                all=False, no_apply=False, dry_run=False, max_items=0)
+                all=False, no_apply=False, dry_run=False, max_items=0,
+                only_ids=None)
     base.update(kw)
     return type("A", (), base)()
 
@@ -369,6 +412,6 @@ def test_qa_auto_disabled(tmp_cfg, tmp_path, capsys):
     cfg.set(False, "qa", "supervisor", "enabled")
     args = type("A", (), dict(pages=["page1.html"], start=None, count=None,
                               adjudicate_only=False, no_apply=False,
-                              dry_run=False, max_items=0))()
+                              dry_run=False, max_items=0, only_ids=None))()
     pipeline.cmd_qa_auto(cfg, args)
     assert "未启用" in capsys.readouterr().err

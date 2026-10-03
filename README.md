@@ -120,6 +120,8 @@ python booktr-cli.py qa-auto --all                        # 纳入全部已译�
 python booktr-cli.py qa-auto --adjudicate-only            # 跳过 QA，仅裁定队列中 open 条目
 python booktr-cli.py qa-auto --no-apply                   # 只写裁决、不自动重译
 python booktr-cli.py qa-auto --dry-run                    # 跑 QA+裁定但只打印，不写不改
+# 只裁决指定 id 白名单（配合 tools/qa_auto_probe/analyze.py --emit-category 按类别筛选）
+python booktr-cli.py qa-auto --adjudicate-only --no-apply --only-ids work/qa2_DE_ids.json
 
 # 10c) 段落定位（按原文/译文片段定位段号）
 python booktr-cli.py locate --page today/today90.html --src "私も無理せず"   # 从页面复制的片段
@@ -365,6 +367,9 @@ QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 - **闭环**：采纳项按 `(页, 段)` 分组复用 `qa-apply` 的 `apply_qa_fix` 定点重译（同步清理旧 TM/notes/短语、重生成 out、提交段历史版本）。**判官 HTML 安全防线**：问题涉及标签/占位符时要求核对**源文本本身**，避免把 QA 幻觉（如源文即含的字面 `<`+`!` 文本）写成标签。
 
 **运行范围与续跑**：默认只处理**尚未 QA 过的已译页**（`--all` 可纳入已 QA 页；`--pages/--start/--count` 显式指定）。**逐页独立容错与增量落盘**——某页出错只记录并跳过，不中断整批；因"已完成页才计入报告"，中断后**重跑同一命令即自动续跑**。每次运行的逐页统计与错误写入 `work/qa_auto_runs/qa_auto_<ts>.{log,json}`（`qa.auto_log_dir` 可配）。
+
+**按 id 白名单裁**：`--only-ids <file>` 只裁决白名单里的条目（`["id",...]` 或 `[{"id":...}]`），**未选中的 open 条目保持不动**。可配合 `tools/qa_auto_probe/analyze.py --emit-category <data_dir> --category DE` 按问题类别（A 标点/全半角、B 术语专名未译、C 前后不一致、D 措辞/翻译腔、E 漏译/语义偏移、F 术语选词、G 星期日期数字）产出名单，人工增删后只对某类问题跑闭环，例如"只对 D+E 措辞语义类裁决"：
+`qa-auto --adjudicate-only --no-apply --only-ids work/qa2_DE_ids.json`。
 
 配置（`qa.supervisor`）：`enabled`（默认 true）、`provider`/`base_url`/`model`/`api_key_env`/`api_key`/`api_key_required`（**空值继承主 `llm`**）、`temperature`（默认 0.1）、`max_tokens`（默认 131072；正文因 reasoning 截空时自动翻倍，上限 `llm.max_tokens_ceiling`）、`timeout`（默认 120，短超时快速暴露抖动）、`max_retries`（默认 1）、`reasoning_effort`、`include_all_summaries`、`all_summaries_max_chars`、`multi_turn`、`log`（判官调用是否写 `llm_logs`，默认 true；判官 system 很大，长跑可设 false 省磁盘）。判官漂移可离线审计：`python tools/qa_auto_probe/analyze.py --audit <data_dir>`。设计依据与实测评估见工作区报告 `instance/report/qa_auto_probe_report.md`；阶段 0 的探针/评估脚本留存于 [`tools/qa_auto_probe/`](tools/qa_auto_probe/README.md)（`judge` 判官校准 / `e2e` 端到端 / `analyze` 问题级复现率分析）。
 

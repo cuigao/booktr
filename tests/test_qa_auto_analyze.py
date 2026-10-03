@@ -98,6 +98,32 @@ def test_prod_analysis_metrics_and_no_side_effects(fake_prod, tmp_path):
     assert os.path.exists(os.path.join(out, "_out", "prod_analysis.txt"))
 
 
+def test_classify_reason():
+    m = _load()
+    assert m.classify_reason("全角标点未保持原样") == "A"
+    assert m.classify_reason("专名未译出，仅保留日文原形") == "B"
+    assert m.classify_reason("同一词前后不一致") == "C"
+    assert m.classify_reason("表达生硬、翻译腔") == "D"
+    assert m.classify_reason("漏译，语义偏移") == "E"
+    assert m.classify_reason("无关描述") == "?"
+
+
+def test_emit_category_writes_whitelist(fake_prod, tmp_path):
+    m = _load()
+    # 追加一条 D 类 open 条目
+    qp = os.path.join(fake_prod, "work", "qa_queue.json")
+    q = json.load(open(qp, encoding="utf-8"))
+    q.append({"id": "d1", "page": "p/a.html", "segments": [1], "status": "open",
+              "severity": "low", "reason": "表达生硬、翻译腔",
+              "src_quote": "a", "dst_quote": "b", "suggestion": "c"})
+    json.dump(q, open(qp, "w", encoding="utf-8"), ensure_ascii=False)
+    out = str(tmp_path / "emit")
+    ids_path = m.emit_category(fake_prod, "DE", out, None)
+    ids = json.load(open(ids_path, encoding="utf-8"))
+    # 原 fake 队列中 q3(reason="专名未译"→B) 不算；仅新增 d1 属 D
+    assert ids == ["d1"]
+
+
 def test_item_issue_match_requires_same_segment():
     m = _load()
     a = {"segments": [1], "reason": "措辞生硬", "suggestion": "改顺", "dst_quote": "生硬"}

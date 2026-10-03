@@ -1273,6 +1273,23 @@ def cmd_qa_status(cfg: Config, args) -> None:
               f"有未决(open)条目的页 {len(open_by_page)} 个。")
 
 
+def _load_id_filter(path: str) -> set[str]:
+    """读取 qa-auto --only-ids 的 id 白名单文件。
+
+    容忍两种格式：``["id", ...]`` 或 ``[{"id": ...}, ...]``。空/无匹配返回空集合。
+    """
+    data = util.read_json(path, None)
+    if data is None:
+        raise SystemExit(f"无法读取 id 白名单文件：{path}")
+    ids: set[str] = set()
+    for x in data if isinstance(data, list) else []:
+        if isinstance(x, str):
+            ids.add(x)
+        elif isinstance(x, dict) and x.get("id"):
+            ids.add(str(x["id"]))
+    return ids
+
+
 def _qa_auto_targets(cfg: Config, args) -> tuple[list[str], str]:
     """解析 qa-auto 目标页与 scope 描述。
 
@@ -1323,7 +1340,19 @@ def cmd_qa_auto(cfg: Config, args) -> None:
     sm = util.read_json(os.path.join(cfg.work_dir, "site_map.json"), {})
     plan = util.read_json(os.path.join(cfg.work_dir, "plan.json"), {})
 
+    only_ids: set[str] = set()
+    if getattr(args, "only_ids", None):
+        only_ids = _load_id_filter(args.only_ids)
+        if not only_ids:
+            print(f"qa-auto：id 白名单为空（{args.only_ids}），无条目可裁决。")
+            return
+
     targets, scope = _qa_auto_targets(cfg, args)
+    if only_ids:
+        q_all = qa_queue_mod.load(cfg)
+        wl_pages = {it.get("page") for it in q_all if it.get("id") in only_ids}
+        targets = [p for p in targets if p in wl_pages]
+        scope = f"{scope}（仅 {len(only_ids)} 个 id / {len(targets)} 页）"
     if not targets:
         print(f"qa-auto：{scope}，没有可处理的页面。")
         return
@@ -1386,6 +1415,8 @@ def cmd_qa_auto(cfg: Config, args) -> None:
             items = [it for it in queue if it.get("page") == rel
                      and it.get("status") == qa_queue_mod.STATUS_OPEN
                      and it.get("resolved") and it.get("segments")]
+            if only_ids:
+                items = [it for it in items if it.get("id") in only_ids]
             if args.max_items and args.max_items > 0:
                 items = items[:args.max_items]
             if not items:
@@ -2695,6 +2726,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="跑 QA + 裁定但只打印，不写队列、不 apply")
     sp.add_argument("--max-items", type=int, default=0,
                     help="每页最多裁定的条目数（0=不限）")
+    sp.add_argument("--only-ids", default=None,
+                    help="仅裁决给定 id 白名单文件（[\"id\",...] 或 [{\"id\":...}]）中的条目")
     sp.add_argument("--all", action="store_true",
                     help="默认仅处理未 QA 的页；此开关纳入全部已译页（含已 QA）")
     sp.set_defaults(func=cmd_qa_auto)

@@ -149,6 +149,81 @@ def _read_json_opt(path, default):
         return default
 
 
+# 问题根因分类（关键词启发式，A→G 顺序取首个命中）
+CATEGORY_KEYWORDS = [
+    ("A", "标点/全半角/特殊符号",
+     ["全角", "半角", "省略号", "破折号", "标点", "书名号", "引号", "连字符",
+      "中点", "符号", "问号", "句号"]),
+    ("B", "术语/专名未译或保留原形",
+     ["未译出", "仅保留", "保留原形", "保留原文", "未按词汇表", "未译",
+      "保留日文", "片假名原形", "不应译为", "保留英文", "原样保留"]),
+    ("C", "用词/译名前后不一致",
+     ["不一致", "前后", "同一", "混淆", "撞车", "不统一", "混排"]),
+    ("D", "措辞/语气/翻译腔",
+     ["生硬", "翻译腔", "不自然", "累赘", "重复", "搭配", "语气", "口吻",
+      "书面", "生造", "拗口", "别扭", "习惯", "不贴切", "不妥"]),
+    ("E", "漏译/语义偏移/增译",
+     ["漏译", "误译", "语义", "偏移", "丢失", "未体现", "增补", "多余",
+      "窄化", "不准确", "误解", "增译", "添加", "偏差", "错误"]),
+    ("F", "术语/专名选词不当(非未译)", ["词汇表", "术语", "专名"]),
+    ("G", "星期/日期/数字", ["星期", "曜日", "周二", "周一", "周三", "周"]),
+]
+
+
+def classify_reason(reason: str) -> str:
+    """把问题 reason 归入 A–G 的首个命中的类别字母（未命中返回 "?"）。"""
+    r = reason or ""
+    for letter, _label, kws in CATEGORY_KEYWORDS:
+        if any(k in r for k in kws):
+            return letter
+    return "?"
+
+
+def emit_category(data_dir, category, out, qa2_ts):
+    """从 QA2 的 open 条目中筛出指定类别，输出 id 白名单 + 可读清单。只读实例。"""
+    want_all = not category or category.upper() in ("ALL", "*")
+    want = set((category or "").upper())
+    q = _load_qa_queue(data_dir)
+    reports = _list_qa_reports(data_dir)
+    ts, path, rep = _pick_qa2(reports, qa2_ts)
+    issues2 = _issues_by_page(rep)
+
+    from collections import defaultdict, Counter
+    open_items = [it for it in q if it.get("status") == "open"]
+    # open 条目须能在 QA2 报告里找到对应（按 id 去重已保证唯一）
+    picked, by_cat = [], Counter()
+    for it in open_items:
+        letter = classify_reason(it.get("reason", ""))
+        if want_all or letter in want:
+            picked.append((it, letter))
+            by_cat[letter] += 1
+
+    os.makedirs(out, exist_ok=True)
+    ids_path = os.path.join(out, "qa2_DE_ids.json")
+    with open(ids_path, "w", encoding="utf-8") as f:
+        json.dump([it.get("id") for it, _ in picked], f, ensure_ascii=False, indent=2)
+    lines = [f"# QA2 open 条目分类筛选（category={'ALL' if want_all else category}）",
+             f"QA2 基线: {ts} | open 总数 {len(open_items)} | 命中 {len(picked)}",
+             "", "## 类别分布（全部 open）"]
+    allcat = Counter(classify_reason(it.get("reason", "")) for it in open_items)
+    labels = {l: name for l, name, _ in CATEGORY_KEYWORDS}
+    for l in ["A", "B", "C", "D", "E", "F", "G", "?"]:
+        if allcat.get(l):
+            lines.append(f"    {l} {labels.get(l, '其它')}: {allcat[l]}")
+    lines.append(f"\n## 命中条目（{len(picked)}）")
+    for it, letter in picked:
+        lines.append(f"  [{letter}] {it.get('page')} 段{it.get('segments')} "
+                     f"[{it.get('severity')}] {it.get('id')}")
+        lines.append(f"      {(it.get('reason') or '')[:100]}")
+    txt = "\n".join(lines)
+    rep_path = os.path.join(out, "qa2_DE_report.txt")
+    open(rep_path, "w", encoding="utf-8").write(txt)
+    print(txt)
+    print(f"\nid 白名单: {ids_path}（{len(picked)} 条）")
+    print(f"可读清单: {rep_path}")
+    return ids_path
+
+
 def _load_qa_queue(data_dir):
     return _read_json_opt(os.path.join(data_dir, "work", "qa_queue.json"), []) or []
 
@@ -409,6 +484,11 @@ def main():
     ap.add_argument("--result", default=None, help="e2e_result.json 路径")
     ap.add_argument("--audit", default=None, help="审计模式：指向实例 data_dir")
     ap.add_argument("--prod", default=None, help="生产评估模式：指向实例 data_dir（只读）")
+    ap.add_argument("--emit-category", default=None,
+                    help="按类别筛选 QA2 open 条目，指向实例 data_dir；配合 --category")
+    ap.add_argument("--category", default="DE",
+                    help="类别字母（如 DE / A / ALL），默认 DE")
+    ap.add_argument("--out", default=None, help="--emit-category 输出目录（默认 _out）")
     ap.add_argument("--qa2", default=None, help="指定 QA2 报告的 ts（默认取 checked 最多者）")
     ap.add_argument("--out-dir", default=os.path.dirname(os.path.abspath(__file__)))
     ap.add_argument("--threshold", type=float, default=0.6, help="问题级复现相似度阈值")
@@ -417,11 +497,16 @@ def main():
     if args.audit:
         audit_drift(args.audit, args.out_dir)
         return
+    if args.emit_category:
+        out = args.out or os.path.join(args.out_dir, "_out")
+        emit_category(args.emit_category, args.category, out, args.qa2)
+        return
     if args.prod:
         prod_analysis(args.prod, args.qa2, args.threshold, args.out_dir)
         return
     if not args.result:
-        ap.error("需要 --result <e2e_result.json> / --audit <data_dir> / --prod <data_dir>")
+        ap.error("需要 --result / --audit <data_dir> / --prod <data_dir> / "
+                 "--emit-category <data_dir>")
 
     res = json.load(open(args.result, encoding="utf-8"))
     agg = {"adopted": 0, "adopted_recur": 0, "rejected": 0, "rejected_recur": 0,

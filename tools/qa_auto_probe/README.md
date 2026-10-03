@@ -52,6 +52,19 @@ python tools/qa_auto_probe/analyze.py --prod ../../instance/data-deepseek-v4.1-f
 阈值 0.5/0.6/0.7 敏感性）、QA2 问题三分类（复现 / 新且落在已改段 / 新且他处）、
 apply 前后 **diff 相似度分布**、残存 high 清单、qa-auto 运行汇总。
 
+`--emit-category`（只读）按**问题类别**筛出 QA2 的 open 条目，产出 `qa-auto --only-ids`
+可用的 id 白名单（用于"只对某类问题跑 qa-auto"）：
+
+```bash
+python tools/qa_auto_probe/analyze.py --emit-category ../../instance/data-deepseek-v4.1-flash \
+    --category DE --out ../../instance/data-deepseek-v4.1-flash/work
+```
+
+类别 A–G：A 标点/全半角、B 术语/专名未译、C 前后不一致、D 措辞/语气/翻译腔、
+E 漏译/语义偏移/增译、F 术语选词、G 星期日期数字（关键词启发式，A→G 取首个命中）。
+输出 `qa2_DE_ids.json`（`["id",...]`，人工增删后交 `qa-auto --only-ids`）与
+`qa2_DE_report.txt`（按类可读清单）。
+
 `--audit`（只读）审计判官日志，检测重置态调用 / 索引回显不符 / 响应错位：
 
 ```bash
