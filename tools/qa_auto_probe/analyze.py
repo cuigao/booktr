@@ -149,6 +149,231 @@ def _read_json_opt(path, default):
         return default
 
 
+def _load_qa_queue(data_dir):
+    return _read_json_opt(os.path.join(data_dir, "work", "qa_queue.json"), []) or []
+
+
+def _list_qa_reports(data_dir):
+    """列出实例的全部 QA 报告：[(ts, path, obj)]。"""
+    import glob
+    d = os.path.join(data_dir, "work", "qa_reports")
+    out = []
+    for f in glob.glob(os.path.join(d, "*.json")):
+        j = _read_json_opt(f, None)
+        if j is None:
+            continue
+        ts = j.get("ts") or os.path.splitext(os.path.basename(f))[0][3:]
+        out.append((ts, f, j))
+    return out
+
+
+def _pick_qa2(reports, ts=None):
+    """选定用作 QA2 基线的一份报告（默认 version≥2 且 checked 最多者）。"""
+    if ts:
+        for rts, f, j in reports:
+            if rts == ts:
+                return rts, f, j
+        raise SystemExit(f"未找到 qa2 ts={ts}")
+    if not reports:
+        raise SystemExit("该实例没有任何 QA 报告")
+    cands = [r for r in reports if (r[2].get("version") or 1) >= 2]
+    if not cands:
+        cands = reports
+    cands.sort(key=lambda r: (len(r[2].get("checked") or {}), os.path.getmtime(r[1])))
+    return cands[-1]
+
+
+def _issues_by_page(report):
+    from collections import defaultdict
+    by = defaultdict(list)
+    for pg, items in (report.get("pages") or {}).items():
+        by[pg].extend(items)
+    return by
+
+
+def _recur(its, issues2, threshold):
+    """逐条在**同页 QA2** 中找"问题级"匹配；返回 [(item, matched_issue|None, score)]。"""
+    hits = []
+    for it in its:
+        best, bi = 0.0, None
+        for iss in issues2.get(it.get("page", ""), []):
+            ok, sc = item_issue_match(it, iss, threshold)
+            if ok and sc > best:
+                best, bi = sc, iss
+        hits.append((it, bi, best))
+    return hits
+
+
+def _diff_safety(data_dir):
+    """apply 前/后相似度（取每段最后一次 qa-apply 相对其前驱版本）。"""
+    import glob
+    hd = os.path.join(data_dir, "work", "segment_history")
+    rows, rewrites = [], []
+    for f in glob.glob(os.path.join(hd, "*.json")):
+        h = _read_json_opt(f, {})
+        for sid, vers in (h.get("segments") or {}).items():
+            idxs = [i for i, v in enumerate(vers) if v.get("op") == "qa-apply"]
+            if not idxs or idxs[-1] == 0:
+                continue
+            i = idxs[-1]
+            before = (vers[i - 1].get("cache") or {}).get("translation") or ""
+            after = (vers[i].get("cache") or {}).get("translation") or ""
+            if not before or not after:
+                continue
+            sc = round(_similar(before, after), 3)
+            rows.append(sc)
+            if sc < 0.4:
+                rewrites.append((sc, os.path.basename(f), sid, before, after))
+    rows.sort()
+    n = len(rows)
+    stats = {
+        "n": n,
+        "mean": round(sum(rows) / n, 3) if n else 0.0,
+        "median": rows[n // 2] if n else 0.0,
+        "min": rows[0] if n else 0.0,
+        "p10": rows[n // 10] if n else 0.0,
+        "rewrite_lt0.4": len(rewrites),
+    }
+    return stats, rewrites
+
+
+def _load_runs(data_dir):
+    import glob
+    from collections import Counter
+    agg = Counter()
+    runs = []
+    for f in sorted(glob.glob(os.path.join(data_dir, "work", "qa_auto_runs", "*.json"))):
+        j = _read_json_opt(f, None)
+        if not j:
+            continue
+        t = j.get("total", {})
+        runs.append((os.path.basename(f), j.get("scope", ""), t))
+        for k, v in t.items():
+            agg[k] += v
+    return runs, agg
+
+
+def prod_analysis(data_dir: str, qa2_ts, threshold: float, out_dir: str):
+    """生产实例评估：问题级复现率 / 新问题构成 / diff 安全 / 严重度分布。只读。"""
+    from collections import Counter
+    q = _load_qa_queue(data_dir)
+    reports = _list_qa_reports(data_dir)
+    ts, path, rep = _pick_qa2(reports, qa2_ts)
+    issues2 = _issues_by_page(rep)
+    glossary = _read_json_opt(os.path.join(data_dir, "work", "glossary.json"), [])
+    runs, run_agg = _load_runs(data_dir)
+
+    qa1 = [it for it in q if it.get("status") in ("applied", "rejected")]
+    applied = [it for it in qa1 if it.get("status") == "applied"]
+    rejected = [it for it in qa1 if it.get("status") == "rejected"]
+    opened = [it for it in q if it.get("status") == "open"]
+
+    def _src(it):
+        s = it.get("source")
+        return s if s else "qa(默认建议)"
+
+    a_hits = _recur(applied, issues2, threshold)
+    r_hits = _recur(rejected, issues2, threshold)
+    a_rec = sum(1 for _, bi, _ in a_hits if bi)
+    r_rec = sum(1 for _, bi, _ in r_hits if bi)
+
+    by_src = Counter()
+    by_src_rec = Counter()
+    for it, bi, _ in a_hits:
+        by_src[_src(it)] += 1
+        if bi:
+            by_src_rec[_src(it)] += 1
+
+    # 阈值敏感性
+    sens = {}
+    for th in (0.5, 0.6, 0.7):
+        sens[th] = (sum(1 for _, bi, _ in _recur(applied, issues2, th) if bi),
+                    sum(1 for _, bi, _ in _recur(rejected, issues2, th) if bi))
+
+    # QA2 问题三分类
+    touched = {}
+    for it in applied:
+        touched.setdefault(it.get("page", ""), set()).update(
+            str(x) for x in it.get("segments") or [])
+    cat = Counter()
+    rec_sev = Counter()
+    high_norec, high_rec = [], []
+    for pg, arr in issues2.items():
+        for iss in arr:
+            segs = set(str(x) for x in iss.get("segments") or [])
+            hit = any(item_issue_match(it, iss, threshold)[0]
+                      for it in qa1 if it.get("page") == pg)
+            if hit:
+                cat["recur(已裁问题)"] += 1
+                rec_sev[iss.get("severity")] += 1
+                if iss.get("severity") == "high":
+                    high_rec.append((pg, iss))
+            elif segs & touched.get(pg, set()):
+                cat["new(落在已改段)"] += 1
+            else:
+                cat["new(他处)"] += 1
+            if iss.get("severity") == "high" and not hit:
+                high_norec.append((pg, iss, bool(segs & touched.get(pg, set()))))
+
+    qa2_sev = Counter(i.get("severity") for arr in issues2.values() for i in arr)
+    qa1_sev = Counter(it.get("severity") for it in qa1)
+
+    diff_stats, rewrites = _diff_safety(data_dir)
+
+    L = ["# qa-auto 生产效果评估（--prod 只读）", f"\n数据目录: {data_dir}"]
+    L.append(f"QA2 基线: {ts}  ({os.path.basename(path)})  "
+             f"version={rep.get('version')} scope={rep.get('scope')} "
+             f"checked={len(rep.get('checked') or {})} pages={len(issues2)}")
+    L.append(f"词表: {len(glossary)} 条（旧口径） | 队列: 总 {len(q)} "
+             f"(applied {len(applied)} / rejected {len(rejected)} / open {len(opened)})")
+    L.append("\n## 1. 主指标｜问题级复现率（同段 ∩ 相似度 ≥ %.2f）（阈值敏感性见表）" % threshold)
+    L.append(f"applied {len(applied)} 条 → 复现 {a_rec} ({a_rec / max(len(applied), 1):.0%}) "
+             f"⇒ **修复 {len(applied) - a_rec} ({(len(applied) - a_rec) / max(len(applied), 1):.0%})**")
+    L.append(f"rejected {len(rejected)} 条 → 复现 {r_rec} ({r_rec / max(len(rejected), 1):.0%})")
+    L.append("  按来源：")
+    for s in sorted(by_src, key=lambda x: -by_src[x]):
+        L.append(f"    {s}: {by_src[s]} 条，复现 {by_src_rec[s]} "
+                 f"({by_src_rec[s] / max(by_src[s], 1):.0%})")
+    L.append("  阈值敏感性（阈值: applied复现 / rejected复现）：")
+    for th in (0.5, 0.6, 0.7):
+        L.append(f"    {th:.2f}: {sens[th][0]} / {sens[th][1]}")
+
+    L.append("\n## 2. QA2 问题构成")
+    L.append(f"总 {sum(cat.values())} | " + " | ".join(f"{k} {v}" for k, v in cat.items()))
+    L.append(f"复现问题严重度: {dict(rec_sev)} | QA2 全量严重度: {dict(qa2_sev)} "
+             f"| QA1 已裁严重度: {dict(qa1_sev)}")
+
+    L.append("\n## 3. 客观指标｜diff 安全（apply 前/后相似度）")
+    L.append(f"样本 {diff_stats['n']} 段 | 均值 {diff_stats['mean']} | 中位 {diff_stats['median']} "
+             f"| p10 {diff_stats['p10']} | 最小 {diff_stats['min']} "
+             f"| 相似度<0.4(疑整段重写) {diff_stats['rewrite_lt0.4']}")
+    for sc, f, sid, b, a in rewrites[:12]:
+        L.append(f"    [{sc}] {f} 段{sid}")
+        L.append(f"        before: {b[:70]}")
+        L.append(f"        after : {a[:70]}")
+
+    L.append("\n## 4. 残存 high（未复现，%d 条）" % len(high_norec))
+    for pg, iss, on_touched in high_norec:
+        L.append(f"    {pg} 段{iss.get('segments')} touched={on_touched} | "
+                 f"{(iss.get('reason') or '')[:80]}")
+    L.append("\n## 5. 复现的 high（%d 条）" % len(high_rec))
+    for pg, iss in high_rec:
+        L.append(f"    {pg} 段{iss.get('segments')} | {(iss.get('reason') or '')[:80]}")
+
+    L.append("\n## 6. qa-auto 运行汇总")
+    for name, scope, t in runs:
+        L.append(f"    {name} [{scope}] {t}")
+
+    txt = "\n".join(L)
+    o = os.path.join(out_dir, "_out")
+    os.makedirs(o, exist_ok=True)
+    p = os.path.join(o, "prod_analysis.txt")
+    open(p, "w", encoding="utf-8").write(txt)
+    print(txt)
+    print("\n留存:", p)
+    return txt
+
+
 def _items_from_page(bypage, key):
     for pg, its in bypage.items():
         if pg.replace("/", "_").split(".")[0] == key.split(".")[0]:
@@ -182,7 +407,9 @@ def _parse_seed_items(seed: str) -> list[dict]:
 def main():
     ap = argparse.ArgumentParser(description="qa-auto 结果分析 / 判官漂移审计")
     ap.add_argument("--result", default=None, help="e2e_result.json 路径")
-    ap.add_argument("--audit", default=None, help="改为审计模式：指向实例 data_dir")
+    ap.add_argument("--audit", default=None, help="审计模式：指向实例 data_dir")
+    ap.add_argument("--prod", default=None, help="生产评估模式：指向实例 data_dir（只读）")
+    ap.add_argument("--qa2", default=None, help="指定 QA2 报告的 ts（默认取 checked 最多者）")
     ap.add_argument("--out-dir", default=os.path.dirname(os.path.abspath(__file__)))
     ap.add_argument("--threshold", type=float, default=0.6, help="问题级复现相似度阈值")
     args = ap.parse_args()
@@ -190,8 +417,11 @@ def main():
     if args.audit:
         audit_drift(args.audit, args.out_dir)
         return
+    if args.prod:
+        prod_analysis(args.prod, args.qa2, args.threshold, args.out_dir)
+        return
     if not args.result:
-        ap.error("需要 --result <e2e_result.json> 或 --audit <data_dir>")
+        ap.error("需要 --result <e2e_result.json> / --audit <data_dir> / --prod <data_dir>")
 
     res = json.load(open(args.result, encoding="utf-8"))
     agg = {"adopted": 0, "adopted_recur": 0, "rejected": 0, "rejected_recur": 0,

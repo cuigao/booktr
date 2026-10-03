@@ -12,9 +12,10 @@
 | 文件 | 说明 |
 |---|---|
 | `probe.py` | 探针：`judge`（判官校准，只读回放）/ `e2e`（端到端 QA1→判官→apply→QA2） |
-| `analyze.py` | 读取 e2e 结果，算**问题级复现率** / 裁决分布 / diff 段数，输出 `analysis.txt` |
-| `_samples/analysis.txt` | 归档的一次运行分析结果（可读证据） |
-| `_out/` | 运行输出（gitignore：结果 JSON 与 `logs/`） |
+| `analyze.py` | `--result`：算 e2e **问题级复现率** / 裁决分布 / diff 段数；`--audit`：判官漂移审计；`--prod`：生产实例评估 |
+| `_samples/analysis.txt` | 归档的 e2e 分析结果（可读证据） |
+| `_samples/prod_analysis.txt` | 归档的生产实例评估结果（可读证据） |
+| `_out/` | 运行输出（gitignore：结果 JSON、`drift_audit.txt` 与 `logs/`） |
 
 ## 用法
 
@@ -39,6 +40,25 @@ python tools/qa_auto_probe/analyze.py \
 
 `--data-dir` 相对路径相对**项目根 `src/`** 解析（与 CLI 一致）；结果默认写
 `_out/`，可用 `--out`/`--out-dir` 覆盖。
+
+`--prod`（对生产实例做只读评估，不改任何数据；QA2 默认取 `version≥2` 且
+`checked` 最多的一份报告，可用 `--qa2 <ts>` 指定）：
+
+```bash
+python tools/qa_auto_probe/analyze.py --prod ../../instance/data-deepseek-v4.1-flash
+```
+
+输出 `_out/prod_analysis.txt`（同屏）：applied/rejected **问题级复现率**（按来源拆分 +
+阈值 0.5/0.6/0.7 敏感性）、QA2 问题三分类（复现 / 新且落在已改段 / 新且他处）、
+apply 前后 **diff 相似度分布**、残存 high 清单、qa-auto 运行汇总。
+
+`--audit`（只读）审计判官日志，检测重置态调用 / 索引回显不符 / 响应错位：
+
+```bash
+python tools/qa_auto_probe/analyze.py --audit ../../instance/data-deepseek-v4.1-flash
+```
+
+输出到 stdout 与 `--out-dir/drift_audit.txt`。
 
 ## 评估方法（要点）
 
