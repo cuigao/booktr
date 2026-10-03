@@ -122,6 +122,9 @@ def test_emit_category_writes_whitelist(fake_prod, tmp_path):
     ids = json.load(open(ids_path, encoding="utf-8"))
     # 原 fake 队列中 q3(reason="专名未译"→B) 不算；仅新增 d1 属 D
     assert ids == ["d1"]
+    report = open(os.path.join(out, "qa2_DE_report.txt"), encoding="utf-8").read()
+    assert "推荐译文: c" in report  # 报告含 QA 推荐译文
+    assert "原因: 表达生硬" in report
 
 
 def test_item_issue_match_requires_same_segment():

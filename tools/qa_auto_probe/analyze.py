@@ -214,7 +214,14 @@ def emit_category(data_dir, category, out, qa2_ts):
     for it, letter in picked:
         lines.append(f"  [{letter}] {it.get('page')} 段{it.get('segments')} "
                      f"[{it.get('severity')}] {it.get('id')}")
-        lines.append(f"      {(it.get('reason') or '')[:100]}")
+        if it.get("reason"):
+            lines.append(f"      原因: {(it.get('reason') or '')[:100]}")
+        if it.get("src_quote"):
+            lines.append(f"      相关原文: {(it.get('src_quote') or '')[:80]}")
+        if it.get("dst_quote"):
+            lines.append(f"      现有译文: {(it.get('dst_quote') or '')[:80]}")
+        if it.get("suggestion"):
+            lines.append(f"      推荐译文: {(it.get('suggestion') or '')[:160]}")
     txt = "\n".join(lines)
     rep_path = os.path.join(out, "qa2_DE_report.txt")
     open(rep_path, "w", encoding="utf-8").write(txt)
@@ -427,13 +434,19 @@ def prod_analysis(data_dir: str, qa2_ts, threshold: float, out_dir: str):
         L.append(f"        before: {b[:70]}")
         L.append(f"        after : {a[:70]}")
 
+    def _iss_line(pg, iss, extra=""):
+        line = f"    {pg} 段{iss.get('segments')}{extra} | {(iss.get('reason') or '')[:80]}"
+        sug = (iss.get("suggestion") or "").strip()
+        if sug:
+            line += f"\n        └ 推荐: {sug[:160]}"
+        return line
+
     L.append("\n## 4. 残存 high（未复现，%d 条）" % len(high_norec))
     for pg, iss, on_touched in high_norec:
-        L.append(f"    {pg} 段{iss.get('segments')} touched={on_touched} | "
-                 f"{(iss.get('reason') or '')[:80]}")
+        L.append(_iss_line(pg, iss, extra=f" touched={on_touched}"))
     L.append("\n## 5. 复现的 high（%d 条）" % len(high_rec))
     for pg, iss in high_rec:
-        L.append(f"    {pg} 段{iss.get('segments')} | {(iss.get('reason') or '')[:80]}")
+        L.append(_iss_line(pg, iss))
 
     L.append("\n## 6. qa-auto 运行汇总")
     for name, scope, t in runs:
