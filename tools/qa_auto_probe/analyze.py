@@ -518,21 +518,20 @@ def variant_analysis(vdir: str, out_dir: str, data_dir: str | None = None):
         by[(j.get("end"), j.get("variant"))].append(j)
 
     lines = ["# 变体矩阵实验分析", f"\n目录: {vdir}"]
-    cost = ["\n## 成本/耗时"]
+    cost = ["\n## 成本/耗时/过思考", "（单次完成 >100k tok 或 >300s 标 ⚠ 过思考）"]
     for (end, vkey) in sorted(by, key=lambda x: (x[0], x[1])):
-        recs = sorted(by[(end, vkey)], key=lambda r: r.get("run", 0))
+        allrecs = sorted(by[(end, vkey)], key=lambda r: r.get("run", 0))
+        recs = [r for r in allrecs if (r.get("llm") or {}).get("calls", 0) > 0]
+        bad = len(allrecs) - len(recs)
 
-        def pset(rec):
-            keys = []
-            if end == "qa":
-                for pg, arr in (rec.get("qa") or {}).items():
-                    for iss in arr:
-                        keys.append(f"{pg}|{','.join(map(str, iss.get('segments') or []))}|"
-                                    f"{(iss.get('reason') or '')[:40]}")
-            return set(keys)
+        def _qa_hitset(rec):
+            s = set()
+            for pg, arr in (rec.get("qa") or {}).items():
+                for iss in arr:
+                    s.add((pg, tuple(map(str, iss.get("segments") or []))))
+            return s
 
         if end == "qa":
-            # 每变体每类的平均问题数
             catc = Counter(); sevc = Counter(); on_applied = 0; tot = 0
             for rec in recs:
                 for pg, arr in (rec.get("qa") or {}).items():
@@ -544,35 +543,45 @@ def variant_analysis(vdir: str, out_dir: str, data_dir: str | None = None):
                                 & applied_segs.get(pg, set()):
                             on_applied += 1
             n = max(len(recs), 1)
-            sets = [pset(r) for r in recs]
+            sets = [_qa_hitset(r) for r in recs]
             jac = _jaccard(sets)
-            lines.append(f"\n## qa {vkey}（{len(recs)} 次）"
+            union = set().union(*sets) if sets else set()
+            inter = set.intersection(*sets) if sets else set()
+            lines.append(f"\n## qa {vkey}（有效 {len(recs)} 次"
+                         + (f"，坏次 {bad}" if bad else "") + "）"
                          f"\n  平均问题数/次 {tot / n:.1f} | 严重度 {dict(sevc)}"
                          f" | 类别 {dict(catc)}")
             if data_dir:
                 lines.append(f"  落在曾 apply 段的比例 {on_applied / max(tot, 1):.0%}"
                              f"（振荡敏感度，越低越好）")
-            lines.append(f"  跨次稳定性(Jaccard 平均) {jac:.2f}（越高越稳定）")
+            lines.append(f"  跨次稳定性(段命中 Jaccard) {jac:.2f}"
+                         f"（并 {len(union)} / 交 {len(inter)}；越高越稳定）")
         elif end == "judge":
             vd = Counter()
             for rec in recs:
                 for pg, d in (rec.get("judge") or {}).items():
                     for v in (d.get("verdicts") or []):
                         vd[v.get("verdict")] += 1
-            lines.append(f"\n## judge {vkey}（{len(recs)} 次）\n  裁决分布 {dict(vd)}")
+            lines.append(f"\n## judge {vkey}（有效 {len(recs)} 次"
+                         + (f"，坏次 {bad}" if bad else "") + "）"
+                         f"\n  裁决分布 {dict(vd)}")
         else:  # translate
-            sets = [set(pset(r)) for r in recs]
-            # translate 无 pset；用每页译文是否与其它次相同衡量稳定性
             sims = _translate_stability(recs)
-            lines.append(f"\n## translate {vkey}（{len(recs)} 次）"
-                         f"\n  自相似(同风格跨次) {sims:.2f}")
+            lines.append(f"\n## translate {vkey}（有效 {len(recs)} 次"
+                         + (f"，坏次 {bad}" if bad else "") + "）"
+                         f"\n  自相似(同风格跨次) {sims:.2f}（越高越稳定）")
 
-        # 成本
-        tps = [r.get("llm", {}).get("prompt_tokens", 0) for r in recs]
-        tcs = [r.get("llm", {}).get("completion_tokens", 0) for r in recs]
-        durs = [r.get("duration_s", 0) for r in recs]
-        cost.append(f"- {end} {vkey}: tokens p={sum(tps)} c={sum(tcs)} "
-                    f"| 耗时合计 {sum(durs):.0f}s | 单次 {durs}")
+        # 成本 + 过思考标记
+        for r in allrecs:
+            llm = r.get("llm", {}) or {}
+            flag = ""
+            if llm.get("calls", 0) > 0 and (llm.get("completion_tokens", 0) > 100000
+                                            or r.get("duration_s", 0) > 300):
+                flag = " ⚠过思考"
+            cost.append(f"- {end} {vkey} run{r.get('run')}: "
+                        f"p={llm.get('prompt_tokens', 0)} c={llm.get('completion_tokens', 0)} "
+                        f"calls={llm.get('calls', 0)} {r.get('duration_s', 0):.0f}s"
+                        + (" [FAILED]" if llm.get("calls", 0) == 0 else flag))
 
     txt = "\n".join(lines + cost)
     os.makedirs(out_dir, exist_ok=True)

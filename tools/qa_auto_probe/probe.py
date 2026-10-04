@@ -312,13 +312,27 @@ def _judge_run(cfg, client, pages: list[str]) -> dict:
     return out
 
 
+def _run_valid(path: str, end: str, n_pages: int) -> bool:
+    """已有结果文件是否**有效**（用于 --skip-existing）：calls >= 页数 即视为有效。"""
+    j = util.read_json(path, None)
+    if not isinstance(j, dict):
+        return False
+    calls = (j.get("llm") or {}).get("calls", 0)
+    return calls >= n_pages
+
+
 def cmd_variant(cfg, args) -> None:
-    """变体矩阵实验：对指定页按 --variant 集逐变体逐次运行指定端，详细记录成本。"""
+    """变体矩阵实验：对指定页按 --variant 集逐变体逐次运行指定端，详细记录成本。
+
+    **逐次独立容错**：单次 run 失败（LLM 网络错误等）写 calls=0+error 记录并继续
+    下一变体，不中断整批。`--skip-existing`：已有**有效**结果则跳过（坏次重跑）。
+    """
     os.makedirs(args.out, exist_ok=True)
     runs_dir = os.path.join(args.out, "variant_runs")
     os.makedirs(runs_dir, exist_ok=True)
     variants = args.variant or list(VARIANT_TABLE)
     pages = args.pages
+    n_pages = len(pages)
     summary = []
 
     for vkey in variants:
@@ -326,54 +340,47 @@ def cmd_variant(cfg, args) -> None:
         if v is None:
             print(f"未知变体 {vkey}，跳过"); continue
         for run_i in range(1, args.runs + 1):
-            if args.end == "translate":
-                # 每次 translate 需干净副本：调用方负责在 run 前重置；此处仍重置
-                if args.style != "auto":
-                    style = args.style
-                else:
-                    style = v["style"]
-                cfg2 = _cfg(args.data_dir, args.out)
-                _apply_variant_cfg(cfg2, v)
-                client = _client(cfg2)
-                t0 = time.time()
-                snap = _translate_run(cfg2, client, pages, style)
-                dur = round(time.time() - t0, 1)
-                rec = {
-                    "variant": vkey, "run": run_i, "end": "translate",
-                    "style": style, "pages": pages, "duration_s": dur,
-                    "llm": client.stats_report(), "snapshot": snap,
-                    "command": getattr(args, "_argv", ""),
-                }
-            elif args.end == "qa":
-                cfg2 = _cfg(args.data_dir, args.out)
-                _apply_variant_cfg(cfg2, v)
-                client = _client(cfg2)
-                t0 = time.time()
-                qa_out = _qa_run(cfg2, client, pages)
-                dur = round(time.time() - t0, 1)
-                rec = {"variant": vkey, "run": run_i, "end": "qa",
-                       "vcfg": v, "pages": pages, "duration_s": dur,
-                       "llm": client.stats_report(), "qa": qa_out,
-                       "command": getattr(args, "_argv", "")}
-            else:  # judge
-                cfg2 = _cfg(args.data_dir, args.out)
-                _apply_variant_cfg(cfg2, v)
-                client = _client(cfg2)
-                t0 = time.time()
-                jd = _judge_run(cfg2, client, pages)
-                dur = round(time.time() - t0, 1)
-                rec = {"variant": vkey, "run": run_i, "end": "judge",
-                       "vcfg": v, "pages": pages, "duration_s": dur,
-                       "llm": client.stats_report(), "judge": jd,
-                       "command": getattr(args, "_argv", "")}
             fname = f"{args.end}_{vkey}_run{run_i}.json"
-            util.write_json(os.path.join(runs_dir, fname), rec)
-            st = rec["llm"]
+            fpath = os.path.join(runs_dir, fname)
+            if getattr(args, "skip_existing", False) and _run_valid(fpath, args.end, n_pages):
+                print(f"  {args.end} {vkey} run{run_i}: 有效，跳过（skip-existing）", flush=True)
+                continue
+            style = v["style"]
+            if args.end == "translate" and args.style != "auto":
+                style = args.style
+            t0 = time.time()
+            client = None
+            try:
+                cfg2 = _cfg(args.data_dir, args.out)
+                _apply_variant_cfg(cfg2, v)
+                client = _client(cfg2)
+                if args.end == "translate":
+                    snap = _translate_run(cfg2, client, pages, style)
+                    payload = {"style": style, "snapshot": snap}
+                elif args.end == "qa":
+                    payload = {"vcfg": v, "qa": _qa_run(cfg2, client, pages)}
+                else:
+                    payload = {"vcfg": v, "judge": _judge_run(cfg2, client, pages)}
+                err = ""
+            except Exception as e:  # 单次失败不中断整批
+                payload = {}
+                err = f"{type(e).__name__}: {e}"
+                print(f"  ! {args.end} {vkey} run{run_i} 失败: {err[:160]}", flush=True)
+            dur = round(time.time() - t0, 1)
+            st = client.stats_report() if client else {"calls": 0, "prompt_tokens": 0,
+                                                       "completion_tokens": 0}
+            rec = {"variant": vkey, "run": run_i, "end": args.end,
+                   "pages": pages, "duration_s": dur, "llm": st,
+                   "command": getattr(args, "_argv", ""), **payload}
+            if err:
+                rec["error"] = err
+            util.write_json(fpath, rec)
             print(f"  {args.end} {vkey} run{run_i}: {dur}s  "
                   f"tokens p={st.get('prompt_tokens')} c={st.get('completion_tokens')} "
-                  f"calls={st.get('calls')}", flush=True)
+                  f"calls={st.get('calls')}" + ("  [FAILED]" if err else ""), flush=True)
             summary.append({"file": fname, "variant": vkey, "run": run_i,
-                            "end": args.end, "duration_s": dur, "llm": st})
+                            "end": args.end, "duration_s": dur, "llm": st,
+                            "error": err})
     util.write_json(os.path.join(args.out, f"variant_summary_{args.end}.json"),
                     {"testset": pages, "runs": args.runs, "rows": summary})
     print(f"\n汇总留存: {os.path.join(args.out, f'variant_summary_{args.end}.json')}")
@@ -426,6 +433,8 @@ def main():
     ap.add_argument("--style", default="auto",
                     help="translate 端覆盖风格（auto=用变体定义；或 standard/faithful/fluent）")
     ap.add_argument("--runs", type=int, default=3, help="每变体重复次数")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="已有有效结果（calls>=页数）则跳过；坏次自动重跑")
     args = ap.parse_args()
     args._argv = " ".join(sys.argv[1:])
     cfg = _cfg(args.data_dir, args.out)

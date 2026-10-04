@@ -95,6 +95,46 @@ def test_variant_table_has_v0_to_v5():
     assert m.VARIANT_TABLE["V0"]["policy"] is False
 
 
+def test_probe_run_valid_skip_existing(tmp_path):
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                     "tools", "qa_auto_probe", "probe.py")
+    spec = importlib.util.spec_from_file_location("qa_var_probe2", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    good = str(tmp_path / "good.json")
+    bad = str(tmp_path / "bad.json")
+    json.dump({"llm": {"calls": 5}}, open(good, "w", encoding="utf-8"))
+    json.dump({"llm": {"calls": 1}}, open(bad, "w", encoding="utf-8"))
+    assert m._run_valid(good, "qa", 5) is True
+    assert m._run_valid(bad, "qa", 5) is False  # 坏次 → 重跑
+    assert m._run_valid(str(tmp_path / "missing.json"), "qa", 5) is False
+
+
+def test_variant_analysis_skips_bad_runs_and_hitset(tmp_path):
+    m = _analyze()
+    vdir = str(tmp_path / "v")
+    runs = os.path.join(vdir, "variant_runs")
+    os.makedirs(runs, exist_ok=True)
+    # run1 有效（命中段1）；run2 坏次（calls=0）；run3 有效（命中段2）
+    json.dump({"variant": "V1", "run": 1, "end": "qa",
+               "qa": {"p/a.html": [{"severity": "low", "reason": "生硬", "segments": [1]}]},
+               "llm": {"prompt_tokens": 10, "completion_tokens": 5, "calls": 5},
+               "duration_s": 2.0},
+              open(os.path.join(runs, "qa_V1_run1.json"), "w", encoding="utf-8"),
+              ensure_ascii=False)
+    json.dump({"variant": "V1", "run": 2, "end": "qa", "qa": {},
+               "llm": {"calls": 0}, "duration_s": 1.0},
+              open(os.path.join(runs, "qa_V1_run2.json"), "w", encoding="utf-8"))
+    json.dump({"variant": "V1", "run": 3, "end": "qa",
+               "qa": {"p/a.html": [{"severity": "low", "reason": "生硬", "segments": [2]}]},
+               "llm": {"calls": 5}, "duration_s": 2.0},
+              open(os.path.join(runs, "qa_V1_run3.json"), "w", encoding="utf-8"),
+              ensure_ascii=False)
+    txt = m.variant_analysis(vdir, str(tmp_path / "o"))
+    assert "有效 2 次" in txt and "坏次 1" in txt
+    assert "段命中 Jaccard" in txt
+
+
 def test_variant_analysis_smoke(tmp_path):
     m = _analyze()
     vdir = str(tmp_path / "v")
