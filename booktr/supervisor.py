@@ -66,12 +66,17 @@ def build_context(cfg: Config, rel: str) -> dict:
     gl_lines = prompts.term_lines(gl.all_confirmed(cfg))
     guide = styles_mod.load_guide(cfg) \
         if cfg.get("style", "rules_enabled", default=True) else ""
+    history_block = ""
+    if cfg.get("qa", "inject_history", default=False):
+        from . import qa as qa_mod
+        history_block = prompts.build_qa_history_block(qa_mod.build_history(cfg, rel))
     return {
         "page_ctx": page_ctx,
         "summaries": summaries,
         "glossary_lines": gl_lines,
         "style_guide": guide,
         "user_rules": user_rules,
+        "history_block": history_block,
         "page_src": page_src,
         "page_dst": page_dst,
     }

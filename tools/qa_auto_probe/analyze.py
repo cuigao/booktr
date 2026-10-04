@@ -492,11 +492,138 @@ def _parse_seed_items(seed: str) -> list[dict]:
     return items
 
 
+def variant_analysis(vdir: str, out_dir: str, data_dir: str | None = None):
+    """汇总 probe.py variant 运行结果：问题数/类别、跨次稳定性、成本、判官分布。
+
+    ``data_dir`` 给出时，统计 qa 变体问题中"落在曾被 apply 的段"的比例（振荡敏感度）。
+    """
+    import glob
+    from collections import defaultdict, Counter
+
+    # 曾被 apply 的段（来自实例队列，可选）
+    applied_segs = defaultdict(set)
+    if data_dir:
+        q = _load_qa_queue(data_dir)
+        for it in q:
+            if it.get("status") == "applied":
+                for s in it.get("segments") or []:
+                    applied_segs[it.get("page", "")].add(str(s))
+
+    files = sorted(glob.glob(os.path.join(vdir, "variant_runs", "*.json")))
+    by: dict[tuple, list] = defaultdict(list)
+    for f in files:
+        j = _read_json_opt(f, None)
+        if not j:
+            continue
+        by[(j.get("end"), j.get("variant"))].append(j)
+
+    lines = ["# 变体矩阵实验分析", f"\n目录: {vdir}"]
+    cost = ["\n## 成本/耗时"]
+    for (end, vkey) in sorted(by, key=lambda x: (x[0], x[1])):
+        recs = sorted(by[(end, vkey)], key=lambda r: r.get("run", 0))
+
+        def pset(rec):
+            keys = []
+            if end == "qa":
+                for pg, arr in (rec.get("qa") or {}).items():
+                    for iss in arr:
+                        keys.append(f"{pg}|{','.join(map(str, iss.get('segments') or []))}|"
+                                    f"{(iss.get('reason') or '')[:40]}")
+            return set(keys)
+
+        if end == "qa":
+            # 每变体每类的平均问题数
+            catc = Counter(); sevc = Counter(); on_applied = 0; tot = 0
+            for rec in recs:
+                for pg, arr in (rec.get("qa") or {}).items():
+                    for iss in arr:
+                        tot += 1
+                        sevc[iss.get("severity")] += 1
+                        catc[classify_reason(iss.get("reason", ""))] += 1
+                        if data_dir and set(map(str, iss.get("segments") or [])) \
+                                & applied_segs.get(pg, set()):
+                            on_applied += 1
+            n = max(len(recs), 1)
+            sets = [pset(r) for r in recs]
+            jac = _jaccard(sets)
+            lines.append(f"\n## qa {vkey}（{len(recs)} 次）"
+                         f"\n  平均问题数/次 {tot / n:.1f} | 严重度 {dict(sevc)}"
+                         f" | 类别 {dict(catc)}")
+            if data_dir:
+                lines.append(f"  落在曾 apply 段的比例 {on_applied / max(tot, 1):.0%}"
+                             f"（振荡敏感度，越低越好）")
+            lines.append(f"  跨次稳定性(Jaccard 平均) {jac:.2f}（越高越稳定）")
+        elif end == "judge":
+            vd = Counter()
+            for rec in recs:
+                for pg, d in (rec.get("judge") or {}).items():
+                    for v in (d.get("verdicts") or []):
+                        vd[v.get("verdict")] += 1
+            lines.append(f"\n## judge {vkey}（{len(recs)} 次）\n  裁决分布 {dict(vd)}")
+        else:  # translate
+            sets = [set(pset(r)) for r in recs]
+            # translate 无 pset；用每页译文是否与其它次相同衡量稳定性
+            sims = _translate_stability(recs)
+            lines.append(f"\n## translate {vkey}（{len(recs)} 次）"
+                         f"\n  自相似(同风格跨次) {sims:.2f}")
+
+        # 成本
+        tps = [r.get("llm", {}).get("prompt_tokens", 0) for r in recs]
+        tcs = [r.get("llm", {}).get("completion_tokens", 0) for r in recs]
+        durs = [r.get("duration_s", 0) for r in recs]
+        cost.append(f"- {end} {vkey}: tokens p={sum(tps)} c={sum(tcs)} "
+                    f"| 耗时合计 {sum(durs):.0f}s | 单次 {durs}")
+
+    txt = "\n".join(lines + cost)
+    os.makedirs(out_dir, exist_ok=True)
+    p = os.path.join(out_dir, "variant_analysis.txt")
+    open(p, "w", encoding="utf-8").write(txt)
+    print(txt)
+    print("\n留存:", p)
+    return txt
+
+
+def _jaccard(sets: list) -> float:
+    if len(sets) < 2:
+        return 1.0
+    num = den = 0.0
+    for i in range(len(sets)):
+        for k in range(i + 1, len(sets)):
+            a, b = sets[i], sets[k]
+            u = len(a | b)
+            num += len(a & b) / u if u else 1.0
+            den += 1
+    return num / den if den else 1.0
+
+
+def _translate_stability(recs: list) -> float:
+    """同风格跨次译文自相似：各页各次快照两两相似度平均。"""
+    if len(recs) < 2:
+        return 1.0
+    pages = set()
+    for r in recs:
+        pages |= set((r.get("snapshot") or {}).keys())
+    vals = []
+    for pg in pages:
+        texts = []
+        for r in recs:
+            snap = (r.get("snapshot") or {}).get(pg, {})
+            texts.append(" ".join(snap.get(k, "") for k in sorted(snap, key=lambda x: (len(x), x))))
+        for i in range(len(texts)):
+            for k in range(i + 1, len(texts)):
+                vals.append(_similar(texts[i], texts[k]))
+    return round(sum(vals) / len(vals), 3) if vals else 1.0
+
+
 def main():
     ap = argparse.ArgumentParser(description="qa-auto 结果分析 / 判官漂移审计")
     ap.add_argument("--result", default=None, help="e2e_result.json 路径")
     ap.add_argument("--audit", default=None, help="审计模式：指向实例 data_dir")
     ap.add_argument("--prod", default=None, help="生产评估模式：指向实例 data_dir（只读）")
+    ap.add_argument("--variant", default=None,
+                    help="变体实验目录（含 variant_runs/），汇总逐变体指标")
+    ap.add_argument("--ref-data-dir", default=None,
+                    help="变体分析参照的实例 data_dir（用于振荡敏感度）")
     ap.add_argument("--emit-category", default=None,
                     help="按类别筛选 QA2 open 条目，指向实例 data_dir；配合 --category")
     ap.add_argument("--category", default="DE",
@@ -513,6 +640,9 @@ def main():
     if args.emit_category:
         out = args.out or os.path.join(args.out_dir, "_out")
         emit_category(args.emit_category, args.category, out, args.qa2)
+        return
+    if args.variant:
+        variant_analysis(args.variant, args.out_dir, args.ref_data_dir)
         return
     if args.prod:
         prod_analysis(args.prod, args.qa2, args.threshold, args.out_dir)

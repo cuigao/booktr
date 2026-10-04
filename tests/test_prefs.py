@@ -183,7 +183,7 @@ def test_init_clone_inherits_config_and_data(tmp_path, monkeypatch):
     clone = _make_clone_source(tmp_path, monkeypatch)
     # 源目录/输出/工作/源语言/目标语言/风格(2=上海话)/provider(回车=openai-compatible)
     # base_url/model 回车 + API key 回车（保留）、N1..N3、其余开关回车
-    answers = ["", "", "", "", "", "2", "", "", "", "", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "4", "", "", "", "", "", "", "", "", "", ""]
     saved = _run_init(tmp_path, monkeypatch, answers, None, clone=clone)
     # 继承自 clone
     assert saved["llm"]["model"] == "deepseek-v4.1-flash:cloud"
@@ -234,8 +234,8 @@ def test_init_prefs_then_style_appends(tmp_path, monkeypatch):
     pref.write_text(json.dumps({
         "version": 1, "user_rules": "偏好基础规则", "glossary": [], "style_refs": [],
     }, ensure_ascii=False), encoding="utf-8")
-    # 输入顺序：源目录/输出/工作/源语言/目标语言/风格(2=上海话)/provider(1=mock)... 
-    answers = ["", "", "", "", "", "2", "1"]
+    # 输入顺序：源目录/输出/工作/源语言/目标语言/风格(4=上海话)/provider(1=mock)... 
+    answers = ["", "", "", "", "", "4", "1"]
     saved = _run_init(tmp_path, monkeypatch, answers, pref)
     assert "偏好基础规则" in saved["user_rules"]
     assert "## 翻译风格：上海话" in saved["user_rules"]
@@ -252,7 +252,7 @@ def test_init_prefs_with_dialect_no_duplicate(tmp_path, monkeypatch):
         "user_rules": "基础规则\n\n## 翻译风格：上海话\n- 旧方言块",
         "glossary": [], "style_refs": [],
     }, ensure_ascii=False), encoding="utf-8")
-    answers = ["", "", "", "", "", "2", "1"]
+    answers = ["", "", "", "", "", "4", "1"]
     saved = _run_init(tmp_path, monkeypatch, answers, pref)
     assert saved["user_rules"].count("## 翻译风格：上海话") == 1
     assert "旧方言块" in saved["user_rules"]

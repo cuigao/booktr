@@ -33,6 +33,50 @@ def locate_segments(segs: list, src_quote: str, dst_quote: str) -> list[int]:
     return [r["sid"] for r in results]
 
 
+def build_history(cfg: Config, rel: str) -> list[dict]:
+    """组装某页"已发生的 QA 决策"（供 QA/判官注入，减少摇摆）。只读。
+
+    含三类：已采纳（applied，附该段旧→新译文）、已拒绝（rejected，附理由与被拒建议）、
+    以及归档的 `llm_suggestion` 原始建议。
+    """
+    from . import history as hist_mod
+    from . import qa_queue as qqa
+
+    out: list[dict] = []
+    for it in qqa.load(cfg):
+        if it.get("page") != rel:
+            continue
+        status = it.get("status")
+        if status not in ("applied", "rejected"):
+            continue
+        h = {
+            "segments": it.get("segments") or [],
+            "status": status,
+            "reason": it.get("reason", ""),
+            "suggestion": it.get("suggestion", ""),
+            "llm_suggestion": it.get("llm_suggestion", ""),
+            "old_translation": "", "new_translation": "",
+        }
+        # applied：从段历史取该段最后一个非 qa-apply 与最后一个 qa-apply 版本译文
+        if status == "applied":
+            for sid in it.get("segments") or []:
+                vers = hist_mod.versions(cfg, rel, str(sid))
+                if not vers:
+                    continue
+                new_t = ""
+                old_t = ""
+                for v in reversed(vers):
+                    if v.get("op") == "qa-apply" and not new_t:
+                        new_t = (v.get("cache") or {}).get("translation", "") or ""
+                    if v.get("op") != "qa-apply" and new_t and not old_t:
+                        old_t = (v.get("cache") or {}).get("translation", "") or ""
+                        break
+                h["old_translation"], h["new_translation"] = old_t, new_t
+                break
+        out.append(h)
+    return out
+
+
 def run_qa(cfg: Config, client, rel: str) -> list[dict]:
     """对单页做 QA，返回标准化问题列表。
 
@@ -41,6 +85,9 @@ def run_qa(cfg: Config, client, rel: str) -> list[dict]:
     segs = seg_mod.segments_for_page(cfg, rel)
     issues: list[dict] = []
     gl_confirmed = gl.all_confirmed(cfg)
+    history_block = ""
+    if cfg.get("qa", "inject_history", default=False):
+        history_block = prompts.build_qa_history_block(build_history(cfg, rel))
     for s in segs:
         if s.translation is None:
             continue
@@ -74,8 +121,10 @@ def run_qa(cfg: Config, client, rel: str) -> list[dict]:
         dst_all = "\n".join(s.translation or "" for s in segs if s.translation)
         if src_all.strip():
             user_rules = tr.effective_user_rules(cfg)
-            sysp = prompts.build_qa_system(cfg, user_rules)
-            usr = prompts.build_qa_user(src_all[:6000], dst_all[:6000], gl_confirmed)
+            audit_policy = cfg.get("qa", "reduce_style_reports", default=True)
+            sysp = prompts.build_qa_system(cfg, user_rules, audit_policy=audit_policy)
+            usr = prompts.build_qa_user(src_all[:6000], dst_all[:6000], gl_confirmed,
+                                        history_block=history_block)
             try:
                 eff = (cfg.get("qa", "reasoning_effort", default="")
                        or cfg.get("llm", "reasoning_effort", default=""))

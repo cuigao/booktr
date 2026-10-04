@@ -123,6 +123,8 @@ DEFAULTS: dict[str, Any] = {
     "tm": {"path": "work/tm.jsonl", "enabled": True},
     "qa": {"deep_llm_check": True, "queue_path": "work/qa_queue.json",
            "report_dir": "work/qa_reports", "reasoning_effort": "",
+           # 审核政策：抑制"忠实-流畅"两轴摇摆（只报影响理解者）；注入本页 QA 历史
+           "reduce_style_reports": True, "inject_history": False,
            # 监督判官（qa-auto）：独立 LLM 配置，空字段继承主 llm
            "supervisor": {
                "enabled": True,

@@ -65,6 +65,24 @@ E 漏译/语义偏移/增译、F 术语选词、G 星期日期数字（关键词
 输出 `qa2_DE_ids.json`（`["id",...]`，人工增删后交 `qa-auto --only-ids`）与
 `qa2_DE_report.txt`（按类可读清单）。
 
+`variant`（提示词变体实验，需**可写沙箱副本**）：对指定页按变体逐次运行 `translate`/`qa`/`judge`
+任一端，详细记录命令、耗时、token。变体定义 `V0..V5`（policy×style×history）：
+
+```bash
+# QA 端：V0..V5 各 3 次
+python tools/qa_auto_probe/probe.py variant --data-dir ../../instance/exp_prompt/tr \
+    --end qa --pages welcome/welcome.html today/today12.html --variant V0 V1 V2 V3 V4 V5 --runs 3
+# 翻译端（--style auto 用变体风格；每次运行前重置目标页）
+python tools/qa_auto_probe/probe.py variant --data-dir ../../instance/exp_prompt/tr \
+    --end translate --pages today/today12.html --runs 3
+# 汇总
+python tools/qa_auto_probe/analyze.py --variant tools/qa_auto_probe/_out \
+    --ref-data-dir ../../instance/data-deepseek-v4.1-flash
+```
+
+结果写 `_out/variant_runs/<end>_<V>_run<N>.json` + `variant_summary_<end>.json`；
+`analyze.py --variant` 汇总类别问题数、跨次稳定性、振荡敏感度、判官分布与成本。
+
 `--audit`（只读）审计判官日志，检测重置态调用 / 索引回显不符 / 响应错位：
 
 ```bash

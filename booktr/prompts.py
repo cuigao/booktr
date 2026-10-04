@@ -293,8 +293,24 @@ def build_style_guide_user(refs: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_qa_system(cfg, user_rules: str = "") -> str:
+_QA_AUDIT_POLICY = (
+    "## 审核政策（通用）\n"
+    "- 只报告**影响下列方面**的问题：命题内容（发生了什么）、言外之力（请求/疑问/玩笑/抱怨等）、"
+    "语域语气、关键术语与专名的一致性。\n"
+    "- 不影响上述方面的字词选择、联想色彩、修辞偏好（包括「更直白/更意译」之类的取向差异）"
+    "属**可接受损失**，一律不要报告。\n"
+    "- 你只能凭给定原文/译文判断；若某种译法在**当前语境下已可理解、未误导读者**，即视为合格。\n"
+    "- 尊重用户规则所体现的**风格倾向**（如忠实优先/流畅优先）：不得以与用户倾向相反的理由报错"
+    "（例如在「流畅优先」下不因合意意译报错，在「忠实优先」下不因略直白报错）。\n"
+    "- 同一段落的同类问题合并为一条；不要逐句复述译文。"
+)
+
+
+def build_qa_system(cfg, user_rules: str = "", audit_policy: bool = True) -> str:
     """QA 审核系统提示词。
+
+    audit_policy=True 时追加"审核政策"（可接受损失 / 不得仅凭直译-意译偏好报错 /
+    尊重用户风格倾向），用于抑制"忠实-流畅"两轴来回摇摆造成的无效问题。
 
     user_rules 非空时**原样**追加（与翻译/判官共享同一套用户规则，避免 QA
     仅凭词汇表条目外推而误报）。
@@ -313,19 +329,52 @@ def build_qa_system(cfg, user_rules: str = "") -> str:
         "\"dst_quote\": \"有问题的译文片段\", \"suggestion\": \"建议译文或修改方向\"}]}\n"
         "没有问题则 issues 为空数组。只输出 JSON。",
     ]
+    if audit_policy:
+        parts.append(_QA_AUDIT_POLICY)
     if user_rules:
         parts.append(f"## 用户附加规则\n{user_rules}")
     return "\n\n".join(parts)
 
 
-def build_qa_user(src_text: str, dst_text: str, glossary: list[dict]) -> str:
+def build_qa_history_block(history: list[dict]) -> str:
+    """把同页已发生的 QA 决策渲染为提示词段落（供 QA 与判官参考，减少摇摆）。
+
+    history 每项：{segments, status(applied/rejected), reason, suggestion,
+    old_translation, new_translation, llm_suggestion}。空则不返回内容（调用方判断）。
+    """
+    if not history:
+        return ""
+    lines = ["## 本页已发生的 QA 决策（供参考，避免重复提出相反建议）"]
+    for h in history:
+        segs = h.get("segments") or []
+        loc = f"段 {segs}" if segs else "（未定位）"
+        status = h.get("status", "")
+        if status == "applied":
+            lines.append(f"- {loc} 曾**采纳**建议：{h.get('reason', '')}")
+            old, new = h.get("old_translation", ""), h.get("new_translation", "")
+            if old or new:
+                lines.append(f"    原译：{old[:80]}")
+                lines.append(f"    改为：{new[:80]}")
+        elif status == "rejected":
+            lines.append(f"- {loc} 曾**拒绝**建议：{h.get('reason', '')}")
+            if h.get("suggestion"):
+                lines.append(f"    （被拒建议：{h.get('suggestion', '')[:80]}）")
+        if h.get("llm_suggestion"):
+            lines.append(f"    另存 LLM 原始建议：{h.get('llm_suggestion', '')[:80]}")
+    lines.append("若本次拟报的问题与上述已定译法**方向相反**，除非确实影响理解，否则不要报告。")
+    return "\n".join(lines)
+
+
+def build_qa_user(src_text: str, dst_text: str, glossary: list[dict],
+                  history_block: str = "") -> str:
     lines = term_lines(glossary)
     gl = "\n".join(lines) or "(空)"
-    return (
-        f"## 词汇表\n{gl}\n"
-        f"## 原文\n|TEXT|\n{src_text}\n\n"
-        f"## 译文\n|DST|\n{dst_text}"
-    )
+    parts = [f"## 词汇表\n{gl}"]
+    if history_block:
+        parts.append(history_block)
+    parts.append(f"## 原文\n|TEXT|\n{src_text}")
+    parts.append(f"## 译文\n|DST|\n{dst_text}")
+    return "\n\n".join(parts)
 
 
 def _build_qa_fix_rules(src_name: str, tgt_name: str) -> str:
@@ -432,6 +481,8 @@ def build_supervisor_system(cfg, ctx: dict) -> str:
         ctx_parts.append(f"## 翻译风格规则\n{ctx['style_guide']}")
     if ctx.get("user_rules"):
         ctx_parts.append(f"## 用户附加规则\n{ctx['user_rules']}")
+    if ctx.get("history_block"):
+        ctx_parts.append(ctx["history_block"])
     if ctx.get("page_src"):
         ctx_parts.append(f"## 当前页完整原文（逐段，段序即阅读顺序）\n{ctx['page_src']}")
     if ctx.get("page_dst"):

@@ -211,6 +211,174 @@ def cmd_e2e(cfg, args) -> None:
     print(f"\n结果留存: {path}")
 
 
+# --------------------------------------------------------------------------
+# 变体矩阵实验：translate / qa / judge 三端 × V0..V5 × N 次
+# --------------------------------------------------------------------------
+VARIANT_TABLE = {
+    "V0": {"policy": False, "style": "standard", "history": False},
+    "V1": {"policy": True, "style": "standard", "history": False},
+    "V2": {"policy": True, "style": "faithful", "history": False},
+    "V3": {"policy": True, "style": "standard", "history": True},
+    "V4": {"policy": True, "style": "faithful", "history": True},
+    "V5": {"policy": True, "style": "fluent", "history": False},
+}
+
+
+def _style_rules_text(style: str) -> str:
+    from booktr import pipeline as pl
+    return next((r for k, _, r in pl.TRANSLATION_STYLES if k == style), "")
+
+
+def _apply_variant_cfg(cfg, v: dict) -> None:
+    """把变体开关写入 cfg（影响提示词构建）。"""
+    cfg.set(bool(v["policy"]), "qa", "reduce_style_reports")
+    cfg.set(bool(v["history"]), "qa", "inject_history")
+
+
+def _translate_run(cfg, client, pages: list[str], style: str) -> dict:
+    """重置目标页（清 TM/notes/短语）后整页翻译，返回每页最终译文快照。
+
+    style 通过临时追加到 user_rules 实现（不动实例配置）。
+    """
+    from booktr import styles as styles_mod
+    from booktr.config import Config
+    # 临时把风格规则并入 user_rules（内存内）
+    base_rules = cfg.get("user_rules", default="") or ""
+    sr = _style_rules_text(style)
+    if sr:
+        cfg.set((base_rules + "\n\n" + sr).strip(), "user_rules")
+
+    sm = util.read_json(os.path.join(cfg.work_dir, "site_map.json"), {})
+    plan = util.read_json(os.path.join(cfg.work_dir, "plan.json"), {})
+    state = tr.State(cfg)
+    # 重置（清 TM/notes/短语 + 状态 pending），确保从零开始
+    for rel in pages:
+        _reset_page_silent(cfg, state, rel)
+
+    snapshot = {}
+    for rel in pages:
+        segs = seg_mod.segments_for_page(cfg, rel)
+        rq: list = []
+        tr.translate_page(cfg, client, rel, state, sm, plan, rq)
+        segs = seg_mod.segments_for_page(cfg, rel)
+        snapshot[rel] = {str(s.id): (s.translation or "") for s in segs}
+    state.save()
+    cfg.set(base_rules, "user_rules")  # 还原
+    return snapshot
+
+
+def _reset_page_silent(cfg, state, rel: str) -> None:
+    """静默整页重置：清 TM/notes/短语 + 删段缓存 + status=pending（不入队列）。"""
+    from booktr import tm as tm_mod
+    from booktr import notes as notes_mod
+    from booktr import phrases as phrases_mod
+    pstate = state.page(rel)
+    segs = pstate.get("segments", {})
+    tm_mod.purge_page(cfg, rel)
+    notes_mod.purge_page(cfg, rel)
+    for sid, st in segs.items():
+        try:
+            phrases_mod.purge_for_segment(cfg, st.get("text", ""),
+                                          st.get("translation") or "", "")
+        except Exception:
+            pass
+    seg_path = os.path.join(cfg.get("segments_dir", default=""),
+                            rel.replace("/", "__") + ".json")
+    if os.path.exists(seg_path):
+        os.remove(seg_path)
+    pstate["status"] = "pending"
+    pstate["segments"] = {}
+
+
+def _qa_run(cfg, client, pages: list[str]) -> dict:
+    out = {}
+    for rel in pages:
+        issues = qa_mod.run_qa(cfg, client, rel)
+        out[rel] = issues
+    return out
+
+
+def _judge_run(cfg, client, pages: list[str]) -> dict:
+    queue = qq.load(cfg)
+    out = {}
+    for rel in pages:
+        items = [it for it in queue if it.get("page") == rel
+                 and it.get("resolved") and it.get("segments")]
+        if not items:
+            out[rel] = {"verdicts": [], "n_items": 0}
+            continue
+        verdicts, turns = adjudicate(cfg, client, rel, items)
+        out[rel] = {"verdicts": verdicts, "turns": turns, "n_items": len(items)}
+    return out
+
+
+def cmd_variant(cfg, args) -> None:
+    """变体矩阵实验：对指定页按 --variant 集逐变体逐次运行指定端，详细记录成本。"""
+    os.makedirs(args.out, exist_ok=True)
+    runs_dir = os.path.join(args.out, "variant_runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    variants = args.variant or list(VARIANT_TABLE)
+    pages = args.pages
+    summary = []
+
+    for vkey in variants:
+        v = VARIANT_TABLE.get(vkey)
+        if v is None:
+            print(f"未知变体 {vkey}，跳过"); continue
+        for run_i in range(1, args.runs + 1):
+            if args.end == "translate":
+                # 每次 translate 需干净副本：调用方负责在 run 前重置；此处仍重置
+                if args.style != "auto":
+                    style = args.style
+                else:
+                    style = v["style"]
+                cfg2 = _cfg(args.data_dir, args.out)
+                _apply_variant_cfg(cfg2, v)
+                client = _client(cfg2)
+                t0 = time.time()
+                snap = _translate_run(cfg2, client, pages, style)
+                dur = round(time.time() - t0, 1)
+                rec = {
+                    "variant": vkey, "run": run_i, "end": "translate",
+                    "style": style, "pages": pages, "duration_s": dur,
+                    "llm": client.stats_report(), "snapshot": snap,
+                    "command": getattr(args, "_argv", ""),
+                }
+            elif args.end == "qa":
+                cfg2 = _cfg(args.data_dir, args.out)
+                _apply_variant_cfg(cfg2, v)
+                client = _client(cfg2)
+                t0 = time.time()
+                qa_out = _qa_run(cfg2, client, pages)
+                dur = round(time.time() - t0, 1)
+                rec = {"variant": vkey, "run": run_i, "end": "qa",
+                       "vcfg": v, "pages": pages, "duration_s": dur,
+                       "llm": client.stats_report(), "qa": qa_out,
+                       "command": getattr(args, "_argv", "")}
+            else:  # judge
+                cfg2 = _cfg(args.data_dir, args.out)
+                _apply_variant_cfg(cfg2, v)
+                client = _client(cfg2)
+                t0 = time.time()
+                jd = _judge_run(cfg2, client, pages)
+                dur = round(time.time() - t0, 1)
+                rec = {"variant": vkey, "run": run_i, "end": "judge",
+                       "vcfg": v, "pages": pages, "duration_s": dur,
+                       "llm": client.stats_report(), "judge": jd,
+                       "command": getattr(args, "_argv", "")}
+            fname = f"{args.end}_{vkey}_run{run_i}.json"
+            util.write_json(os.path.join(runs_dir, fname), rec)
+            st = rec["llm"]
+            print(f"  {args.end} {vkey} run{run_i}: {dur}s  "
+                  f"tokens p={st.get('prompt_tokens')} c={st.get('completion_tokens')} "
+                  f"calls={st.get('calls')}", flush=True)
+            summary.append({"file": fname, "variant": vkey, "run": run_i,
+                            "end": args.end, "duration_s": dur, "llm": st})
+    util.write_json(os.path.join(args.out, f"variant_summary_{args.end}.json"),
+                    {"testset": pages, "runs": args.runs, "rows": summary})
+    print(f"\n汇总留存: {os.path.join(args.out, f'variant_summary_{args.end}.json')}")
+
+
 def _apply(cfg, client, sm, plan, rel, items) -> int:
     state = tr.State(cfg)
     guide = styles_mod.load_guide(cfg) if cfg.get("style", "rules_enabled", default=True) else ""
@@ -242,20 +410,31 @@ def _apply(cfg, client, sm, plan, rel, items) -> int:
 
 def main():
     ap = argparse.ArgumentParser(description="监督式自动 QA 探针")
-    ap.add_argument("mode", choices=["judge", "e2e"])
+    ap.add_argument("mode", choices=["judge", "e2e", "variant"])
     ap.add_argument("--data-dir", required=True,
-                    help="数据目录（judge 可指向只读实例；e2e 须指向可写沙箱副本）")
+                    help="数据目录（judge 可指向只读实例；e2e/variant 须指向可写沙箱副本）")
     ap.add_argument("--pages", nargs="+", required=True)
     ap.add_argument("--out", default=OUT_DIR, help="结果输出目录（默认 _out/）")
     ap.add_argument("--no-apply", action="store_true")
     ap.add_argument("--no-qa2", action="store_true", help="e2e 后不重跑 QA2")
     ap.add_argument("--resume", action="store_true", help="跳过结果文件中已完成的页")
+    # variant 专用
+    ap.add_argument("--end", choices=["translate", "qa", "judge"], default="qa",
+                    help="variant 模式：运行哪一端")
+    ap.add_argument("--variant", nargs="+", default=None,
+                    help="变体集（默认 V0..V5）")
+    ap.add_argument("--style", default="auto",
+                    help="translate 端覆盖风格（auto=用变体定义；或 standard/faithful/fluent）")
+    ap.add_argument("--runs", type=int, default=3, help="每变体重复次数")
     args = ap.parse_args()
+    args._argv = " ".join(sys.argv[1:])
     cfg = _cfg(args.data_dir, args.out)
     if args.mode == "judge":
         cmd_judge(cfg, args)
-    else:
+    elif args.mode == "e2e":
         cmd_e2e(cfg, args)
+    else:
+        cmd_variant(cfg, args)
 
 
 if __name__ == "__main__":
