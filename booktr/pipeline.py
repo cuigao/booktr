@@ -1700,6 +1700,14 @@ def _rollback_interactive(cfg: Config, page: str) -> None:
 
 
 def cmd_annotate(cfg: Config, args) -> None:
+    export_dir = getattr(args, "export", None)
+    if export_dir:
+        if not os.path.isabs(export_dir):
+            export_dir = os.path.join(cfg.data_dir, export_dir)
+        annotator.export_annotated(
+            cfg, export_dir, pages=args.pages,
+            dry_run=getattr(args, "dry_run", False))
+        return
     client = _client(cfg)
     state = tr.State(cfg)
     done_pages = state.data.get("done_pages", [])
@@ -2750,8 +2758,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="默认仅处理未 QA 的页；此开关纳入全部已译页（含已 QA）")
     sp.set_defaults(func=cmd_qa_auto)
 
-    sp = mk("annotate", help="生成译者注")
+    sp = mk("annotate", help="生成译者注；--export 渲染注本")
     sp.add_argument("--pages", nargs="*", help="限定页面")
+    sp.add_argument("--export", nargs="?", const="out_annotated", default=None,
+                    metavar="DIR",
+                    help="离线渲染注本到 DIR（缺省 <data_dir>/out_annotated）；"
+                         "复制 out 并注入角标/侧栏，不调用 LLM")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="配合 --export：仅打印定位报告，不复制、不写文件")
     sp.set_defaults(func=cmd_annotate)
 
     sp = mk("status", help="查看进度")

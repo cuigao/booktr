@@ -139,8 +139,11 @@ python booktr-cli.py rollback --page today/today90.html --interactive      # 交
 python booktr-cli.py rollback --backfill                                   # 为已有译文补录 v1 版本
 python booktr-cli.py rollback --page today/today90.html --purge --keep-last 20  # 历史管理
 
-# 11) 生成译者注
-python booktr-cli.py annotate
+# 11) 生成译者注 / 渲染注本
+python booktr-cli.py annotate                    # 生成（写入 work/translators_notes.json）
+python booktr-cli.py annotate --pages today/today11.html   # 限定页面
+python booktr-cli.py annotate --export           # 离线渲染注本到 out_annotated/（不调 LLM）
+python booktr-cli.py annotate --export --dry-run # 仅打印定位报告
 
 # 12) 导出镜像与静态资源
 python booktr-cli.py export
@@ -323,7 +326,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 | 一致性 QA | 对已译页做体检：本地规则（占位符完整性=高危、术语一致=中危）+ LLM 深度语义检查（`qa.deep_llm_check`）；问题以 `qa_*` 原因写入审核队列供人工确认，不自动触发重译 | `qa.deep_llm_check` |
 | 词汇/短语审计 | `audit-terms` 用新词汇表/短语记忆重建已译段（按占位符边界精确匹配），同步 state+段缓存并重生成 out | `audit-terms` |
 | 残留检测 | `check-residual` 只读扫描已译段，列出译文残留的源语言片段（当前仅日语·平假名），逐项给出 reset 命令供人工核验后手动重译；不自动重译 | `check-residual` |
-| 译者注 | 跨页关联/趣味发现 → 外部 JSON | `annotate` |
+| 译者注 | 跨页关联/趣味发现 → 外部 JSON（每条含可锚定 `src_quote`/`dst_quote`）；`--export` 离线渲染注本（复制 out + 插 `<sup>` 角标 + 内联 JS 侧栏，源 out 零改动） | `annotate [--export]`、`translators_notes.max_notes_per_page` |
 | 段落定位 | 按原文/译文片段在页面内定位段号（精确→去占位符→跨行→模糊 Dice）；`qa` 与 `rollback` 共用 | `locate` |
 | 段落回滚 | 段颗粒度版本管理：提交即版本、非线性 pick 恢复、`--op` 整命令撤销、`--dry-run` 预览、`--purge` 管理 | `rollback` |
 | 短语记忆清理 | 覆盖路径（reset/review `[d]`/qa-apply/rollback）按 `源文 ∩ 旧译文 ∖ 新译文` 对称清理短语；qa-apply 清后按同条件回写新短语（与 TM 对齐）；不纳入版本快照 | 自动 |

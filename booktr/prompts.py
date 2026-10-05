@@ -572,24 +572,91 @@ def build_term_review_user(candidates: list[dict]) -> str:
     return "## 候选词条\n" + "\n".join(lines)
 
 
-def build_translator_note_system(cfg) -> str:
+def build_translator_note_system(cfg, glossary: list[dict] | None = None,
+                                 max_notes: int = 0) -> str:
+    """译者注生成 system：要求输出可锚定的小引文。
+
+    关键契约（展示层依赖）：
+      - ``dst_quote`` 必须是给定译文中**逐字连续**的子串（用于在正文末尾插角标）
+      - ``src_quote`` 必须是对应原文片段（回退锚点，抗重译）
+    """
     tgt = cfg.get("lang", "target", default="zh-Hans")
     tgt_name = lang_name(tgt)
-    return (
-        f"你是网站研究的译者注作者。基于给定页面的译文与全站摘要，发现值得向读者交代的"
-        f"前后文关联、创作背景、历史考据或趣味细节。\n"
-        f"输出 JSON：{{\"notes\": [{{\"content\": \"{tgt_name}的译者注内容\", "
-        f"\"related_pages\": [\"关联页面路径\"], \"type\": "
-        f"\"前文呼应|创作背景|历史考据|趣味细节|其他\"}}]}}\n"
-        "只输出 JSON。没有可写的就返回空数组。"
-    )
+    if max_notes and max_notes > 0:
+        cap = f"- 本页最多输出 {max_notes} 条；只写最值得交代的，宁缺毋滥。"
+    else:
+        cap = "- 条数由你判断，宁缺毋滥；没有真正值得交代的内容就返回空数组 []。"
+    lines = [
+        f"你是资深译者与网站研究者，为{tgt_name}读者撰写译者注。",
+        "译者注用于向读者交代正文中不易理解之处：前后文呼应、创作背景、"
+        "历史考据、趣味细节。读者只看译文，看不懂日文。",
+        "",
+        "## 输出格式（严格 JSON，只输出 JSON 本身，无任何额外文字或 markdown 围栏）",
+        "{\"notes\": [{\"src_quote\": \"原文片段\", \"dst_quote\": \"译文片段\", "
+        "\"type\": \"前文呼应|创作背景|历史考据|趣味细节|其他\", "
+        f"\"content\": \"{tgt_name}的注释文字\", "
+        "\"related_pages\": [\"关联页面路径\"]}]}",
+        "",
+        "## 锚点要求（最重要）",
+        "- src_quote：从上方【原文分段】中**逐字复制**的一段连续原文，"
+        "约4~30字符，是这条注释所针对的原文位置。",
+        "- dst_quote：从上方【译文分段】中**逐字复制**的一段连续译文，"
+        "约4~30字符，语义与 src_quote 对应，是注释在正文中的落点。",
+        "- 两者都必须是原文/译文中**原样存在**的连续子串：不得改写、"
+        "不得加省略号、不得跨段拼接、不得含 [[Px]] 占位符或任何标签。",
+        "- 引文应是**有意义的最小单元**：专有名词、作品名、人名、"
+        "固定说法或关键短语；避免只选「的」「是」等无意义碎词。",
+        "- 引文应尽量在本页**唯一出现**，以免锚点落错位置。",
+        "",
+        "## 注释内容要求",
+        "- content：用简体中文写 1~3 句，直接陈述背景/关联/考据，"
+        "**不要以「译者注：」开头**（侧栏标题已标明译者注）。",
+        "- 只依据提供的材料（本页原文/译文、全站摘要）作答；"
+        "**不确定或材料不足时，宁可不写这条注释**，绝不编造。",
+        "- type 只能取：前文呼应、创作背景、历史考据、趣味细节、其他。",
+        "- related_pages 只能从【全站摘要】列出的页面路径中选择；"
+        "没有关联页则写 []。",
+        "",
+        "## 选取原则与数量",
+        "- 只对「确实会让读者困惑或值得了解」的内容写注："
+        "典故、旧时代事物、跨页呼应、作品/人物来历等。",
+        "- 不要对直白易懂的日常叙述写注；不要为每段都写；不要重复同一致注点。",
+        cap,
+        "只输出 JSON。",
+    ]
+    if glossary:
+        tl = term_lines(glossary)
+        if tl:
+            lines += ["", "## 现行词汇表（注释中涉及这些词时必须使用给定译名）"]
+            lines += tl
+    return "\n".join(lines)
 
 
-def build_translator_note_user(page_rel: str, translated: str, summaries: dict) -> str:
-    sum_lines = [f"- {k}: {v}" for k, v in summaries.items()] if summaries else "(无摘要)"
+def build_translator_note_user(page_rel: str, segments: list[dict],
+                               summaries: dict, max_notes: int = 0) -> str:
+    """译者注 user：提供原文/译文分段与全站摘要。
+
+    ``segments``：``[{"id": int, "src": str, "dst": str}]``（src 已含 [[Px]] 占位符）。
+    """
+    src_lines, dst_lines = [], []
+    for s in segments:
+        sid = s.get("id", "?")
+        src = (s.get("src") or "").strip()
+        dst = (s.get("dst") or "").strip()
+        if src:
+            src_lines.append(f"[{sid}] {src}")
+        if dst:
+            dst_lines.append(f"[{sid}] {dst}")
+    sum_lines = [f"- {k}: {v}" for k, v in summaries.items()] if summaries else ["(无摘要)"]
     return (
-        f"## 当前页面\n{page_rel}\n## 页面译文\n|TEXT|\n{translated}\n\n"
-        f"## 全站其他页面摘要（用于发现关联）\n" + "\n".join(sum_lines)
+        f"## 当前页面\n{page_rel}\n\n"
+        "## 原文分段（用于取 src_quote，须逐字复制）\n"
+        + ("\n".join(src_lines) if src_lines else "(无)")
+        + "\n\n## 译文分段（用于取 dst_quote，须逐字复制）\n"
+        + ("\n".join(dst_lines) if dst_lines else "(无)")
+        + "\n\n## 全站其他页面摘要（发现关联用）\n"
+        + "\n".join(sum_lines)
+        + "\n\n## 任务\n请输出本页的译者注 JSON。"
     )
 
 

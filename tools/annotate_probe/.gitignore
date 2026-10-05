@@ -1,0 +1,7 @@
+# 运行输出（结果 JSON / 日志）不入库
+_out/
+_out_cap/
+logs/
+analysis.txt
+__pycache__/
+*.pyc

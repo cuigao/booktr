@@ -153,7 +153,8 @@ DEFAULTS: dict[str, Any] = {
                "log": True,  # 判官调用是否写 llm_logs（体量大时可关）
            },
            "auto_log_dir": "work/qa_auto_runs"},
-    "translators_notes": {"path": "work/translators_notes.json", "focus": ""},
+    "translators_notes": {"path": "work/translators_notes.json", "focus": "",
+                          "max_notes_per_page": 0},
     "review": {"path": "work/review_queue.json", "auto_regenerate": True},
     "state": {"path": "work/state.json"},
     "summaries": {"dir": "work/summaries"},
