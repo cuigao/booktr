@@ -56,6 +56,25 @@ class LLMRepetitionError(LLMError):
         self.fragment = fragment
 
 
+class LLMTimeoutError(LLMError):
+    """单个调用超过总时长上限（wall-clock call timeout）。
+
+    覆盖"一直在输出、但不结束"的意外超长响应（非周期性，loop guard 抓不到；
+    持续有分块，read timeout 抓不到）。携带已累加的部分内容与 elapsed/limit。
+    作为 LLMError 子类：未特殊处理时退化为一般失败；``_request`` 会优先捕获并
+    走独立的调用重试计数。
+    """
+
+    def __init__(self, message: str = "", reasoning: str = "",
+                 finish_reason: str | None = None, usage: dict | None = None,
+                 content: str = "", elapsed_s: float = 0.0, limit_s: float = 0.0):
+        super().__init__(message, reasoning=reasoning,
+                         finish_reason=finish_reason, usage=usage)
+        self.content = content
+        self.elapsed_s = elapsed_s
+        self.limit_s = limit_s
+
+
 # JSON 机械修复方法（parse_json_response 后处理），规范字段 repair_methods 的取值。
 REPAIR_METHOD_ESCAPE = "ESCAPE_VALUE_STRINGS"  # 值字符串转义（未转义引号 / 裸换行）
 REPAIR_METHOD_CLOSE_ARRAY = "CLOSE_ARRAY"  # 数组括号闭合修复（缺 ]，已知 key 先验补全）
@@ -179,6 +198,12 @@ class LLMClient:
         self.loop_retries = int(llm.get("loop_retries", 2))
         self.loop_temp_bump = float(llm.get("loop_temp_bump", 0.1))
         self.loop_norm = bool(llm.get("loop_norm", True))
+        # 单调用总时长上限（wall-clock）：覆盖"一直输出但不结束"的意外超长响应。
+        # 0 = 关闭。可按 tag 前缀覆盖（如 qa 更长）。
+        self.max_call_seconds = int(llm.get("max_call_seconds", 300))
+        self.max_call_seconds_by_tag = llm.get(
+            "max_call_seconds_by_tag", {"qa": 1200, "term": 600}) or {}
+        self.call_retries = int(llm.get("call_retries", 1))
         self.rpm = llm.get("max_requests_per_minute", 60)
         self._min_interval = 60.0 / max(self.rpm, 1)
         self._last_call = 0.0
@@ -211,7 +236,8 @@ class LLMClient:
         try:
             resp, usage, reasoning = self._openai_chat(system, user, temperature,
                                                        reasoning_effort=reasoning_effort,
-                                                       on_delta=on_delta, diag=diag)
+                                                       on_delta=on_delta, diag=diag,
+                                                       tag=tag)
         except LLMError as e:
             self._log(tag, system, user, "", ok=False, error=str(e),
                       reasoning=getattr(e, "reasoning", ""),
@@ -263,7 +289,8 @@ class LLMClient:
         try:
             resp, usage, reasoning = self._openai_chat_multi(messages, temperature,
                                                              reasoning_effort=reasoning_effort,
-                                                             on_delta=on_delta, diag=diag)
+                                                             on_delta=on_delta, diag=diag,
+                                                             tag=tag)
         except LLMError as e:
             self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
                       "", ok=False, error=str(e),
@@ -284,7 +311,8 @@ class LLMClient:
     def _openai_chat_multi(self, messages: list[dict],
                            temperature: float | None,
                            reasoning_effort: str | None = None,
-                           on_delta=None, diag: dict | None = None) -> tuple[str, dict, str]:
+                           on_delta=None, diag: dict | None = None,
+                           tag: str = "") -> tuple[str, dict, str]:
         """多轮对话底层调用。返回 (content, usage, reasoning)。"""
         body = {
             "model": self.model,
@@ -295,12 +323,13 @@ class LLMClient:
             body["max_tokens"] = self.max_tokens
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
-        return self._request(body, "multi", on_delta=on_delta, diag=diag)
+        return self._request(body, "multi", on_delta=on_delta, diag=diag, tag=tag)
 
     # ------------------------------------------------------------------
     def _openai_chat(self, system: str, user: str, temperature: float | None,
                      reasoning_effort: str | None = None,
-                     on_delta=None, diag: dict | None = None) -> tuple[str, dict, str]:
+                     on_delta=None, diag: dict | None = None,
+                     tag: str = "") -> tuple[str, dict, str]:
         """单轮对话底层调用。返回 (content, usage, reasoning)。"""
         body = {
             "model": self.model,
@@ -314,7 +343,7 @@ class LLMClient:
             body["max_tokens"] = self.max_tokens
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
-        return self._request(body, "single", on_delta=on_delta, diag=diag)
+        return self._request(body, "single", on_delta=on_delta, diag=diag, tag=tag)
 
     def _record_loop_abort(self, diag: dict, e: "LLMRepetitionError",
                            t_abort: float) -> None:
@@ -330,8 +359,20 @@ class LLMClient:
             "elapsed_s": round(time.monotonic() - t_abort, 1),
         })
 
+    def _record_wall_abort(self, diag: dict, e: "LLMTimeoutError",
+                           t_abort: float) -> None:
+        """把一次总时长超限中止记入诊断（供日志/失败信息留存异常轮次）。"""
+        diag.setdefault("wall_aborts", []).append({
+            "elapsed_s": round(getattr(e, "elapsed_s", 0.0), 1),
+            "limit_s": round(getattr(e, "limit_s", 0.0), 1),
+            "finish_reason": getattr(e, "finish_reason", None),
+            "content": getattr(e, "content", "")[:2000],
+            "reasoning": (getattr(e, "reasoning", "") or "")[-20000:],
+            "recorded_s": round(time.monotonic() - t_abort, 1),
+        })
+
     def _request(self, base_body: dict, kind: str, on_delta=None,
-                 diag: dict | None = None) -> tuple[str, dict, str]:
+                 diag: dict | None = None, tag: str = "") -> tuple[str, dict, str]:
         """统一请求入口：流式（默认）或非流式。
 
         重试分两类、互不占用预算：
@@ -352,6 +393,7 @@ class LLMClient:
         doubled = False  # 是否已因 length 空正文而翻倍重试
         net_attempts = 0
         loop_aborts = 0
+        call_aborts = 0
         # 诊断：尽力记录失败前已累加的 reasoning / finish_reason / usage（供失败日志）
         last_reasoning = ""
         last_finish: str | None = None
@@ -368,9 +410,11 @@ class LLMClient:
             try:
                 if self.stream:
                     content, reasoning, usage, finish = self._post_stream(
-                        url, headers, body, on_delta=on_delta, diag=diag if diag is not None else {})
+                        url, headers, body, on_delta=on_delta,
+                        diag=diag if diag is not None else {}, tag=tag)
                 else:
-                    content, reasoning, usage, finish = self._post_once(url, headers, body)
+                    content, reasoning, usage, finish = self._post_once(
+                        url, headers, body, tag=tag)
             except LLMRepetitionError as e:
                 # 循环中止：走独立计数，不消耗网络重试预算
                 last_err = e
@@ -383,6 +427,18 @@ class LLMClient:
                                 getattr(e, "period", "?"), getattr(e, "repeats", "?"),
                                 getattr(e, "fired_at_chars", "?"),
                                 loop_aborts, self.loop_retries)
+                    continue
+                break
+            except LLMTimeoutError as e:
+                # 单调用总时长超限：独立计数，同参数重试（不消耗网络/循环预算）
+                last_err = e
+                if diag is not None:
+                    self._record_wall_abort(diag, e, t_abort)
+                if call_aborts < self.call_retries:
+                    call_aborts += 1
+                    log.warning("LLM 调用超时（%.0fs > %.0fs上限），同参数重试 %s/%s",
+                                getattr(e, "elapsed_s", 0), getattr(e, "limit_s", 0),
+                                call_aborts, self.call_retries)
                     continue
                 break
             except (requests.RequestException, ValueError, LLMError) as e:
@@ -432,10 +488,28 @@ class LLMClient:
             if diag is not None and diag.get("loop_aborts") and not getattr(
                     last_err, "loop_aborts", None):
                 last_err.loop_aborts = diag["loop_aborts"]
+            if diag is not None and diag.get("wall_aborts") and not getattr(
+                    last_err, "wall_aborts", None):
+                last_err.wall_aborts = diag["wall_aborts"]
             raise last_err
         raise LLMError(f"LLM 调用最终失败: {last_err}",
                        reasoning=last_reasoning, finish_reason=last_finish,
                        usage=last_usage)
+
+    def _call_cap(self, tag: str) -> float:
+        """给定 tag 的单调用总时长上限（秒）；0 表示不限制。
+
+        按 ``tag`` 前缀（``split("_")[0]``，如 ``qa`` / ``term`` / ``judge``）
+        在 ``max_call_seconds_by_tag`` 中查找覆盖，否则用全局 ``max_call_seconds``。
+        """
+        prefix = (tag or "").split("_")[0]
+        cap = self.max_call_seconds_by_tag.get(prefix)
+        if cap is None:
+            cap = self.max_call_seconds
+        try:
+            return float(cap)
+        except (TypeError, ValueError):
+            return float(self.max_call_seconds)
 
     def _detect_loop(self, content: str, reasoning: str) -> dict | None:
         """对已得的 content/reasoning 做循环检测（非流式用；流式在过程中检测）。"""
@@ -450,9 +524,16 @@ class LLMClient:
                 return h
         return None
 
-    def _post_once(self, url: str, headers: dict, body: dict) -> tuple[str, str, dict, str]:
-        """非流式：返回 (content, reasoning, usage, finish_reason)。"""
-        r = requests.post(url, headers=headers, json=body, timeout=self.timeout)
+    def _post_once(self, url: str, headers: dict, body: dict,
+                   tag: str = "") -> tuple[str, str, dict, str]:
+        """非流式：返回 (content, reasoning, usage, finish_reason)。
+
+        非流式无中途检测机会，故以 read timeout 兼作总时长上限：
+        ``min(self.timeout, cap)``（cap=0 时不设上限）。
+        """
+        cap = self._call_cap(tag)
+        tmo = self.timeout if not cap else min(self.timeout, cap)
+        r = requests.post(url, headers=headers, json=body, timeout=tmo)
         if r.status_code != 200:
             raise LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
         data = r.json()
@@ -475,19 +556,29 @@ class LLMClient:
         return (content, reasoning, usage, choice.get("finish_reason"))
 
     def _post_stream(self, url: str, headers: dict, body: dict,
-                     on_delta=None, diag: dict | None = None) -> tuple[str, str, dict, str]:
+                     on_delta=None, diag: dict | None = None,
+                     tag: str = "") -> tuple[str, str, dict, str]:
         """流式：逐块累加 content/reasoning，返回 (content, reasoning, usage, finish)。
 
         流式下每个 chunk 都会重置读取超时，长思考不再误判为网络超时。
         on_delta(kind, text) 为可选的实时回调（kind ∈ {"content","reasoning"}），
         供未来实时输出使用。
 
-        循环检测：每累加约 ``loop_check_every`` 字符对 reasoning/content 各检测一次
-        周期性重复，命中即提前关闭连接并抛 ``LLMRepetitionError``（止损）。
+        两层防护（互补）：
+        - **read timeout**（``timeout=(connect, self.timeout)``，默认 120s/间隔）：
+          只对"完全无数据的停顿"生效（真正网络卡死），合法长响应因持续有分块而不触发。
+        - **call timeout**（``self._call_cap(tag)``，默认 300s，qa/term 更长）：逐**SSE
+          分块**核对总时长（不能按字符计数——静默/滴答流可能不产生字符），超过即以
+          ``LLMTimeoutError`` 提前关闭连接止损。
+        - **loop guard**：每累加约 ``loop_check_every`` 字符检测周期性重复，命中抛
+          ``LLMRepetitionError``。
         """
         body = {**body, "stream": True, "stream_options": {"include_usage": True}}
+        cap = self._call_cap(tag)
+        read_tmo = self.timeout if not cap else min(self.timeout, cap)
+        t_start = time.monotonic()
         r = requests.post(url, headers=headers, json=body,
-                          timeout=(self.connect_timeout, self.timeout), stream=True)
+                          timeout=(self.connect_timeout, read_tmo), stream=True)
         if r.status_code != 200:
             raise LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
         content_parts: list[str] = []
@@ -498,6 +589,14 @@ class LLMClient:
         next_check = self.loop_check_every if self.loop_guard else 0
         try:
             for raw in r.iter_lines():
+                # 总时长核对：逐分块检查（流式滴答/静默时字符数不增，故不能按字符门控）
+                if cap and (time.monotonic() - t_start) > cap:
+                    raise LLMTimeoutError(
+                        f"LLM 调用超时（已 {time.monotonic() - t_start:.0f}s > "
+                        f"{cap:.0f}s 上限）",
+                        reasoning="".join(reasoning_parts), finish_reason=finish,
+                        usage=usage, content="".join(content_parts),
+                        elapsed_s=time.monotonic() - t_start, limit_s=cap)
                 if not raw:
                     continue
                 line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
@@ -682,6 +781,9 @@ class LLMClient:
             entry["loop_detected"] = True
             entry["loop_abort_count"] = len(diag["loop_aborts"])
             entry["loop_aborts"] = diag["loop_aborts"]
+        if diag and diag.get("wall_aborts"):
+            entry["wall_abort_count"] = len(diag["wall_aborts"])
+            entry["wall_aborts"] = diag["wall_aborts"]
         # 尝试解析响应中的 JSON（若为结构化输出）
         try:
             if response:

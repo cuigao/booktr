@@ -215,12 +215,17 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   - `llm.max_tokens`：单次回复的 token 上限（默认 131072）。**推理模型**（如 deepseek-v4.1 系列）会先输出大量 `reasoning` token，上限过低会导致正文为空（`finish_reason=length`），故默认放宽
   - `llm.max_tokens_ceiling`：当正文因 reasoning 被截空时，自动翻倍 `max_tokens` 重试一次的上限（默认 524288）
   - `llm.stream`：流式输出（默认 true）。流式下每个分块都会重置读取超时，**长思考不再被误判为网络超时**；不支持流式的服务设 false
+  - `llm.timeout`：流式**读取间隔**超时（默认 120s）——只对"指定秒数内无任何数据"生效，专防真正网络卡死/中断（合法长响应因持续有分块而不触发）。非流式下它即等于总时长（见下 `max_call_seconds`）。
   - `llm.connect_timeout`：流式建连超时（默认 20s）
   - `llm.reasoning_effort`：推理模型思考等级（OpenAI 规范字段）。**空字符串 = 不发送该字段**（用模型默认，通常 `high`）；可设 `none`/`low`/`high`/`max`（以服务支持值为准）。**命令级覆盖**：`qa.reasoning_effort` 非空时覆盖全局，仅对 QA 生效；为空则继承 `llm.reasoning_effort`。
   - `llm.max_repair`：解析失败自愈重试次数（默认 3）
   - **输出循环防护**（`llm.loop_*`，默认开）：流式过程中若输出**末尾陷入周期性重复**（模型被上下文片段卡住、自我锚定），即提前中止并以**相同参数**重试，避免跑满预算（实测可在浪费 3–5 万字符时止损，节省 90%+ 时间）。
     - `llm.loop_guard`（默认 true）；`loop_window`（默认 16384，检测的末尾窗口字符数）；`loop_min_repeats`（默认 2，窗口内最少重复次数）；`loop_min_span`（默认 2048，重复段总长下限 `period×repeats`——短周期需更多次，如 `Hmm.` 需连续数百次，而 7k 长块 2 次即成立）；`loop_check_every`（默认 512，流式检测间隔）；`loop_retries`（默认 2，循环重试次数，**独立于** `max_retries`）；`loop_temp_bump`（默认 0.1，每次循环重试递增 temperature，上限 base+0.3，用于打破锚定）；`loop_norm`（默认 true，比较前折叠空白）。
     - **仅识别精确（空白不敏感）周期重复**（周期实测 5～7k+ 字符）；非周期性的推敲不在此防线内。检测到的异常轮次**不会**进入多轮对话历史（内部重试，调用方消息不变），并完整记录于该次调用日志的 `loop_aborts` 字段。
+  - **单调用总时长上限**（`llm.max_call_seconds`，默认 300s；`0`=关闭）：覆盖"一直在输出但不结束"的意外超长响应。周期性循环与非周期滴答都可能超长：前者由 `loop_guard` 秒级截断，后者由本上限兜底。可按 tag 前缀覆盖：`llm.max_call_seconds_by_tag`（默认 `{"qa":1200,"term":600}`，因 QA/术语辨析的合法单次调用本身很长）。超时后以**相同参数**重试 `llm.call_retries` 次（默认 1，独立于 `max_retries`/`loop_retries`），仍失败则以普通 `LLMError` 冒泡（上层降级处理）。异常轮次记录于日志 `wall_aborts` 字段。
+    - **三层防护互不冲突**：`llm.timeout`（默认 120s，**流式读取间隔**超时）专防真正网络卡死/无数据停顿——合法长响应因持续有分块而不触发；`loop_guard` 秒级抓周期循环；`max_call_seconds` 兜底非周期超长。三者按"谁先触发"生效，预算各自独立。
+    - **注意**：非流式（`llm.stream=false`）下无中途检测机会，read timeout 即等于总时长，故 `_post_once` 以 `min(timeout, max_call_seconds)` 作为超时。
+    - **未来可选**：真正的"首 token 120s、其后 60s"分段读取超时需 `urllib3>=2.0`（`HTTPResponse.settimeout`）；当前栈固定单值，暂以 120s 单值覆盖。
   - `llm.max_history_segments`：多轮对话保留历史段落数（默认 50）
   - `llm.summary_enabled`：摘要接力开关（默认 true）
   - `llm_logs.auto_export`：translate 完成后自动导出对话日志（默认 true）

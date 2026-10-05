@@ -291,6 +291,11 @@ def _sse(*events):
     return lines
 
 
+def _sse_line(obj):
+    """单条 SSE data 行（供 fake_post 内部使用，避免 json 参数遮蔽模块）。"""
+    return "data: " + json.dumps(obj, ensure_ascii=False)
+
+
 def test_stream_aggregates_content_and_reasoning(tmp_path, monkeypatch):
     c = _client(tmp_path, stream=True)
     lines = _sse(
@@ -582,6 +587,162 @@ def test_loop_config_defaults(tmp_cfg):
     assert c.loop_retries == 2
     assert abs(c.loop_temp_bump - 0.1) < 1e-9
     assert c.loop_norm is True
+
+
+# ── 单调用总时长上限（wall-clock call timeout） ─────────────────────────
+
+
+def _client_call_timeout(tmp_path, **extra):
+    llm_cfg = {"provider": "openai-compatible", "api_key_required": False,
+               "max_tokens": 4096, "stream": True, "timeout": 120,
+               "max_call_seconds": 300,
+               "max_call_seconds_by_tag": {"qa": 1200, "term": 600},
+               "call_retries": 1}
+    llm_cfg.update(extra)
+    return llm.LLMClient(_make_cfg(llm_cfg, str(tmp_path)))
+
+
+def test_call_cap_resolution(tmp_path):
+    c = _client_call_timeout(tmp_path)
+    assert c._call_cap("translate_today_1") == 300
+    assert c._call_cap("judge_x") == 300
+    assert c._call_cap("qa") == 1200
+    assert c._call_cap("term_review") == 600
+    c.max_call_seconds = 0
+    assert c._call_cap("translate_x") == 0
+
+
+def _tick_stream_forever():
+    """永不结束的流（无 [DONE]），用于触发 wall-clock 检测。"""
+    while True:
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "x"}, "finish_reason": None}]})
+
+
+def test_stream_call_timeout_aborts_and_retries(tmp_path, monkeypatch):
+    c = _client_call_timeout(tmp_path, max_call_seconds=5)
+    clock = {"t": 0.0}
+    monkeypatch.setattr("booktr.llm.time.monotonic", lambda: clock["t"])
+    calls = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            class _S:
+                status_code = 200
+                def iter_lines(self, decode_unicode=False):
+                    # 每次迭代推进时钟 > cap，触发超时
+                    for _ in range(3):
+                        clock["t"] += 10
+                        yield _sse_line(
+                            {"choices": [{"delta": {"content": "x"},
+                                          "finish_reason": None}]})
+                def close(self): pass
+            return _S()
+        return _FakeStream(_sse(
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}))
+
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    out = c.chat("s", "u", tag="translate_x")
+    assert out == "ok"
+    assert calls["n"] == 2
+    logdir = c.cfg.get("llm_logs", "dir", default="")
+    files = sorted(os.listdir(logdir))
+    entry = json.load(open(os.path.join(logdir, files[-1]), encoding="utf-8"))
+    assert entry.get("wall_abort_count") == 1
+    assert entry["wall_aborts"][0]["limit_s"] == 5.0
+
+
+def test_stream_call_timeout_exhausted_raises(tmp_path, monkeypatch):
+    c = _client_call_timeout(tmp_path, max_call_seconds=5, call_retries=1,
+                             max_call_seconds_by_tag={"qa": 5})
+    clock = {"t": 0.0}
+    monkeypatch.setattr("booktr.llm.time.monotonic", lambda: clock["t"])
+    calls = {"n": 0}
+
+    class _S:
+        status_code = 200
+        def iter_lines(self, decode_unicode=False):
+            for _ in range(3):
+                clock["t"] += 10
+                yield _sse_line(
+                    {"choices": [{"delta": {"content": "x"}, "finish_reason": None}]})
+        def close(self): pass
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        calls["n"] += 1
+        return _S()
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    with pytest.raises(llm.LLMError) as ei:
+        c.chat("s", "u", tag="qa")
+    assert calls["n"] == 2  # 首次 + 1 次调用重试
+    assert getattr(ei.value, "wall_aborts", None)
+
+
+def test_wall_aborts_does_not_consume_loop_or_net_retries(tmp_path, monkeypatch):
+    """wall/loop/net 三类重试预算互相独立。
+
+    第 1 次：wall-clock 超时（占用 call_retries=1）；
+    第 2 次：周期性循环（占用 loop_retries=1）；
+    第 3 次：成功。若预算互相占用则无法走完三次。
+    """
+    c = _client_call_timeout(tmp_path, max_call_seconds=5, call_retries=1,
+                             loop_retries=1, max_retries=1, loop_window=4096,
+                             loop_check_every=64, loop_min_span=2048,
+                             max_call_seconds_by_tag={"qa": 5})
+    calls = {"n": 0}
+    clock = {"t": 0.0}
+    monkeypatch.setattr("booktr.llm.time.monotonic", lambda: clock["t"])
+
+    def _timeout_stream():
+        class _S:
+            status_code = 200
+            def iter_lines(self, decode_unicode=False):
+                for _ in range(3):
+                    clock["t"] += 10
+                    yield _sse_line(
+                        {"choices": [{"delta": {"content": "x"}, "finish_reason": None}]})
+            def close(self): pass
+        return _S()
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _timeout_stream()               # wall → call 预算
+        if calls["n"] == 2:
+            return _FakeStream(_loop_stream())     # 循环 → loop 预算
+        return _FakeStream(_sse(
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}))
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    out = c.chat("s", "u", tag="qa")
+    assert out == "ok"
+    assert calls["n"] == 3
+
+
+def test_call_config_defaults(tmp_cfg):
+    c = llm.LLMClient(tmp_cfg)
+    assert c.timeout == 120
+    assert c.max_call_seconds == 300
+    assert c.max_call_seconds_by_tag == {"qa": 1200, "term": 600}
+    assert c.call_retries == 1
+
+
+def test_nonstream_timeout_clamped_to_cap(tmp_path, monkeypatch):
+    c = _client_call_timeout(tmp_path, stream=False, timeout=120,
+                             max_call_seconds=45)
+    captured = {}
+
+    class _R:
+        status_code = 200
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"},
+                                 "finish_reason": "stop"}], "usage": {}}
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["timeout"] = timeout
+        return _R()
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    assert c.chat("s", "u", tag="translate_x") == "ok"
+    assert captured["timeout"] == 45  # min(120, cap=45)
 
 
 def test_log_records_partial_reasoning_on_stream_error(tmp_cfg, monkeypatch):

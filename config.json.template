@@ -16,7 +16,7 @@
     "temperature": 0.3,
     "max_tokens": 131072,
     "max_tokens_ceiling": 524288,
-    "timeout": 300,
+    "timeout": 120,
     "connect_timeout": 20,
     "stream": true,
     "reasoning_effort": "",
@@ -36,7 +36,10 @@
     "loop_check_every": 512,
     "loop_retries": 2,
     "loop_temp_bump": 0.1,
-    "loop_norm": true
+    "loop_norm": true,
+    "max_call_seconds": 300,
+    "max_call_seconds_by_tag": {"qa": 1200, "term": 600},
+    "call_retries": 1
   },
   "planner": {
     "static_first": true,

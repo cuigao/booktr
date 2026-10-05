@@ -28,7 +28,7 @@ DEFAULTS: dict[str, Any] = {
         "temperature": 0.3,
         "max_tokens": 131072,  # 推理模型会把大量预算花在 reasoning 上，留足上限避免 content 被截空
         "max_tokens_ceiling": 524288,  # reasoning 截空时翻倍重试的上限
-        "timeout": 300,
+        "timeout": 120,
         "connect_timeout": 20,  # 流式建连超时（读取超时随 chunk 重置）
         "stream": True,  # 流式输出（长思考不再误判网络超时；不支持的服务设 false）
         "reasoning_effort": "",  # 思考等级：空=不设置(用模型默认)；none/low/high/max
@@ -51,6 +51,11 @@ DEFAULTS: dict[str, Any] = {
         "loop_retries": 2,  # 检测到循环后同参数重试次数（独立于 max_retries）
         "loop_temp_bump": 0.1,  # 每次循环重试递增的 temperature（上限 base+0.3）
         "loop_norm": True,  # 比较前折叠空白（使换行差异不影响判定）
+        # 单调用总时长上限（wall-clock）：覆盖"一直输出但不结束"的超长响应（非周期，
+        # loop guard/read timeout 抓不到）。0=关闭；可按 tag 前缀覆盖（如 qa 更长）
+        "max_call_seconds": 300,  # 全局每调用上限（秒）
+        "max_call_seconds_by_tag": {"qa": 1200, "term": 600},  # 按 tag 前缀覆盖
+        "call_retries": 1,  # 超时后同参数重试次数（独立于 max_retries）
     },
     "planner": {
         "static_first": True,

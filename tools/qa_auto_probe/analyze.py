@@ -905,6 +905,12 @@ def _render_call(i: int, name: str, lg: dict, thinking: str,
         if thinking == "full" and ab.get("reasoning"):
             out.append("    异常 reasoning 尾部:")
             out.extend(_block(ab["reasoning"][-2000:], indent="      "))
+    for ab in lg.get("wall_aborts") or []:
+        out.append(f"- **调用超时中止** {ab.get('elapsed_s')}s > {ab.get('limit_s')}s  "
+                   f"finish={ab.get('finish_reason')}")
+        if thinking == "full" and ab.get("reasoning"):
+            out.append("    异常 reasoning 尾部:")
+            out.extend(_block(ab["reasoning"][-2000:], indent="      "))
     out.append("")
     return out
 
