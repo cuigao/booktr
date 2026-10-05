@@ -53,6 +53,14 @@ def test_system_requires_quote_fields():
     assert "逐字" in sysp
 
 
+def test_system_uses_configured_language_names():
+    cfg = Config(root=".", data={"lang": {"source": "en", "target": "fr"}},
+                 data_dir=".")
+    sysp = prompts.build_translator_note_system(cfg)
+    assert "英语" in sysp and "法语" in sysp
+    assert "日文" not in sysp and "简体中文" not in sysp
+
+
 def test_user_prompt_includes_segments_and_summaries():
     cfg = Config(root=".", data={}, data_dir=".")
     segs = [{"id": 1, "src": "リブレットは小さい。", "dst": "Libretto很小。"}]

@@ -582,6 +582,8 @@ def build_translator_note_system(cfg, glossary: list[dict] | None = None,
     """
     tgt = cfg.get("lang", "target", default="zh-Hans")
     tgt_name = lang_name(tgt)
+    src = cfg.get("lang", "source", default="ja")
+    src_name = lang_name(src)
     if max_notes and max_notes > 0:
         cap = f"- 本页最多输出 {max_notes} 条；只写最值得交代的，宁缺毋滥。"
     else:
@@ -589,7 +591,7 @@ def build_translator_note_system(cfg, glossary: list[dict] | None = None,
     lines = [
         f"你是资深译者与网站研究者，为{tgt_name}读者撰写译者注。",
         "译者注用于向读者交代正文中不易理解之处：前后文呼应、创作背景、"
-        "历史考据、趣味细节。读者只看译文，看不懂日文。",
+        f"历史考据、趣味细节。读者只看译文，看不懂{src_name}。",
         "",
         "## 输出格式（严格 JSON，只输出 JSON 本身，无任何额外文字或 markdown 围栏）",
         "{\"notes\": [{\"src_quote\": \"原文片段\", \"dst_quote\": \"译文片段\", "
@@ -609,7 +611,7 @@ def build_translator_note_system(cfg, glossary: list[dict] | None = None,
         "- 引文应尽量在本页**唯一出现**，以免锚点落错位置。",
         "",
         "## 注释内容要求",
-        "- content：用简体中文写 1~3 句，直接陈述背景/关联/考据，"
+        f"- content：用{tgt_name}写 1~3 句，直接陈述背景/关联/考据，"
         "**不要以「译者注：」开头**（侧栏标题已标明译者注）。",
         "- 只依据提供的材料（本页原文/译文、全站摘要）作答；"
         "**不确定或材料不足时，宁可不写这条注释**，绝不编造。",
