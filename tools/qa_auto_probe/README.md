@@ -102,6 +102,16 @@ python tools/qa_auto_probe/analyze.py --transcripts tools/qa_auto_probe/_out \
 python tools/qa_auto_probe/analyze.py --embed-thinking tools/qa_auto_probe/_out
 ```
 
+`--rebind-logs`（修正 `log_index.json`）：按 **run 自标识精确绑定优先 → 旧索引沿用 →
+固定页序结构分段兜底** 重建日志↔run 索引（新旧日志混合下 0 重复）：
+
+```bash
+python tools/qa_auto_probe/analyze.py --rebind-logs tools/qa_auto_probe/_out \
+    --ref-data-dir ../../instance/data-deepseek-v4.1-flash
+```
+新日志携带 `run` 字段（= run 的 `run_tag`）→ 直接绑定；无 `run` 的旧日志回退旧索引 /
+结构分段。输出 `log_index.json` + `rebind_audit.txt`。
+
 `--audit`（只读）审计判官日志，检测重置态调用 / 索引回显不符 / 响应错位：
 
 ```bash

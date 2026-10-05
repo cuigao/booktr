@@ -134,3 +134,63 @@ def test_item_issue_match_requires_same_segment():
     assert m.item_issue_match(a, b)[0] is False
     b["segments"] = [1]
     assert m.item_issue_match(a, b)[0] is True
+
+
+# ------------------------------------------------------------------
+# rebind_logs：run 自标识精确绑定 + 旧索引沿用 + 结构分段兜底
+# ------------------------------------------------------------------
+def _rebind_fixture(tmp_path, with_old_index=True):
+    out = tmp_path / "out"
+    runs = out / "variant_runs"
+    logs = out / "logs"
+
+    def run(name, variant, vcfg, calls, run_tag=""):
+        obj = {"end": "qa", "variant": variant, "run": 1, "pages": ["a.html", "b.html"],
+               "llm": {"calls": calls}}
+        if vcfg:
+            obj["vcfg"] = vcfg
+        if run_tag:
+            obj["run_tag"] = run_tag
+        _write(str(runs / name), obj)
+
+    def log(name, run_id, ts):
+        _write(str(logs / name), {
+            "tag": "qa_1", "ts": ts, "run": run_id,
+            "system": "## 审核政策（通用）\nx",
+            "user": "|TEXT|a|DST|b"})
+
+    run("qa_V1_run1.json", "V1", {"policy": True, "history": False}, 2)
+    run("qa_V2_run1.json", "V2", {"policy": True, "history": False}, 2,
+        run_tag="variant-qa-V2-run1")
+    log("qa_aaa.json", "", "2026-01-01T00:00:01")
+    log("qa_bbb.json", "", "2026-01-01T00:00:02")
+    log("qa_ccc.json", "variant-qa-V2-run1", "2026-01-01T00:00:03")
+    log("qa_ddd.json", "variant-qa-V2-run1", "2026-01-01T00:00:04")
+    if with_old_index:
+        _write(str(out / "log_index.json"),
+               {"qa_V1_run1.json": ["qa_aaa.json", "qa_bbb.json"]})
+    return str(out)
+
+
+def test_rebind_prefers_run_tag_and_reuses_old_index(tmp_path):
+    m = _load()
+    out = _rebind_fixture(tmp_path, with_old_index=True)
+    index = m.rebind_logs(out, out, None)
+    assert sorted(index["qa_V1_run1.json"]) == ["qa_aaa.json", "qa_bbb.json"]
+    assert sorted(index["qa_V2_run1.json"]) == ["qa_ccc.json", "qa_ddd.json"]
+    audit = open(os.path.join(out, "rebind_audit.txt"), encoding="utf-8").read()
+    assert "绑定 4/4 条日志" in audit
+    assert "⚠" not in audit  # 每个 run got == want
+
+
+def test_rebind_structural_fallback_without_old_index(tmp_path):
+    m = _load()
+    out = _rebind_fixture(tmp_path, with_old_index=False)
+    index = m.rebind_logs(out, out, None)
+    # V2 精确绑定；V1 无精确也无旧索引 → 结构分段兜底
+    assert sorted(index["qa_V2_run1.json"]) == ["qa_ccc.json", "qa_ddd.json"]
+    assert sorted(index["qa_V1_run1.json"]) == ["qa_aaa.json", "qa_bbb.json"]
+    # 幂等：再跑一次结果不变
+    again = m.rebind_logs(out, out, None)
+    assert {k: sorted(v) for k, v in again.items()} == \
+           {k: sorted(v) for k, v in index.items()}

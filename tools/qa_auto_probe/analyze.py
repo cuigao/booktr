@@ -708,14 +708,19 @@ def _page_src_fingerprints(ref_data_dir: str, pages: list) -> dict:
 
 def rebind_logs(source_out: str, out_dir: str | None = None,
                 ref_data_dir: str | None = None):
-    """一次性修复：按**固定页序**把日志切分绑定到各 run（准确、无需猜测时间）。
+    """修复并构建 `log_index.json`：把 `_out/logs/` 的调用日志绑定到各 run。
 
-    原理：同一 (end, bucket) 的 run 按变体/次序执行，每个 run 依固定页序逐页产出
-    （qa/judge 每页 1 条日志；translate 每页多 chunk，但页边界仍以"回到首页"为界）。
-    故将同桶日志按 `ts` 排序后，在"页回到首页"处切分为 run 段，按序对应各 run。
+    **绑定优先级（run 自标识优先，结构分段兜底）**：
+    1. **精确**：日志携带 ``run`` 字段且能对应某 run 的 ``run_tag`` → 直接绑定（新日志，
+       无需猜测）。
+    2. **沿用旧索引**：`log_index.json` 已存在的绑定保留给**尚无精确绑定**的 run
+       （旧日志无 ``run`` 字段，其绑定此前已按固定页序修正过）。
+    3. **结构分段兜底**：仅对上述都未覆盖的 run + 未被认领的日志，按**固定页序**切分：
+       同一 (end, bucket) 的 run 依固定页序执行，日志按 `ts` 排序后在"页回到首页"处切段。
+
     - 日志 page：judge/translate 由 `tag`；qa 由 `user` 的 |TEXT| 与页原文指纹匹配。
     - bucket：qa/judge 由 system/user 标记；translate 由 system 风格标记。
-    输出修正后的 `log_index.json` + 审计摘要。**一条日志只绑一个 run**。
+    输出 `log_index.json` + 审计摘要。**一条日志只绑一个 run**。
     """
     import glob
     from collections import defaultdict
@@ -723,8 +728,9 @@ def rebind_logs(source_out: str, out_dir: str | None = None,
     logs_dir = os.path.join(source_out, "logs")
     runs_dir = os.path.join(source_out, "variant_runs")
     out_dir = out_dir or source_out
+    base_index = _read_json_opt(os.path.join(out_dir, "log_index.json"), {}) or {}
 
-    # 1) 读取 run，构造各端页序 + 桶
+    # 1) 读取 run，构造各端页序 + 桶 + run_tag
     runs = []
     for rf in sorted(glob.glob(os.path.join(runs_dir, "*.json"))):
         j = _read_json_opt(rf, None)
@@ -734,6 +740,7 @@ def rebind_logs(source_out: str, out_dir: str | None = None,
                      "variant": j.get("variant", ""),
                      "run": int(j.get("run", 0) or 0),
                      "pages": list(j.get("pages") or []),
+                     "run_tag": j.get("run_tag", "") or "",
                      "bucket": _run_bucket(j)})
     runs.sort(key=lambda r: (r["end"], r["bucket"], _vkey_order(r["variant"]), r["run"]))
     qa_pages = sorted({pg for r in runs for pg in r["pages"]})
@@ -744,6 +751,7 @@ def rebind_logs(source_out: str, out_dir: str | None = None,
     for f in glob.glob(os.path.join(logs_dir, "*.json")):
         j = _read_json_opt(f, {}) or {}
         lg = {"name": os.path.basename(f), "tag": j.get("tag", ""),
+              "run": j.get("run", "") or "",
               "ts": j.get("ts", ""), "system": j.get("system", ""),
               "user": j.get("user", ""), "mtime": os.path.getmtime(f)}
         lg["end"] = _log_pages_end(lg["name"])
@@ -758,18 +766,37 @@ def rebind_logs(source_out: str, out_dir: str | None = None,
         logs.append(lg)
     logs.sort(key=lambda x: x["ts"])
 
-    # 3) 结构分段：同 (end,bucket) 内按 ts 排序，在"页回到首页"处切分
     index = defaultdict(list)
     seen = set()
     notes = []
-    groups = defaultdict(list)
+
+    # 3a) 精确绑定：日志 run 字段 == run 的 run_tag
+    run_by_tag = {r["run_tag"]: r["file"] for r in runs if r["run_tag"]}
     for lg in logs:
-        if lg["end"] in ("qa", "judge", "translate"):
-            groups[(lg["end"], lg["bucket"])].append(lg)
+        f = run_by_tag.get(lg["run"])
+        if f:
+            index[f].append(lg["name"])
+            seen.add(lg["name"])
+
+    # 3b) 沿用旧索引：仅补给尚无精确绑定的 run，且排除已被认领的日志名
+    for f, names in base_index.items():
+        if index.get(f):
+            continue
+        kept = [n for n in names if n not in seen]
+        if kept:
+            index[f].extend(kept)
+            seen.update(kept)
+
+    # 3c) 结构分段兜底：仅处理"仍无绑定"的 run 与"未被认领"的日志
+    leftover = [lg for lg in logs if lg["name"] not in seen
+                and lg["end"] in ("qa", "judge", "translate")]
+    groups = defaultdict(list)
+    for lg in leftover:
+        groups[(lg["end"], lg["bucket"])].append(lg)
     for (end, bucket), glist in groups.items():
-        gruns = [r for r in runs if r["end"] == end and r["bucket"] == bucket]
+        gruns = [r for r in runs if r["end"] == end and r["bucket"] == bucket
+                 and not index.get(r["file"])]
         if not gruns:
-            notes.append(f"{end}/{bucket}: 无匹配 run，跳过 {len(glist)} 条")
             continue
         order = gruns[0]["pages"] or []
         pidx = {pg: i for i, pg in enumerate(order)}
