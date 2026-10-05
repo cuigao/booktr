@@ -633,6 +633,98 @@ def link_logs(run_dir: str, logs_dir: str, out_dir: str):
     return index
 
 
+def _rc_excerpt(text: str, head: int = 800, tail: int = 800) -> str:
+    """reasoning 摘要：首 head + 省略 + 尾 tail。"""
+    t = (text or "").strip()
+    if len(t) <= head + tail + 20:
+        return t
+    return t[:head] + "\n…（中略）…\n" + t[-tail:]
+
+
+def _fmt_issue(x: dict) -> list[str]:
+    return [
+        f"    - [{x.get('severity')}] 段{x.get('segments')}",
+        f"      原因: {x.get('reason', '')}",
+        f"      相关原文: {x.get('src_quote', '')}",
+        f"      现有译文: {x.get('dst_quote', '')}",
+        f"      建议: {x.get('suggestion', '')}",
+    ]
+
+
+def transcripts(source_out: str, end, variants, runs, report_dir: str):
+    """把变体运行的对话日志渲染成可读 Markdown（qa / judge）。需 log_index.json。"""
+    idx_path = os.path.join(source_out, "log_index.json")
+    if not os.path.exists(idx_path):
+        link_logs(os.path.join(source_out, "variant_runs"),
+                  os.path.join(source_out, "logs"), source_out)
+    index = _read_json_opt(idx_path, {}) or {}
+    logs = os.path.join(source_out, "logs")
+
+    ends = [end] if end else ["qa", "judge"]
+    md_out_dir = report_dir or source_out
+    os.makedirs(md_out_dir, exist_ok=True)
+    for e in ends:
+        lines = [f"# 变体对话记录（{e}）", ""]
+        for key in sorted(index):
+            parts = key[:-5].split("_")
+            if parts[0] != e:
+                continue
+            vkey, run = parts[1], parts[2].replace("run", "")
+            if variants and vkey not in variants:
+                continue
+            if runs and run not in runs:
+                continue
+            j = _read_json_opt(os.path.join(source_out, "variant_runs", key), {}) or {}
+            lines.append(f"\n## {vkey} run{run}  "
+                         f"（{j.get('duration_s')}s, {len(index[key])} 次调用）")
+            if e == "qa":
+                lines.append("")
+                for pg, issues in (j.get("qa") or {}).items():
+                    lines.append(f"### {pg}  ({len(issues)} 问题)")
+                    for x in issues:
+                        lines.extend(_fmt_issue(x))
+                # 该 run 的 QA 调用（每页一次）
+                lines.append("\n**调用明细**：")
+                for name in index[key]:
+                    lg = _read_json_opt(os.path.join(logs, name), {}) or {}
+                    rl = lg.get("reasoning_len", 0) or 0
+                    dur = lg.get("duration_ms", 0) / 1000
+                    lines.append(f"- {name[:40]}  {dur:.0f}s  "
+                                 f"reasoning={rl}  "
+                                 f"completion={lg.get('usage', {}).get('completion_tokens')}  "
+                                 f"finish={lg.get('finish_reason')}")
+                    if rl > 30000 or dur > 300:
+                        lines.append("  ```\n  " +
+                                     _rc_excerpt(lg.get("reasoning", "")).replace("\n", "\n  ") +
+                                     "\n  ```")
+            else:  # judge
+                lines.append("")
+                for pg, d in (j.get("judge") or {}).items():
+                    verd = d.get("verdicts") or []
+                    lines.append(f"### {pg}  ({len(verd)} 条裁决)")
+                    for v in verd:
+                        lines.append(f"    [{v.get('severity')}] 段{v.get('segments')} "
+                                     f"→ **{v.get('verdict')}**")
+                        lines.append(f"      理由: {v.get('reason', '')}")
+                        if v.get("suggestion"):
+                            lines.append(f"      建议: {v.get('suggestion', '')}")
+                lines.append("\n**调用明细（含长思考 reasoning 摘要）**：")
+                for name in index[key]:
+                    lg = _read_json_opt(os.path.join(logs, name), {}) or {}
+                    rl = lg.get("reasoning_len", 0) or 0
+                    dur = lg.get("duration_ms", 0) / 1000
+                    head = f"- {name[:40]}  {dur:.0f}s  reasoning={rl}  " \
+                           f"completion={lg.get('usage', {}).get('completion_tokens')}"
+                    lines.append(head)
+                    if rl > 30000 or dur > 300:
+                        lines.append("  ```\n  " +
+                                     _rc_excerpt(lg.get("reasoning", "")).replace("\n", "\n  ") +
+                                     "\n  ```")
+        p = os.path.join(md_out_dir, f"transcripts_{e}.md")
+        open(p, "w", encoding="utf-8").write("\n".join(lines))
+        print(f"留存: {p}（{len(lines)} 行）")
+
+
 def _jaccard(sets: list) -> float:
     if len(sets) < 2:
         return 1.0
@@ -676,6 +768,16 @@ def main():
                     help="变体分析参照的实例 data_dir（用于振荡敏感度）")
     ap.add_argument("--link-logs", default=None,
                     help="把 <out>/logs 的调用日志按时间窗关联到 <out>/variant_runs/*")
+    ap.add_argument("--transcripts", default=None,
+                    help="把 <out> 的变体对话渲染为可读 Markdown（配合 --end/--tvar/--trun）")
+    ap.add_argument("--end", default=None, choices=["qa", "judge", "translate"],
+                    help="--transcripts 限定端（默认 qa+judge）")
+    ap.add_argument("--tvar", nargs="*", default=None,
+                    help="--transcripts 限定变体（如 V0 V4）")
+    ap.add_argument("--trun", nargs="*", default=None,
+                    help="--transcripts 限定运行号（如 1 2 3）")
+    ap.add_argument("--report-dir", default=None,
+                    help="--transcripts 输出目录（默认写回 <out>）")
     ap.add_argument("--emit-category", default=None,
                     help="按类别筛选 QA2 open 条目，指向实例 data_dir；配合 --category")
     ap.add_argument("--category", default="DE",
@@ -696,6 +798,10 @@ def main():
     if args.link_logs:
         link_logs(os.path.join(args.link_logs, "variant_runs"),
                   os.path.join(args.link_logs, "logs"), args.out_dir)
+        return
+    if args.transcripts:
+        transcripts(args.transcripts, args.end, set(args.tvar or []),
+                    set(args.trun or []), args.report_dir or args.out_dir)
         return
     if args.variant:
         variant_analysis(args.variant, args.out_dir, args.ref_data_dir)

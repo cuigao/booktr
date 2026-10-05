@@ -154,6 +154,33 @@ def test_variant_analysis_skips_bad_runs_and_hitset(tmp_path):
     assert "段命中 Jaccard" in txt
 
 
+def test_transcripts_render(tmp_path):
+    m = _analyze()
+    out = str(tmp_path / "o")
+    runs = os.path.join(out, "variant_runs")
+    logs = os.path.join(out, "logs")
+    os.makedirs(runs, exist_ok=True)
+    os.makedirs(logs, exist_ok=True)
+    json.dump({"variant": "V4", "run": 1, "end": "qa", "duration_s": 5.0,
+               "qa": {"p/a.html": [{"severity": "low", "reason": "生硬",
+                                    "segments": [1], "src_quote": "a", "dst_quote": "b",
+                                    "suggestion": "c"}]}},
+              open(os.path.join(runs, "qa_V4_run1.json"), "w", encoding="utf-8"),
+              ensure_ascii=False)
+    open(os.path.join(logs, "qa_20260101_000000_1.json"), "w", encoding="utf-8").write(
+        json.dumps({"reasoning": "x" * 40000, "reasoning_len": 40000,
+                    "duration_ms": 999000, "usage": {"completion_tokens": 10},
+                    "finish_reason": "length"}, ensure_ascii=False))
+    # 手动建立 log_index（避免依赖 mtime 精度）
+    json.dump({"qa_V4_run1.json": ["qa_20260101_000000_1.json"]},
+              open(os.path.join(out, "log_index.json"), "w", encoding="utf-8"))
+    m.transcripts(out, "qa", set(), set(), str(tmp_path / "rep"))
+    md = open(os.path.join(str(tmp_path / "rep"), "transcripts_qa.md"), encoding="utf-8").read()
+    assert "V4 run1" in md and "生硬" in md and "原因:" in md
+    # 长调用应附 reasoning 摘要（截断标记）
+    assert "中略" in md
+
+
 def test_variant_analysis_smoke(tmp_path):
     m = _analyze()
     vdir = str(tmp_path / "v")
