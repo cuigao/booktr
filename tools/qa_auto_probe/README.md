@@ -13,8 +13,6 @@
 |---|---|
 | `probe.py` | 探针：`judge`（判官校准，只读回放）/ `e2e`（端到端 QA1→判官→apply→QA2） |
 | `analyze.py` | `--result`：算 e2e **问题级复现率** / 裁决分布 / diff 段数；`--audit`：判官漂移审计；`--prod`：生产实例评估 |
-| `_samples/analysis.txt` | 归档的 e2e 分析结果（可读证据） |
-| `_samples/prod_analysis.txt` | 归档的生产实例评估结果（可读证据） |
 | `_out/` | 运行输出（gitignore：结果 JSON、`drift_audit.txt` 与 `logs/`） |
 
 ## 用法

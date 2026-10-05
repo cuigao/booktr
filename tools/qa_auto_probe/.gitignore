@@ -1,7 +1,9 @@
-# 运行输出（结果 JSON / 日志）不入库；仅 _samples/analysis.txt 留档
+# 运行输出（结果 JSON / 日志）不入库
 _out/
 logs/
 __pycache__/
 *.pyc
 drift_audit.txt
 variant_analysis.txt
+# 本地样例（含本地数据/特定轮次译文），不通用、不入库
+_samples/
