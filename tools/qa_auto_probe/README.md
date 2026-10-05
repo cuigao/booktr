@@ -83,15 +83,23 @@ python tools/qa_auto_probe/analyze.py --variant tools/qa_auto_probe/_out \
 结果写 `_out/variant_runs/<end>_<V>_run<N>.json` + `variant_summary_<end>.json`；
 `analyze.py --variant` 汇总类别问题数、跨次稳定性、振荡敏感度、判官分布与成本。
 
-`--transcripts`（可读对话）：把各 run 的 QA/judge 对话渲染为中文 Markdown——
-QA 每条问题（严重度/原因/原文/译文/建议）+ 调用耗时与 reasoning_len；judge 逐条 Q→A 卡
-（问题 + verdict + 理由/建议）+ 长调用附 reasoning 首尾摘要。
+`--transcripts`（可读对话，三端）：把各 run 的 translate/qa/judge 对话渲染为中文 Markdown——
+结构化摘要（QA 逐条问题、judge 逐条 Q→A 卡、translate 每段译文）+ **逐调用记录
+（user 摘要 / response / **thinking 全文**，`--thinking full|excerpt|none`，默认 full）**。
 
 ```bash
 python tools/qa_auto_probe/analyze.py --transcripts tools/qa_auto_probe/_out \
-    [--end qa|judge] [--tvar V0 V4] [--trun 1 2] [--report-dir <dir>]
+    [--end translate|qa|judge] [--tvar V0 V4] [--trun 1 2] \
+    [--thinking full] [--report-dir <dir>]
 ```
 依赖 `log_index.json`（缺则自动 `link_logs`）。
+
+`--embed-thinking`：把 `_out/logs` 的完整调用日志（含 reasoning/response/system/user/messages
+全文）**回填进 `variant_runs/*.json` 的 `calls` 字段**，使运行 JSON 自包含（无需重跑模型）：
+
+```bash
+python tools/qa_auto_probe/analyze.py --embed-thinking tools/qa_auto_probe/_out
+```
 
 `--audit`（只读）审计判官日志，检测重置态调用 / 索引回显不符 / 响应错位：
 

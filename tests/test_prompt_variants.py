@@ -174,11 +174,31 @@ def test_transcripts_render(tmp_path):
     # 手动建立 log_index（避免依赖 mtime 精度）
     json.dump({"qa_V4_run1.json": ["qa_20260101_000000_1.json"]},
               open(os.path.join(out, "log_index.json"), "w", encoding="utf-8"))
-    m.transcripts(out, "qa", set(), set(), str(tmp_path / "rep"))
+    m.transcripts(out, "qa", set(), set(), str(tmp_path / "rep"), thinking="full")
     md = open(os.path.join(str(tmp_path / "rep"), "transcripts_qa.md"), encoding="utf-8").read()
     assert "V4 run1" in md and "生硬" in md and "原因:" in md
-    # 长调用应附 reasoning 摘要（截断标记）
-    assert "中略" in md
+    # full：附 thinking 全文块（无"中略"截断）
+    assert "thinking（full）" in md and "中略" not in md
+
+
+def test_embed_thinking_backfills_calls(tmp_path):
+    m = _analyze()
+    out = str(tmp_path / "o")
+    runs = os.path.join(out, "variant_runs")
+    logs = os.path.join(out, "logs")
+    os.makedirs(runs, exist_ok=True)
+    os.makedirs(logs, exist_ok=True)
+    json.dump({"variant": "V0", "run": 1, "end": "translate", "duration_s": 1.0},
+              open(os.path.join(runs, "translate_V0_run1.json"), "w", encoding="utf-8"))
+    json.dump({"reasoning": "R" * 10, "response": "resp", "tag": "translate_x"},
+              open(os.path.join(logs, "translate_x_1.json"), "w", encoding="utf-8"),
+              ensure_ascii=False)
+    json.dump({"translate_V0_run1.json": ["translate_x_1.json"]},
+              open(os.path.join(out, "log_index.json"), "w", encoding="utf-8"))
+    m.embed_thinking(out)
+    j = json.load(open(os.path.join(runs, "translate_V0_run1.json"), encoding="utf-8"))
+    assert len(j["calls"]) == 1 and j["calls"][0]["reasoning"] == "R" * 10
+    assert j["calls"][0]["response"] == "resp"
 
 
 def test_variant_analysis_smoke(tmp_path):

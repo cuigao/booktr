@@ -651,8 +651,36 @@ def _fmt_issue(x: dict) -> list[str]:
     ]
 
 
-def transcripts(source_out: str, end, variants, runs, report_dir: str):
-    """把变体运行的对话日志渲染成可读 Markdown（qa / judge）。需 log_index.json。"""
+def _block(text: str, indent: str = "    ") -> list[str]:
+    return ["  " + indent + "```"] + \
+           [indent + ln for ln in (text or "").splitlines()] + \
+           ["  " + indent + "```"]
+
+
+def _render_call(i: int, name: str, lg: dict, thinking: str) -> list[str]:
+    """渲染一次调用：元信息 + user 摘要 + response + thinking（全/摘要/无）。"""
+    dur = lg.get("duration_ms", 0) / 1000
+    rl = lg.get("reasoning_len", 0) or 0
+    out = [f"#### 调用 {i}　`{name}`　{dur:.0f}s  reasoning={rl}  "
+           f"completion={lg.get('usage', {}).get('completion_tokens')}  "
+           f"finish={lg.get('finish_reason')}"]
+    u = lg.get("user", "")
+    if u:
+        out.append("- user（摘要）: " + u[:300].replace("\n", " "))
+    if lg.get("response"):
+        out.append("- response:")
+        out.extend(_block(lg["response"]))
+    if thinking != "none" and lg.get("reasoning"):
+        body = lg["reasoning"] if thinking == "full" else _rc_excerpt(lg["reasoning"])
+        out.append(f"- thinking（{'full' if thinking == 'full' else 'excerpt'}）:")
+        out.extend(_block(body))
+        out.append("")
+    return out
+
+
+def transcripts(source_out: str, end, variants, runs, report_dir: str,
+                thinking: str = "full"):
+    """把变体运行的对话日志渲染成可读 Markdown（translate/qa/judge）。需 log_index.json。"""
     idx_path = os.path.join(source_out, "log_index.json")
     if not os.path.exists(idx_path):
         link_logs(os.path.join(source_out, "variant_runs"),
@@ -660,11 +688,11 @@ def transcripts(source_out: str, end, variants, runs, report_dir: str):
     index = _read_json_opt(idx_path, {}) or {}
     logs = os.path.join(source_out, "logs")
 
-    ends = [end] if end else ["qa", "judge"]
+    ends = [end] if end else ["translate", "qa", "judge"]
     md_out_dir = report_dir or source_out
     os.makedirs(md_out_dir, exist_ok=True)
     for e in ends:
-        lines = [f"# 变体对话记录（{e}）", ""]
+        lines = [f"# 变体对话记录（{e}）", f"\nthinking={thinking}"]
         for key in sorted(index):
             parts = key[:-5].split("_")
             if parts[0] != e:
@@ -677,52 +705,68 @@ def transcripts(source_out: str, end, variants, runs, report_dir: str):
             j = _read_json_opt(os.path.join(source_out, "variant_runs", key), {}) or {}
             lines.append(f"\n## {vkey} run{run}  "
                          f"（{j.get('duration_s')}s, {len(index[key])} 次调用）")
+
+            # 结构化摘要
             if e == "qa":
-                lines.append("")
                 for pg, issues in (j.get("qa") or {}).items():
-                    lines.append(f"### {pg}  ({len(issues)} 问题)")
+                    lines.append(f"\n### {pg}  ({len(issues)} 问题)")
                     for x in issues:
                         lines.extend(_fmt_issue(x))
-                # 该 run 的 QA 调用（每页一次）
-                lines.append("\n**调用明细**：")
-                for name in index[key]:
-                    lg = _read_json_opt(os.path.join(logs, name), {}) or {}
-                    rl = lg.get("reasoning_len", 0) or 0
-                    dur = lg.get("duration_ms", 0) / 1000
-                    lines.append(f"- {name[:40]}  {dur:.0f}s  "
-                                 f"reasoning={rl}  "
-                                 f"completion={lg.get('usage', {}).get('completion_tokens')}  "
-                                 f"finish={lg.get('finish_reason')}")
-                    if rl > 30000 or dur > 300:
-                        lines.append("  ```\n  " +
-                                     _rc_excerpt(lg.get("reasoning", "")).replace("\n", "\n  ") +
-                                     "\n  ```")
-            else:  # judge
-                lines.append("")
+            elif e == "judge":
                 for pg, d in (j.get("judge") or {}).items():
                     verd = d.get("verdicts") or []
-                    lines.append(f"### {pg}  ({len(verd)} 条裁决)")
+                    lines.append(f"\n### {pg}  ({len(verd)} 条裁决)")
                     for v in verd:
                         lines.append(f"    [{v.get('severity')}] 段{v.get('segments')} "
                                      f"→ **{v.get('verdict')}**")
                         lines.append(f"      理由: {v.get('reason', '')}")
                         if v.get("suggestion"):
                             lines.append(f"      建议: {v.get('suggestion', '')}")
-                lines.append("\n**调用明细（含长思考 reasoning 摘要）**：")
-                for name in index[key]:
-                    lg = _read_json_opt(os.path.join(logs, name), {}) or {}
-                    rl = lg.get("reasoning_len", 0) or 0
-                    dur = lg.get("duration_ms", 0) / 1000
-                    head = f"- {name[:40]}  {dur:.0f}s  reasoning={rl}  " \
-                           f"completion={lg.get('usage', {}).get('completion_tokens')}"
-                    lines.append(head)
-                    if rl > 30000 or dur > 300:
-                        lines.append("  ```\n  " +
-                                     _rc_excerpt(lg.get("reasoning", "")).replace("\n", "\n  ") +
-                                     "\n  ```")
+            else:  # translate
+                for pg, snap in (j.get("snapshot") or {}).items():
+                    lines.append(f"\n### {pg}  ({len(snap)} 段)")
+                    for sid in sorted(snap, key=lambda x: (len(x), x)):
+                        lines.append(f"    - 段{sid}: {(snap[sid] or '')[:120]}")
+
+            # 逐调用全文
+            lines.append("\n### 逐调用记录")
+            for i, name in enumerate(index[key], 1):
+                lg = _read_json_opt(os.path.join(logs, name), {}) or {}
+                lines.extend(_render_call(i, name, lg, thinking))
         p = os.path.join(md_out_dir, f"transcripts_{e}.md")
         open(p, "w", encoding="utf-8").write("\n".join(lines))
         print(f"留存: {p}（{len(lines)} 行）")
+
+
+def embed_thinking(source_out: str):
+    """把 `_out/logs` 的完整调用日志回填进 `variant_runs/*.json` 的 `calls` 字段。
+
+    每条 = 磁盘日志的完整 entry（含 reasoning/response/system/user/messages 全文），
+    使运行 JSON 自包含，无需再次调用模型。
+    """
+    idx_path = os.path.join(source_out, "log_index.json")
+    if not os.path.exists(idx_path):
+        link_logs(os.path.join(source_out, "variant_runs"),
+                  os.path.join(source_out, "logs"), source_out)
+    index = _read_json_opt(idx_path, {}) or {}
+    logs = os.path.join(source_out, "logs")
+    n = 0
+    for key, names in index.items():
+        rf = os.path.join(source_out, "variant_runs", key)
+        j = _read_json_opt(rf, None)
+        if not isinstance(j, dict):
+            continue
+        calls = []
+        for nm in names:
+            lg = _read_json_opt(os.path.join(logs, nm), {})
+            if lg:
+                calls.append(lg)
+        j["calls"] = calls
+        util_write = open(rf, "w", encoding="utf-8")
+        util_write.write(json.dumps(j, ensure_ascii=False, indent=2))
+        util_write.close()
+        n += 1
+    print(f"已回填 thinking 到 {n} 个运行 JSON（calls 字段）")
 
 
 def _jaccard(sets: list) -> float:
@@ -778,6 +822,10 @@ def main():
                     help="--transcripts 限定运行号（如 1 2 3）")
     ap.add_argument("--report-dir", default=None,
                     help="--transcripts 输出目录（默认写回 <out>）")
+    ap.add_argument("--thinking", default="full", choices=["full", "excerpt", "none"],
+                    help="--transcripts 中 thinking 呈现粒度（默认 full）")
+    ap.add_argument("--embed-thinking", default=None,
+                    help="把 <out>/logs 完整调用日志回填进 <out>/variant_runs/*.json 的 calls 字段")
     ap.add_argument("--emit-category", default=None,
                     help="按类别筛选 QA2 open 条目，指向实例 data_dir；配合 --category")
     ap.add_argument("--category", default="DE",
@@ -799,9 +847,13 @@ def main():
         link_logs(os.path.join(args.link_logs, "variant_runs"),
                   os.path.join(args.link_logs, "logs"), args.out_dir)
         return
+    if args.embed_thinking:
+        embed_thinking(args.embed_thinking)
+        return
     if args.transcripts:
         transcripts(args.transcripts, args.end, set(args.tvar or []),
-                    set(args.trun or []), args.report_dir or args.out_dir)
+                    set(args.trun or []), args.report_dir or args.out_dir,
+                    thinking=args.thinking)
         return
     if args.variant:
         variant_analysis(args.variant, args.out_dir, args.ref_data_dir)
