@@ -657,16 +657,24 @@ def _block(text: str, indent: str = "    ") -> list[str]:
            ["  " + indent + "```"]
 
 
-def _render_call(i: int, name: str, lg: dict, thinking: str) -> list[str]:
-    """渲染一次调用：元信息 + user 摘要 + response + thinking（全/摘要/无）。"""
+def _render_call(i: int, name: str, lg: dict, thinking: str,
+                 include_system: bool = True) -> list[str]:
+    """渲染一次调用：元信息 + system + user 全文 + response + thinking。"""
     dur = lg.get("duration_ms", 0) / 1000
     rl = lg.get("reasoning_len", 0) or 0
     out = [f"#### 调用 {i}　`{name}`　{dur:.0f}s  reasoning={rl}  "
            f"completion={lg.get('usage', {}).get('completion_tokens')}  "
            f"finish={lg.get('finish_reason')}"]
-    u = lg.get("user", "")
-    if u:
-        out.append("- user（摘要）: " + u[:300].replace("\n", " "))
+    if include_system and lg.get("system"):
+        out.append("- **system（全文）**:")
+        out.extend(_block(lg["system"]))
+    if lg.get("messages"):
+        out.append(f"- messages（{len(lg['messages'])} 条，完整多轮）:")
+        for m in lg["messages"]:
+            out.append(f"  - {m.get('role')}: {m.get('content', '')}")
+    elif lg.get("user"):
+        out.append("- user（全文）:")
+        out.extend(_block(lg["user"]))
     if lg.get("response"):
         out.append("- response:")
         out.extend(_block(lg["response"]))
@@ -674,13 +682,16 @@ def _render_call(i: int, name: str, lg: dict, thinking: str) -> list[str]:
         body = lg["reasoning"] if thinking == "full" else _rc_excerpt(lg["reasoning"])
         out.append(f"- thinking（{'full' if thinking == 'full' else 'excerpt'}）:")
         out.extend(_block(body))
-        out.append("")
+    out.append("")
     return out
 
 
 def transcripts(source_out: str, end, variants, runs, report_dir: str,
-                thinking: str = "full"):
-    """把变体运行的对话日志渲染成可读 Markdown（translate/qa/judge）。需 log_index.json。"""
+                thinking: str = "full", include_system: bool = True):
+    """把变体运行的对话日志渲染成可读 Markdown（translate/qa/judge）。需 log_index.json。
+
+    include_system=True（默认）时，逐调用附**完整 system**（及 user/messages 全文）。
+    """
     idx_path = os.path.join(source_out, "log_index.json")
     if not os.path.exists(idx_path):
         link_logs(os.path.join(source_out, "variant_runs"),
@@ -732,7 +743,8 @@ def transcripts(source_out: str, end, variants, runs, report_dir: str,
             lines.append("\n### 逐调用记录")
             for i, name in enumerate(index[key], 1):
                 lg = _read_json_opt(os.path.join(logs, name), {}) or {}
-                lines.extend(_render_call(i, name, lg, thinking))
+                lines.extend(_render_call(i, name, lg, thinking,
+                                          include_system=include_system))
         p = os.path.join(md_out_dir, f"transcripts_{e}.md")
         open(p, "w", encoding="utf-8").write("\n".join(lines))
         print(f"留存: {p}（{len(lines)} 行）")
@@ -824,6 +836,8 @@ def main():
                     help="--transcripts 输出目录（默认写回 <out>）")
     ap.add_argument("--thinking", default="full", choices=["full", "excerpt", "none"],
                     help="--transcripts 中 thinking 呈现粒度（默认 full）")
+    ap.add_argument("--no-system", action="store_true",
+                    help="--transcripts 不输出完整 system（默认输出完整拼合提示词）")
     ap.add_argument("--embed-thinking", default=None,
                     help="把 <out>/logs 完整调用日志回填进 <out>/variant_runs/*.json 的 calls 字段")
     ap.add_argument("--emit-category", default=None,
@@ -853,7 +867,7 @@ def main():
     if args.transcripts:
         transcripts(args.transcripts, args.end, set(args.tvar or []),
                     set(args.trun or []), args.report_dir or args.out_dir,
-                    thinking=args.thinking)
+                    thinking=args.thinking, include_system=not args.no_system)
         return
     if args.variant:
         variant_analysis(args.variant, args.out_dir, args.ref_data_dir)

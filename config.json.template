@@ -124,6 +124,8 @@
     "queue_path": "work/qa_queue.json",
     "report_dir": "work/qa_reports",
     "reasoning_effort": "",
+    "reduce_style_reports": true,
+    "inject_history": false,
     "supervisor": {
       "enabled": true,
       "provider": "",

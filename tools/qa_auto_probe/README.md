@@ -85,14 +85,17 @@ python tools/qa_auto_probe/analyze.py --variant tools/qa_auto_probe/_out \
 
 `--transcripts`（可读对话，三端）：把各 run 的 translate/qa/judge 对话渲染为中文 Markdown——
 结构化摘要（QA 逐条问题、judge 逐条 Q→A 卡、translate 每段译文）+ **逐调用记录
-（user 摘要 / response / **thinking 全文**，`--thinking full|excerpt|none`，默认 full）**。
+（**完整 system 拼合提示词** / user / messages / response / thinking 全文）**。
+`--no-system` 关闭 system 输出；`--thinking full|excerpt|none`（默认 full）。
 
 ```bash
 python tools/qa_auto_probe/analyze.py --transcripts tools/qa_auto_probe/_out \
     [--end translate|qa|judge] [--tvar V0 V4] [--trun 1 2] \
-    [--thinking full] [--report-dir <dir>]
+    [--no-system] [--thinking full] [--report-dir <dir>]
 ```
 依赖 `log_index.json`（缺则自动 `link_logs`）。
+**注意**：默认含 system 时文件很大（judge system≈15k tokens × ~40 次 × 18 run），
+宜用 `--end/--tvar/--trun` 缩范围。
 
 `--embed-thinking`：把 `_out/logs` 的完整调用日志（含 reasoning/response/system/user/messages
 全文）**回填进 `variant_runs/*.json` 的 `calls` 字段**，使运行 JSON 自包含（无需重跑模型）：

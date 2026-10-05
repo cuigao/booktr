@@ -180,6 +180,20 @@ def test_transcripts_render(tmp_path):
     # full：附 thinking 全文块（无"中略"截断）
     assert "thinking（full）" in md and "中略" not in md
 
+    # 默认含完整 system；--no-system（include_system=False）则不含
+    lg = json.load(open(os.path.join(logs, "qa_20260101_000000_1.json"), encoding="utf-8"))
+    lg["system"] = "SYSTEM-完整拼合-XYZ"
+    json.dump(lg, open(os.path.join(logs, "qa_20260101_000000_1.json"), "w",
+                       encoding="utf-8"), ensure_ascii=False)
+    m.transcripts(out, "qa", set(), set(), str(tmp_path / "rep"), thinking="full",
+                  include_system=True)
+    md2 = open(os.path.join(str(tmp_path / "rep"), "transcripts_qa.md"), encoding="utf-8").read()
+    assert "SYSTEM-完整拼合-XYZ" in md2
+    m.transcripts(out, "qa", set(), set(), str(tmp_path / "rep"), thinking="full",
+                  include_system=False)
+    md3 = open(os.path.join(str(tmp_path / "rep"), "transcripts_qa.md"), encoding="utf-8").read()
+    assert "SYSTEM-完整拼合-XYZ" not in md3
+
 
 def test_embed_thinking_backfills_calls(tmp_path):
     m = _analyze()
