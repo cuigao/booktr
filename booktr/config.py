@@ -41,6 +41,16 @@ DEFAULTS: dict[str, Any] = {
         "retranslate_use_summary": True,  # 重新翻译时使用页面摘要
         "auto_retranslate": True,  # 需要 review 时自动用重翻译提示词再试
         "auto_retranslate_attempts": 1,  # 自动重翻译尝试次数
+        # 输出循环（周期性重复）防护：流式过程中检测到末尾周期性重复即提前中止，
+        # 以相同参数（temperature 微调）重试，异常轮次不入多轮历史
+        "loop_guard": True,  # 总开关
+        "loop_window": 16384,  # 检测的末尾窗口字符数（须 >= 2× 预期周期）
+        "loop_min_repeats": 2,  # 窗口内最少重复次数
+        "loop_min_span": 2048,  # 重复段总长下限（period×repeats）：短周期需更多次
+        "loop_check_every": 512,  # 流式每累加多少字符检测一次
+        "loop_retries": 2,  # 检测到循环后同参数重试次数（独立于 max_retries）
+        "loop_temp_bump": 0.1,  # 每次循环重试递增的 temperature（上限 base+0.3）
+        "loop_norm": True,  # 比较前折叠空白（使换行差异不影响判定）
     },
     "planner": {
         "static_first": True,

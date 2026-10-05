@@ -218,6 +218,9 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   - `llm.connect_timeout`：流式建连超时（默认 20s）
   - `llm.reasoning_effort`：推理模型思考等级（OpenAI 规范字段）。**空字符串 = 不发送该字段**（用模型默认，通常 `high`）；可设 `none`/`low`/`high`/`max`（以服务支持值为准）。**命令级覆盖**：`qa.reasoning_effort` 非空时覆盖全局，仅对 QA 生效；为空则继承 `llm.reasoning_effort`。
   - `llm.max_repair`：解析失败自愈重试次数（默认 3）
+  - **输出循环防护**（`llm.loop_*`，默认开）：流式过程中若输出**末尾陷入周期性重复**（模型被上下文片段卡住、自我锚定），即提前中止并以**相同参数**重试，避免跑满预算（实测可在浪费 3–5 万字符时止损，节省 90%+ 时间）。
+    - `llm.loop_guard`（默认 true）；`loop_window`（默认 16384，检测的末尾窗口字符数）；`loop_min_repeats`（默认 2，窗口内最少重复次数）；`loop_min_span`（默认 2048，重复段总长下限 `period×repeats`——短周期需更多次，如 `Hmm.` 需连续数百次，而 7k 长块 2 次即成立）；`loop_check_every`（默认 512，流式检测间隔）；`loop_retries`（默认 2，循环重试次数，**独立于** `max_retries`）；`loop_temp_bump`（默认 0.1，每次循环重试递增 temperature，上限 base+0.3，用于打破锚定）；`loop_norm`（默认 true，比较前折叠空白）。
+    - **仅识别精确（空白不敏感）周期重复**（周期实测 5～7k+ 字符）；非周期性的推敲不在此防线内。检测到的异常轮次**不会**进入多轮对话历史（内部重试，调用方消息不变），并完整记录于该次调用日志的 `loop_aborts` 字段。
   - `llm.max_history_segments`：多轮对话保留历史段落数（默认 50）
   - `llm.summary_enabled`：摘要接力开关（默认 true）
   - `llm_logs.auto_export`：translate 完成后自动导出对话日志（默认 true）

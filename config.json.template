@@ -28,7 +28,15 @@
     "retranslate_context_chars": 1000,
     "retranslate_use_summary": true,
     "auto_retranslate": true,
-    "auto_retranslate_attempts": 1
+    "auto_retranslate_attempts": 1,
+    "loop_guard": true,
+    "loop_window": 16384,
+    "loop_min_repeats": 2,
+    "loop_min_span": 2048,
+    "loop_check_every": 512,
+    "loop_retries": 2,
+    "loop_temp_bump": 0.1,
+    "loop_norm": true
   },
   "planner": {
     "static_first": true,

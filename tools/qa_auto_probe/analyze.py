@@ -897,6 +897,14 @@ def _render_call(i: int, name: str, lg: dict, thinking: str,
         body = lg["reasoning"] if thinking == "full" else _rc_excerpt(lg["reasoning"])
         out.append(f"- thinking（{'full' if thinking == 'full' else 'excerpt'}）:")
         out.extend(_block(body))
+    for ab in lg.get("loop_aborts") or []:
+        out.append(f"- **循环中止** period={ab.get('period')} repeats={ab.get('repeats')} "
+                   f"@ {ab.get('fired_at_chars')}字符  {ab.get('elapsed_s')}s  "
+                   f"finish={ab.get('finish_reason')}")
+        out.append(f"    片段: {ab.get('fragment', '')[:120]}")
+        if thinking == "full" and ab.get("reasoning"):
+            out.append("    异常 reasoning 尾部:")
+            out.extend(_block(ab["reasoning"][-2000:], indent="      "))
     out.append("")
     return out
 

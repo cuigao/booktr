@@ -35,6 +35,27 @@ class LLMError(RuntimeError):
         self.usage = usage or {}
 
 
+class LLMRepetitionError(LLMError):
+    """检测到 LLM 输出陷入周期性重复（循环）。
+
+    携带已累加的部分正文/思考与循环特征（period/repeats/fired_at_chars），
+    供上层记录并"同参数重试"。作为 LLMError 子类，未特殊处理时会退化为一
+    般的失败日志；``_request`` 会优先捕获本类并走独立的循环重试计数。
+    """
+
+    def __init__(self, message: str = "", reasoning: str = "",
+                 finish_reason: str | None = None, usage: dict | None = None,
+                 content: str = "", period: int = 0, repeats: int = 0,
+                 fired_at_chars: int = 0, fragment: str = ""):
+        super().__init__(message, reasoning=reasoning,
+                         finish_reason=finish_reason, usage=usage)
+        self.content = content
+        self.period = period
+        self.repeats = repeats
+        self.fired_at_chars = fired_at_chars
+        self.fragment = fragment
+
+
 # JSON 机械修复方法（parse_json_response 后处理），规范字段 repair_methods 的取值。
 REPAIR_METHOD_ESCAPE = "ESCAPE_VALUE_STRINGS"  # 值字符串转义（未转义引号 / 裸换行）
 REPAIR_METHOD_CLOSE_ARRAY = "CLOSE_ARRAY"  # 数组括号闭合修复（缺 ]，已知 key 先验补全）
@@ -44,6 +65,75 @@ REPAIR_METHOD_CLOSE_ARRAY = "CLOSE_ARRAY"  # 数组括号闭合修复（缺 ]，
 _ARRAY_KNOWN_KEYS = (
     "needs_human", "confidence", "glossary_conflicts", "notes", "translation",
 )
+
+
+_WS_RE = re.compile(r"\s+")
+
+
+def _has_word(block: str) -> bool:
+    """块内是否含至少一个字母/数字/汉字（防纯标点、纯空白连发被误判为循环）。"""
+    for ch in block:
+        if ch.isalnum() or "\u4e00" <= ch <= "\u9fff":
+            return True
+    return False
+
+
+def _kmp_min_period(s: str) -> int:
+    """KMP 失配函数求最小周期 P（O(n)，与 P 大小无关）。
+
+    P = len(s) - failure[-1]；若 s 无周期则 P == len(s)。
+    """
+    n = len(s)
+    if n == 0:
+        return 0
+    fail = [0] * n
+    for i in range(1, n):
+        j = fail[i - 1]
+        while j > 0 and s[i] != s[j]:
+            j = fail[j - 1]
+        if s[i] == s[j]:
+            j += 1
+        fail[i] = j
+    return n - fail[-1]
+
+
+def find_repetition(text: str, window: int = 16384, min_repeats: int = 2,
+                    min_span: int = 2048, norm_ws: bool = True) -> dict | None:
+    """检测文本**末尾窗口**是否陷入周期性重复（循环）；是则返回循环特征。
+
+    仅识别"精确周期重复"（空白折叠后逐字符相同）——这是模型被上下文片段卡住
+    的机械特征。判定用 KMP 最小周期，与周期大小无关（可捕获 5 字的 ``Hmm.``
+    到 7k+ 字的超长块）。
+
+    判定条件（全部满足）：
+    - ``len(text) >= window``（窗口须满，保证至少能看到 2 次重复）；
+    - 最小周期 ``P`` 满足 ``0 < P < n``；
+    - ``repeats = n // P >= min_repeats``；
+    - ``P * repeats >= min_span``（重复段总长下限；短周期需更多次才成立，
+      如 ``Hmm.`` 需连续 4 百多次，而 7k 长块 2 次即可）；
+    - 块内至少含一个字母/数字/汉字（``_has_word``）。
+
+    返回 ``{period, repeats, span, fragment, window}``；不构成循环返回 None。
+    """
+    if not text or len(text) < window:
+        return None
+    tail = text[-window:]
+    if norm_ws:
+        tail = _WS_RE.sub(" ", tail).rstrip()
+    n = len(tail)
+    if n < 2:
+        return None
+    period = _kmp_min_period(tail)
+    if period <= 0 or period >= n:
+        return None
+    repeats = n // period
+    span = repeats * period
+    if repeats < min_repeats or span < min_span:
+        return None
+    if not _has_word(tail[:period]):
+        return None
+    return {"period": period, "repeats": repeats, "span": span,
+            "fragment": tail[:period][:120], "window": window}
 
 
 class LLMClient:
@@ -80,6 +170,15 @@ class LLMClient:
         self.connect_timeout = llm.get("connect_timeout", 20)
         self.stream = bool(llm.get("stream", True))
         self.max_retries = llm.get("max_retries", 3)
+        # 输出循环（周期性重复）防护
+        self.loop_guard = bool(llm.get("loop_guard", True))
+        self.loop_window = int(llm.get("loop_window", 16384))
+        self.loop_min_repeats = int(llm.get("loop_min_repeats", 2))
+        self.loop_min_span = int(llm.get("loop_min_span", 2048))
+        self.loop_check_every = int(llm.get("loop_check_every", 512))
+        self.loop_retries = int(llm.get("loop_retries", 2))
+        self.loop_temp_bump = float(llm.get("loop_temp_bump", 0.1))
+        self.loop_norm = bool(llm.get("loop_norm", True))
         self.rpm = llm.get("max_requests_per_minute", 60)
         self._min_interval = 60.0 / max(self.rpm, 1)
         self._last_call = 0.0
@@ -108,19 +207,20 @@ class LLMClient:
             self._log(tag, system, user, "", ok=False, error=err,
                       duration_ms=(time.monotonic() - t0) * 1000)
             raise LLMError(err)
+        diag: dict = {}
         try:
             resp, usage, reasoning = self._openai_chat(system, user, temperature,
                                                        reasoning_effort=reasoning_effort,
-                                                       on_delta=on_delta)
+                                                       on_delta=on_delta, diag=diag)
         except LLMError as e:
             self._log(tag, system, user, "", ok=False, error=str(e),
                       reasoning=getattr(e, "reasoning", ""),
                       finish_reason=getattr(e, "finish_reason", None),
                       usage=getattr(e, "usage", None),
-                      duration_ms=(time.monotonic() - t0) * 1000)
+                      duration_ms=(time.monotonic() - t0) * 1000, diag=diag)
             raise
         self._log(tag, system, user, resp, ok=True, usage=usage, reasoning=reasoning,
-                  duration_ms=(time.monotonic() - t0) * 1000)
+                  duration_ms=(time.monotonic() - t0) * 1000, diag=diag)
         return resp
 
     # ------------------------------------------------------------------
@@ -159,10 +259,11 @@ class LLMClient:
                       duration_ms=(time.monotonic() - t0) * 1000,
                       messages=messages, task_id=task_id, context_id=context_id)
             raise LLMError(err)
+        diag: dict = {}
         try:
             resp, usage, reasoning = self._openai_chat_multi(messages, temperature,
                                                              reasoning_effort=reasoning_effort,
-                                                             on_delta=on_delta)
+                                                             on_delta=on_delta, diag=diag)
         except LLMError as e:
             self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
                       "", ok=False, error=str(e),
@@ -170,18 +271,20 @@ class LLMClient:
                       finish_reason=getattr(e, "finish_reason", None),
                       usage=getattr(e, "usage", None),
                       duration_ms=(time.monotonic() - t0) * 1000,
-                      messages=messages, task_id=task_id, context_id=context_id)
+                      messages=messages, task_id=task_id, context_id=context_id,
+                      diag=diag)
             raise
         self._log(tag, system, f"[{len(messages)} msgs] {last_user[:200]}",
                   resp, ok=True, usage=usage, reasoning=reasoning,
                   duration_ms=(time.monotonic() - t0) * 1000,
-                  messages=messages, task_id=task_id, context_id=context_id)
+                  messages=messages, task_id=task_id, context_id=context_id,
+                  diag=diag)
         return resp
 
     def _openai_chat_multi(self, messages: list[dict],
                            temperature: float | None,
                            reasoning_effort: str | None = None,
-                           on_delta=None) -> tuple[str, dict, str]:
+                           on_delta=None, diag: dict | None = None) -> tuple[str, dict, str]:
         """多轮对话底层调用。返回 (content, usage, reasoning)。"""
         body = {
             "model": self.model,
@@ -192,12 +295,12 @@ class LLMClient:
             body["max_tokens"] = self.max_tokens
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
-        return self._request(body, "multi", on_delta=on_delta)
+        return self._request(body, "multi", on_delta=on_delta, diag=diag)
 
     # ------------------------------------------------------------------
     def _openai_chat(self, system: str, user: str, temperature: float | None,
                      reasoning_effort: str | None = None,
-                     on_delta=None) -> tuple[str, dict, str]:
+                     on_delta=None, diag: dict | None = None) -> tuple[str, dict, str]:
         """单轮对话底层调用。返回 (content, usage, reasoning)。"""
         body = {
             "model": self.model,
@@ -211,11 +314,34 @@ class LLMClient:
             body["max_tokens"] = self.max_tokens
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
-        return self._request(body, "single", on_delta=on_delta)
+        return self._request(body, "single", on_delta=on_delta, diag=diag)
 
-    def _request(self, base_body: dict, kind: str, on_delta=None) -> tuple[str, dict, str]:
-        """统一请求入口：流式（默认）或非流式；带网络重试与"思考占满预算"翻倍重试。
+    def _record_loop_abort(self, diag: dict, e: "LLMRepetitionError",
+                           t_abort: float) -> None:
+        """把一次循环中止记入诊断（供日志/失败信息留存完整异常轮次）。"""
+        diag.setdefault("loop_aborts", []).append({
+            "period": getattr(e, "period", 0),
+            "repeats": getattr(e, "repeats", 0),
+            "fired_at_chars": getattr(e, "fired_at_chars", 0),
+            "fragment": getattr(e, "fragment", ""),
+            "finish_reason": getattr(e, "finish_reason", None),
+            "content": getattr(e, "content", "")[:2000],
+            "reasoning": (getattr(e, "reasoning", "") or "")[-20000:],
+            "elapsed_s": round(time.monotonic() - t_abort, 1),
+        })
 
+    def _request(self, base_body: dict, kind: str, on_delta=None,
+                 diag: dict | None = None) -> tuple[str, dict, str]:
+        """统一请求入口：流式（默认）或非流式。
+
+        重试分两类、互不占用预算：
+        - **网络/格式重试**：requests 异常 / HTTP / 解析类，退避重试至 ``max_retries``；
+        - **循环重试**：检测到周期性重复（``LLMRepetitionError``）后以**相同参数**
+          （仅按 ``loop_temp_bump`` 递增 temperature）重试至 ``loop_retries`` 次，
+          用于打破模型的自我锚定。
+        另有"正文被 reasoning 截空"时翻倍 max_tokens 重试一次。
+
+        诊断累积写入 ``diag``（若提供），由 ``_log`` 留存完整异常轮次。
         返回 (content, usage, reasoning)。
         """
         headers = {"Content-Type": "application/json"}
@@ -224,19 +350,41 @@ class LLMClient:
         url = self.base_url + "/chat/completions"
         last_err: Exception | None = None
         doubled = False  # 是否已因 length 空正文而翻倍重试
+        net_attempts = 0
+        loop_aborts = 0
         # 诊断：尽力记录失败前已累加的 reasoning / finish_reason / usage（供失败日志）
         last_reasoning = ""
         last_finish: str | None = None
         last_usage: dict = {}
-        for attempt in range(self.max_retries + 1):
+        while True:
             self._rate_limit()
             body = dict(base_body)
+            # 循环重试：按次数递增温度，帮助跳出锚定（上限 base+0.3）
+            if loop_aborts > 0:
+                base_t = base_body.get("temperature", self.temperature)
+                body["temperature"] = min(base_t + self.loop_temp_bump * loop_aborts,
+                                          base_t + 0.3)
+            t_abort = time.monotonic()
             try:
                 if self.stream:
                     content, reasoning, usage, finish = self._post_stream(
-                        url, headers, body, on_delta=on_delta)
+                        url, headers, body, on_delta=on_delta, diag=diag if diag is not None else {})
                 else:
                     content, reasoning, usage, finish = self._post_once(url, headers, body)
+            except LLMRepetitionError as e:
+                # 循环中止：走独立计数，不消耗网络重试预算
+                last_err = e
+                if diag is not None:
+                    self._record_loop_abort(diag, e, t_abort)
+                if loop_aborts < self.loop_retries:
+                    loop_aborts += 1
+                    log.warning("LLM 输出陷入循环（period=%s repeats=%s @%s字符），"
+                                "调整 temperature 重试 %s/%s",
+                                getattr(e, "period", "?"), getattr(e, "repeats", "?"),
+                                getattr(e, "fired_at_chars", "?"),
+                                loop_aborts, self.loop_retries)
+                    continue
+                break
             except (requests.RequestException, ValueError, LLMError) as e:
                 last_err = e
                 # 网络/HTTP/格式类错误：尽量带出已累加的诊断信息（若异常未携带）
@@ -247,8 +395,11 @@ class LLMClient:
                 if not getattr(e, "usage", None):
                     e.usage = last_usage
                 # 网络/HTTP/格式类错误：正常退避重试
-                delay = 2 ** attempt
-                log.warning("LLM 调用失败(%s)，%.1fs 后重试: %s", attempt + 1, delay, last_err)
+                if net_attempts >= self.max_retries:
+                    break
+                delay = 2 ** net_attempts
+                net_attempts += 1
+                log.warning("LLM 调用失败(%s)，%.1fs 后重试: %s", net_attempts, delay, last_err)
                 time.sleep(delay)
                 continue
 
@@ -278,10 +429,26 @@ class LLMClient:
                                     reasoning=reasoning, finish_reason=finish, usage=usage)
             break
         if isinstance(last_err, LLMError):
+            if diag is not None and diag.get("loop_aborts") and not getattr(
+                    last_err, "loop_aborts", None):
+                last_err.loop_aborts = diag["loop_aborts"]
             raise last_err
         raise LLMError(f"LLM 调用最终失败: {last_err}",
                        reasoning=last_reasoning, finish_reason=last_finish,
                        usage=last_usage)
+
+    def _detect_loop(self, content: str, reasoning: str) -> dict | None:
+        """对已得的 content/reasoning 做循环检测（非流式用；流式在过程中检测）。"""
+        if not self.loop_guard:
+            return None
+        for field in (reasoning, content):
+            h = find_repetition(field, window=self.loop_window,
+                                min_repeats=self.loop_min_repeats,
+                                min_span=self.loop_min_span, norm_ws=self.loop_norm)
+            if h:
+                h["field"] = "reasoning" if field is reasoning else "content"
+                return h
+        return None
 
     def _post_once(self, url: str, headers: dict, body: dict) -> tuple[str, str, dict, str]:
         """非流式：返回 (content, reasoning, usage, finish_reason)。"""
@@ -295,16 +462,28 @@ class LLMClient:
             msg = choice["message"]
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError(f"API 响应格式异常: {e}")
-        return (msg.get("content") or "", msg.get("reasoning") or "",
-                usage, choice.get("finish_reason"))
+        content = msg.get("content") or ""
+        reasoning = msg.get("reasoning") or ""
+        h = self._detect_loop(content, reasoning)
+        if h:
+            raise LLMRepetitionError(
+                f"LLM 输出陷入循环（非流式，period={h['period']} repeats={h['repeats']}）",
+                reasoning=reasoning, finish_reason=choice.get("finish_reason"),
+                usage=usage, content=content, period=h["period"],
+                repeats=h["repeats"], fired_at_chars=len(reasoning) or len(content),
+                fragment=h["fragment"])
+        return (content, reasoning, usage, choice.get("finish_reason"))
 
     def _post_stream(self, url: str, headers: dict, body: dict,
-                     on_delta=None) -> tuple[str, str, dict, str]:
+                     on_delta=None, diag: dict | None = None) -> tuple[str, str, dict, str]:
         """流式：逐块累加 content/reasoning，返回 (content, reasoning, usage, finish)。
 
         流式下每个 chunk 都会重置读取超时，长思考不再误判为网络超时。
         on_delta(kind, text) 为可选的实时回调（kind ∈ {"content","reasoning"}），
         供未来实时输出使用。
+
+        循环检测：每累加约 ``loop_check_every`` 字符对 reasoning/content 各检测一次
+        周期性重复，命中即提前关闭连接并抛 ``LLMRepetitionError``（止损）。
         """
         body = {**body, "stream": True, "stream_options": {"include_usage": True}}
         r = requests.post(url, headers=headers, json=body,
@@ -315,6 +494,8 @@ class LLMClient:
         reasoning_parts: list[str] = []
         usage: dict = {}
         finish: str | None = None
+        n_reason = n_content = 0
+        next_check = self.loop_check_every if self.loop_guard else 0
         try:
             for raw in r.iter_lines():
                 if not raw:
@@ -339,15 +520,31 @@ class LLMClient:
                 rc = delta.get("reasoning")
                 if rc:
                     reasoning_parts.append(rc)
+                    n_reason += len(rc)
                     if on_delta:
                         on_delta("reasoning", rc)
                 cc = delta.get("content")
                 if cc:
                     content_parts.append(cc)
+                    n_content += len(cc)
                     if on_delta:
                         on_delta("content", cc)
                 if ch.get("finish_reason"):
                     finish = ch["finish_reason"]
+                # 循环检测（每 loop_check_every 字符一次）
+                if self.loop_guard and (n_reason + n_content) >= next_check:
+                    next_check = (n_reason + n_content) + self.loop_check_every
+                    h = self._detect_loop("".join(content_parts),
+                                          "".join(reasoning_parts))
+                    if h:
+                        raise LLMRepetitionError(
+                            f"LLM 输出陷入循环（period={h['period']} "
+                            f"repeats={h['repeats']}，field={h.get('field')}）",
+                            reasoning="".join(reasoning_parts), finish_reason=finish,
+                            usage=usage, content="".join(content_parts),
+                            period=h["period"], repeats=h["repeats"],
+                            fired_at_chars=n_reason + n_content,
+                            fragment=h["fragment"])
         except requests.RequestException as e:
             # 流式中途网络中断：尽量带出已累加的 reasoning，供失败日志诊断
             raise LLMError(f"流式读取中断: {e}",
@@ -436,8 +633,12 @@ class LLMClient:
              ok: bool = True, error: str = "", usage: dict | None = None,
              duration_ms: float = 0.0, messages: list[dict] | None = None,
              task_id: str = "", context_id: str = "", reasoning: str = "",
-             finish_reason: str | None = None) -> None:
-        """完整记录一次 LLM 调用（成功或失败，含 mock）。"""
+             finish_reason: str | None = None, diag: dict | None = None) -> None:
+        """完整记录一次 LLM 调用（成功或失败，含 mock）。
+
+        ``diag``：可选诊断（如 ``loop_aborts``：本次调用中被检测到循环而中止、
+        随后重试的异常轮次全文），写入日志便于事后追溯"曾经的循环"。
+        """
         if not self.log_enabled:
             return
         d = self.cfg.get("llm_logs", "dir", default="")
@@ -477,6 +678,10 @@ class LLMClient:
             entry["context_id"] = context_id
         if messages is not None:
             entry["messages"] = messages
+        if diag and diag.get("loop_aborts"):
+            entry["loop_detected"] = True
+            entry["loop_abort_count"] = len(diag["loop_aborts"])
+            entry["loop_aborts"] = diag["loop_aborts"]
         # 尝试解析响应中的 JSON（若为结构化输出）
         try:
             if response:

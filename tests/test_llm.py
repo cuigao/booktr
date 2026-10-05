@@ -422,6 +422,168 @@ def test_log_records_reasoning_on_failure(tmp_cfg, monkeypatch):
     assert entry["finish_reason"] == "length"
 
 
+# ── 输出循环检测（find_repetition / 流式中止 / 同参数重试） ───────────────
+
+
+def test_find_repetition_fires_on_short_period():
+    text = " Hmm." * 800              # period 5, span 4000
+    h = llm.find_repetition(text, window=2048, min_span=2000)
+    assert h and h["period"] == 5 and h["span"] >= 2000
+
+
+def test_find_repetition_ignores_short_span():
+    # 仅重复 2 次（span 10 < 2048）→ 不判为循环
+    assert llm.find_repetition(" Hmm." * 2, window=10, min_span=2048) is None
+
+
+def test_find_repetition_fires_on_long_period():
+    block = ("The quick brown fox. " * 30)   # 630 chars/block
+    text = block * 3                          # 1890 chars
+    h = llm.find_repetition(text, window=1400, min_span=1024)
+    assert h and h["repeats"] >= 2 and h["span"] >= 1024
+
+
+def test_find_repetition_ignores_normal_prose():
+    varied = "".join(f"{i}番目の文です。\n" for i in range(2000))
+    assert llm.find_repetition(varied, window=2048, min_span=2048) is None
+
+
+def test_find_repetition_ignores_punctuation_run():
+    # 纯标点连发无字母/汉字 → has_word 拦截
+    assert llm.find_repetition("…" * 4000, window=2048, min_span=2048) is None
+
+
+def test_find_repetition_ignores_below_window():
+    assert llm.find_repetition(" Hmm." * 100, window=16384) is None
+
+
+def _loop_stream(n=1200):
+    events = [{"choices": [{"delta": {"reasoning": " Hmm."}, "finish_reason": None}]}
+              for _ in range(n)]
+    return _sse(*events)
+
+
+def _client_loop(tmp_path, **extra):
+    llm_cfg = {"provider": "openai-compatible", "api_key_required": False,
+               "max_tokens": 4096, "stream": True,
+               "loop_window": 4096, "loop_check_every": 64,
+               "loop_min_span": 2048, "loop_min_repeats": 2,
+               "loop_retries": 2, "loop_temp_bump": 0.1}
+    llm_cfg.update(extra)
+    return llm.LLMClient(_make_cfg(llm_cfg, str(tmp_path)))
+
+
+def test_stream_loop_aborts_and_retries_with_bump(tmp_path, monkeypatch):
+    c = _client_loop(tmp_path)
+    bodies = []
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        bodies.append(dict(json))
+        if len(bodies) == 1:
+            return _FakeStream(_loop_stream())
+        return _FakeStream(_sse(
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}))
+
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    out = c.chat("s", "u", tag="qa")
+    assert out == "ok"
+    assert len(bodies) == 2
+    # 第二次为循环重试：temperature 递增
+    assert bodies[1]["temperature"] > bodies[0]["temperature"]
+    logdir = c.cfg.get("llm_logs", "dir", default="")
+    files = sorted(os.listdir(logdir))
+    entry = json.load(open(os.path.join(logdir, files[-1]), encoding="utf-8"))
+    assert entry.get("loop_detected") is True
+    assert entry.get("loop_abort_count") == 1
+    assert entry["loop_aborts"][0]["period"] == 5
+
+
+def test_stream_loop_retries_exhausted_raises(tmp_path, monkeypatch):
+    c = _client_loop(tmp_path, loop_retries=1)
+    calls = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        calls["n"] += 1
+        return _FakeStream(_loop_stream())
+
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    with pytest.raises(llm.LLMError) as ei:
+        c.chat("s", "u")
+    assert calls["n"] == 2  # 首次 + 1 次循环重试
+    assert getattr(ei.value, "loop_aborts", None)
+
+
+def test_loop_aborts_does_not_consume_network_retries(tmp_path, monkeypatch):
+    """循环重试独立计数：网络重试预算不被循环中止消耗。"""
+    c = _client_loop(tmp_path, loop_retries=1, max_retries=1)
+    calls = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeStream(_loop_stream())           # 1) 循环中止（独立计数）
+        if calls["n"] == 2:
+            raise llm.requests.ConnectionError("boom")   # 2) 网络错误（用网络预算）
+        return _FakeStream(_sse(
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}))
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    monkeypatch.setattr("booktr.llm.time.sleep", lambda *a: None)
+    assert c.chat("s", "u") == "ok"
+    assert calls["n"] == 3
+
+
+def test_post_once_loop_detected(tmp_path, monkeypatch):
+    """非流式也在返回前检测循环。"""
+    c = _client_loop(tmp_path, stream=False)
+    monkeypatch.setattr("booktr.llm.requests.post", lambda *a, **k: _FakeResp())
+    # 直接调用 _post_once，伪造一个周期性 reasoning 的响应（须超 window）
+    looped = " Hmm." * 1500
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "", "reasoning": looped},
+                                 "finish_reason": "stop"}], "usage": {}}
+    monkeypatch.setattr("booktr.llm.requests.post", lambda *a, **k: _R())
+    with pytest.raises(llm.LLMRepetitionError):
+        c._post_once("u", {}, {})
+
+
+def test_chat_multi_loop_retry_does_not_pollute_history(tmp_path, monkeypatch):
+    """多轮：循环轮次被内部重试取代，调用方的 messages 不被改动（异常轮次不入历史）。"""
+    c = _client_loop(tmp_path)
+    msgs = [{"role": "system", "content": "s"},
+            {"role": "user", "content": "u"}]
+    snapshot = [dict(m) for m in msgs]
+    calls = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeStream(_loop_stream())
+        return _FakeStream(_sse(
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}))
+
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    out = c.chat_multi(msgs)
+    assert out == "ok"
+    assert msgs == snapshot          # 输入未被追加循环轮次
+    assert len(msgs) == 2
+
+
+def test_loop_config_defaults(tmp_cfg):
+    c = llm.LLMClient(tmp_cfg)
+    assert c.loop_guard is True
+    assert c.loop_window == 16384
+    assert c.loop_min_repeats == 2
+    assert c.loop_min_span == 2048
+    assert c.loop_check_every == 512
+    assert c.loop_retries == 2
+    assert abs(c.loop_temp_bump - 0.1) < 1e-9
+    assert c.loop_norm is True
+
+
 def test_log_records_partial_reasoning_on_stream_error(tmp_cfg, monkeypatch):
     """流式中途网络中断（重试耗尽）也带出已累加的部分 reasoning。"""
     tmp_cfg.set("openai-compatible", "llm", "provider")
