@@ -110,6 +110,39 @@ def test_probe_run_valid_skip_existing(tmp_path):
     assert m._run_valid(str(tmp_path / "missing.json"), "qa", 5) is False
 
 
+def test_llm_log_run_tag_and_timestamps(tmp_cfg, tmp_path):
+    """LLMClient(run_tag=) 写入 run 字段；日志含 started_at/ended_at。"""
+    from booktr import llm as llm_mod
+    d = os.path.join(tmp_cfg.data_dir, "wlogs")
+    cfg = tmp_cfg
+    cfg.set(d, "llm_logs", "dir")
+    cli = llm_mod.LLMClient(cfg, run_tag="variant-qa-V4-run1")
+    cli.chat("sys JSON 只输出 JSON", "|TEXT|\nhi")
+    files = [f for f in os.listdir(d) if f.endswith(".json")]
+    assert files
+    j = json.load(open(os.path.join(d, files[0]), encoding="utf-8"))
+    assert j.get("run") == "variant-qa-V4-run1"
+    assert "started_at" in j and "ended_at" in j
+
+
+def test_link_logs_prefers_run_id(tmp_path):
+    m = _analyze()
+    vdir = str(tmp_path / "v")
+    runs = os.path.join(vdir, "variant_runs")
+    logs = os.path.join(vdir, "logs")
+    os.makedirs(runs, exist_ok=True)
+    os.makedirs(logs, exist_ok=True)
+    json.dump({"variant": "V4", "run": 1, "end": "qa", "duration_s": 5.0,
+               "run_tag": "variant-qa-V4-run1"},
+              open(os.path.join(runs, "qa_V4_run1.json"), "w", encoding="utf-8"))
+    json.dump({"run": "variant-qa-V4-run1", "tag": "qa"},
+              open(os.path.join(logs, "qa_x_1.json"), "w", encoding="utf-8"))
+    json.dump({"run": "variant-qa-V3-run3", "tag": "qa"},  # 别的 run，不应绑入
+              open(os.path.join(logs, "qa_x_2.json"), "w", encoding="utf-8"))
+    idx = m.link_logs(runs, logs, str(tmp_path / "o"))
+    assert idx["qa_V4_run1.json"] == ["qa_x_1.json"]
+
+
 def test_link_logs_by_time_window(tmp_path):
     m = _analyze()
     vdir = str(tmp_path / "v")

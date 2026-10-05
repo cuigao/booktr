@@ -593,19 +593,19 @@ def variant_analysis(vdir: str, out_dir: str, data_dir: str | None = None):
 
 
 def link_logs(run_dir: str, logs_dir: str, out_dir: str):
-    """把 `_out/logs/` 的调用日志按时间窗关联到每个 (end, variant, run)。
+    """把 `_out/logs/` 的调用日志关联到每个 (end, variant, run)。
 
-    运行记录 `variant_runs/*.json` 可能无 `started_at`（旧数据）——此时用**文件 mtime**
-    作结束时刻、`mtime - duration_s` 作开始时刻，统计落入窗口的日志文件（按 tag 前缀）。
+    **优先按日志内的 ``run`` 字段精确关联**（新日志直接携带运行 id，无需猜测）；
+    无 ``run`` 字段的旧日志回退到时间窗（`started_at/ended_at` 或文件 mtime ± duration）。
     输出 `log_index.json`：{run 文件 -> [日志文件名]}，供审阅完整多轮对话历史。
     """
     import glob
-    from collections import defaultdict
 
-    logs = []
+    logs = []  # (name, mtime, run_tag)
     for f in glob.glob(os.path.join(logs_dir, "*.json")):
         try:
-            logs.append((os.path.basename(f), os.path.getmtime(f)))
+            j = _read_json_opt(f, {}) or {}
+            logs.append((os.path.basename(f), os.path.getmtime(f), j.get("run", "")))
         except OSError:
             pass
     logs.sort(key=lambda x: x[1])
@@ -613,7 +613,12 @@ def link_logs(run_dir: str, logs_dir: str, out_dir: str):
     index = {}
     for rf in sorted(glob.glob(os.path.join(run_dir, "*.json"))):
         j = _read_json_opt(rf, None) or {}
-        end = j.get("end", "")
+        run_tag = j.get("run_tag", "")
+        if run_tag:
+            hit = [name for name, _, rt in logs if rt == run_tag]
+            index[os.path.basename(rf)] = hit
+            continue
+        # 回退：时间窗（旧数据）
         dur = float(j.get("duration_s", 0) or 0)
         try:
             mtime = os.path.getmtime(rf)
@@ -621,7 +626,7 @@ def link_logs(run_dir: str, logs_dir: str, out_dir: str):
             continue
         end_t = mtime
         start_t = mtime - max(dur, 1.0)
-        hit = [name for name, t in logs if start_t <= t <= end_t + 2]
+        hit = [name for name, t, _ in logs if start_t <= t <= end_t + 2]
         index[os.path.basename(rf)] = hit
 
     os.makedirs(out_dir, exist_ok=True)
@@ -631,6 +636,216 @@ def link_logs(run_dir: str, logs_dir: str, out_dir: str):
     tot = sum(len(v) for v in index.values())
     print(f"关联 {len(index)} 个运行 → {tot} 条日志；留存: {p}")
     return index
+
+
+def _log_pages_end(name: str) -> str:
+    return name.split("_", 1)[0]
+
+
+_VKEY_ORDER = {"V0": 0, "V1": 1, "V2": 2, "V3": 3, "V4": 4, "V5": 5}
+
+
+def _vkey_order(vkey: str) -> int:
+    return _VKEY_ORDER.get(vkey, 99)
+
+
+MARK_POLICY = "审核政策（通用）"
+MARK_HISTORY = "本页已发生的 QA 决策"
+MARK_STYLE_FAITHFUL = "翻译风格：忠实优先"
+MARK_STYLE_FLUENT = "翻译风格：流畅优先"
+
+
+def _run_bucket(j: dict) -> str:
+    """run 的"提示词等价桶"：
+
+    - translate：按 style（standard/faithful/fluent）。
+    - qa：按 policy/history（V0 / policy / policy+history）。
+    - judge：判官提示词**不含**审核政策、且 style 未生效，仅 history 可辨
+      （V0/V1/V2/V5 同桶 "plain"；V3/V4 同桶 "policy+history"）。
+    """
+    end = j.get("end", "")
+    vcfg = j.get("vcfg") or {}
+    if end == "translate":
+        return j.get("style", "standard")
+    if end == "judge":
+        return "policy+history" if vcfg.get("history", False) else "plain"
+    if not vcfg.get("policy", False):
+        return "V0"
+    return "policy+history" if vcfg.get("history", False) else "policy"
+
+
+def _log_bucket(lg: dict) -> str:
+    sys_ = lg.get("system", "")
+    if lg["end"] == "translate":
+        if MARK_STYLE_FAITHFUL in sys_:
+            return "faithful"
+        if MARK_STYLE_FLUENT in sys_:
+            return "fluent"
+        return "standard"
+    if lg["end"] == "judge":
+        # 判官 system 含 history 块（V3/V4）；其余不可辨 → 同桶 plain
+        return "policy+history" if MARK_HISTORY in sys_ else "plain"
+    if MARK_POLICY not in sys_:
+        return "V0"
+    return "policy+history" if MARK_HISTORY in lg.get("user", "") else "policy"
+
+
+def _page_src_fingerprints(ref_data_dir: str, pages: list) -> dict:
+    import glob as _g
+    fp = {}
+    seg_dir = os.path.join(ref_data_dir, "work", "segments") if ref_data_dir else ""
+    for pg in pages:
+        p = os.path.join(seg_dir, pg.replace("/", "__") + ".json")
+        if not os.path.exists(p):
+            continue
+        d = _read_json_opt(p, {}) or {}
+        segs = d.get("segments", d) if isinstance(d, dict) else d
+        # 与 qa.run_qa 的 src_all 口径一致：所有已翻译段（不限 kind）
+        txt = "\n".join(s.get("text", "") for s in segs if s.get("translation"))
+        fp[pg] = _norm(txt)
+    return fp
+
+
+def rebind_logs(source_out: str, out_dir: str | None = None,
+                ref_data_dir: str | None = None):
+    """一次性修复：按**固定页序**把日志切分绑定到各 run（准确、无需猜测时间）。
+
+    原理：同一 (end, bucket) 的 run 按变体/次序执行，每个 run 依固定页序逐页产出
+    （qa/judge 每页 1 条日志；translate 每页多 chunk，但页边界仍以"回到首页"为界）。
+    故将同桶日志按 `ts` 排序后，在"页回到首页"处切分为 run 段，按序对应各 run。
+    - 日志 page：judge/translate 由 `tag`；qa 由 `user` 的 |TEXT| 与页原文指纹匹配。
+    - bucket：qa/judge 由 system/user 标记；translate 由 system 风格标记。
+    输出修正后的 `log_index.json` + 审计摘要。**一条日志只绑一个 run**。
+    """
+    import glob
+    from collections import defaultdict
+
+    logs_dir = os.path.join(source_out, "logs")
+    runs_dir = os.path.join(source_out, "variant_runs")
+    out_dir = out_dir or source_out
+
+    # 1) 读取 run，构造各端页序 + 桶
+    runs = []
+    for rf in sorted(glob.glob(os.path.join(runs_dir, "*.json"))):
+        j = _read_json_opt(rf, None)
+        if not isinstance(j, dict):
+            continue
+        runs.append({"file": os.path.basename(rf), "end": j.get("end", ""),
+                     "variant": j.get("variant", ""),
+                     "run": int(j.get("run", 0) or 0),
+                     "pages": list(j.get("pages") or []),
+                     "bucket": _run_bucket(j)})
+    runs.sort(key=lambda r: (r["end"], r["bucket"], _vkey_order(r["variant"]), r["run"]))
+    qa_pages = sorted({pg for r in runs for pg in r["pages"]})
+    fp = _page_src_fingerprints(ref_data_dir, qa_pages) if ref_data_dir else {}
+
+    # 2) 读取日志并打标 end/page/bucket
+    logs = []
+    for f in glob.glob(os.path.join(logs_dir, "*.json")):
+        j = _read_json_opt(f, {}) or {}
+        lg = {"name": os.path.basename(f), "tag": j.get("tag", ""),
+              "ts": j.get("ts", ""), "system": j.get("system", ""),
+              "user": j.get("user", ""), "mtime": os.path.getmtime(f)}
+        lg["end"] = _log_pages_end(lg["name"])
+        if lg["tag"].startswith(("judge_", "translate_")):
+            # tag 用 _ 表示 /（如 judge_today_today11.html → today/today11.html）
+            suffix = lg["tag"].split("_", 1)[1]
+            lg["page"] = next((pg for pg in qa_pages
+                               if pg.replace("/", "_") == suffix), suffix.replace("_", "/"))
+        else:
+            lg["page"] = _resolve_qa_page(lg["user"], fp)
+        lg["bucket"] = _log_bucket(lg)
+        logs.append(lg)
+    logs.sort(key=lambda x: x["ts"])
+
+    # 3) 结构分段：同 (end,bucket) 内按 ts 排序，在"页回到首页"处切分
+    index = defaultdict(list)
+    seen = set()
+    notes = []
+    groups = defaultdict(list)
+    for lg in logs:
+        if lg["end"] in ("qa", "judge", "translate"):
+            groups[(lg["end"], lg["bucket"])].append(lg)
+    for (end, bucket), glist in groups.items():
+        gruns = [r for r in runs if r["end"] == end and r["bucket"] == bucket]
+        if not gruns:
+            notes.append(f"{end}/{bucket}: 无匹配 run，跳过 {len(glist)} 条")
+            continue
+        order = gruns[0]["pages"] or []
+        pidx = {pg: i for i, pg in enumerate(order)}
+        glist.sort(key=lambda x: x["ts"])
+        # 页序"回退"即开新一轮（每轮 = 一个 run 依固定页序的产出；对同页多次调用不误切）
+        cycles = [[]]
+        prev = -1
+        for lg in glist:
+            i = pidx.get(lg["page"], -1)
+            if i >= 0 and prev >= 0 and i < prev and cycles[-1]:
+                cycles.append([])
+            cycles[-1].append(lg)
+            if i >= 0:
+                prev = i
+        # 去掉不完整的前导碎片（如冒烟测试的单页）
+        cycles = [c for c in cycles if len(c) >= 2]
+        if len(cycles) > len(gruns):
+            # 重复运行（首批被重跑）：只保留最后 N 轮（对应最终覆盖的 JSON）
+            notes.append(f"{end}/{bucket}: 轮次 {len(cycles)} > run 数 {len(gruns)}；"
+                         f"取最后 {len(gruns)} 轮，其余 {sum(len(c) for c in cycles[:-len(gruns)])} 条标记未分配")
+            cycles = cycles[-len(gruns):]
+        elif len(cycles) < len(gruns):
+            notes.append(f"{end}/{bucket}: 轮次 {len(cycles)} < run 数 {len(gruns)}")
+        # 去重：每条日志只归本轮次组内**最早出现的 run**（确定性，跨轮边界页归前一 run）
+        for i, gr in enumerate(gruns):
+            if i >= len(cycles):
+                continue
+            new = []
+            for lg in cycles[i]:
+                if lg["name"] in seen:
+                    continue
+                seen.add(lg["name"])
+                new.append(lg["name"])
+            index[gr["file"]].extend(new)
+
+    # 4) 审计：每个 run 绑定数 vs llm.calls
+    audit = []
+    for r in runs:
+        j = _read_json_opt(os.path.join(runs_dir, r["file"]), {}) or {}
+        want = (j.get("llm") or {}).get("calls", 0)
+        got = len(index.get(r["file"], []))
+        flag = "" if got == want else f"  ⚠ 期望{want} 实得{got}"
+        audit.append(f"  {r['file']}: {got}{flag}")
+
+    os.makedirs(out_dir, exist_ok=True)
+    idx_path = os.path.join(out_dir, "log_index.json")
+    open(idx_path, "w", encoding="utf-8").write(
+        json.dumps({k: sorted(v) for k, v in index.items()}, ensure_ascii=False, indent=2))
+    lines = ["# 日志重绑定审计",
+             f"\n绑定 {len(seen)}/{len(logs)} 条日志到 {len(index)} 个 run"]
+    lines += audit
+    if notes:
+        lines.append(f"\n## 切段异常（{len(notes)}）")
+        lines += ["  " + n for n in notes[:60]]
+    ap = os.path.join(out_dir, "rebind_audit.txt")
+    open(ap, "w", encoding="utf-8").write("\n".join(lines))
+    print("\n".join(lines))
+    print(f"\n留存: {idx_path} / {ap}")
+    return index
+
+
+def _resolve_qa_page(user: str, fp: dict) -> str:
+    """qa 日志 page：|TEXT| 与页原文指纹包含匹配（前缀），取最长匹配页。"""
+    import re as _re
+    if not fp:
+        return ""
+    m = _re.search(r"\|TEXT\|(.*?)\|DST\|", user or "", _re.S)
+    if not m:
+        return ""
+    t = _norm(m.group(1))
+    best, bl = "", 0
+    for pg, f in fp.items():
+        k = min(len(f), len(t), 80)
+        if k and f[:k] == t[:k] and k > bl:
+            best, bl = pg, k
+    return best
 
 
 def _rc_excerpt(text: str, head: int = 800, tail: int = 800) -> str:
@@ -840,6 +1055,8 @@ def main():
                     help="--transcripts 不输出完整 system（默认输出完整拼合提示词）")
     ap.add_argument("--embed-thinking", default=None,
                     help="把 <out>/logs 完整调用日志回填进 <out>/variant_runs/*.json 的 calls 字段")
+    ap.add_argument("--rebind-logs", default=None,
+                    help="一次性内容签名重绑定：修正 <out>/log_index.json 的 run↔日志对应")
     ap.add_argument("--emit-category", default=None,
                     help="按类别筛选 QA2 open 条目，指向实例 data_dir；配合 --category")
     ap.add_argument("--category", default="DE",
@@ -860,6 +1077,9 @@ def main():
     if args.link_logs:
         link_logs(os.path.join(args.link_logs, "variant_runs"),
                   os.path.join(args.link_logs, "logs"), args.out_dir)
+        return
+    if args.rebind_logs:
+        rebind_logs(args.rebind_logs, None, args.ref_data_dir)
         return
     if args.embed_thinking:
         embed_thinking(args.embed_thinking)

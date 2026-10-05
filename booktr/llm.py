@@ -11,7 +11,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 
@@ -48,14 +48,17 @@ _ARRAY_KNOWN_KEYS = (
 
 class LLMClient:
     def __init__(self, cfg: Config, llm_override: dict | None = None,
-                 log_enabled: bool = True):
+                 log_enabled: bool = True, run_tag: str = ""):
         """llm_override：覆盖 llm 配置（如 qa.supervisor），仅替换给定键。
 
         非 None 的覆盖值优先；``api_key_required`` 为 None 时表示沿用主配置。
         log_enabled=False 时本 client 的调用不写 llm_logs（用于体量很大的判官调用）。
+        run_tag：可选运行标识（如实验的 variant/run），写入每条日志的 ``run`` 字段，
+        便于将日志直接关联到具体运行，无需按时间/内容猜测。
         """
         self.cfg = cfg
         self.log_enabled = bool(log_enabled)
+        self.run_tag = run_tag or ""
         llm = dict(cfg.get("llm", default={}))
         if llm_override:
             over = {k: v for k, v in llm_override.items() if v is not None}
@@ -441,10 +444,14 @@ class LLMClient:
         if not d:
             return
         os.makedirs(d, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        path = os.path.join(d, f"{tag}_{ts}.json")
+        ended = datetime.now()
+        started = ended - timedelta(milliseconds=duration_ms or 0)
+        stamp = ended.strftime("%Y%m%d_%H%M%S_%f")
+        path = os.path.join(d, f"{tag}_{stamp}.json")
         entry = {
-            "ts": datetime.now().isoformat(timespec="milliseconds"),
+            "ts": ended.isoformat(timespec="milliseconds"),
+            "started_at": started.isoformat(timespec="milliseconds"),
+            "ended_at": ended.isoformat(timespec="milliseconds"),
             "tag": tag,
             "provider": self.provider,
             "model": self.model,
@@ -457,6 +464,8 @@ class LLMClient:
             "user": user,
             "response": response,
         }
+        if self.run_tag:
+            entry["run"] = self.run_tag
         if reasoning:
             entry["reasoning"] = reasoning
             entry["reasoning_len"] = len(reasoning)

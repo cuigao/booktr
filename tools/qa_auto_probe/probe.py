@@ -56,9 +56,13 @@ def _cfg(data_dir: str, out_dir: str) -> object:
     return cfg
 
 
-def _client(cfg):
-    """判官专用 client：较短超时、少重试，快速暴露网络抖动。"""
-    cli = llm_mod.LLMClient(cfg)
+def _client(cfg, run_tag: str = ""):
+    """判官专用 client：较短超时、少重试，快速暴露网络抖动。
+
+    run_tag：写入每条日志的 ``run`` 字段（如 variant 实验的 end/V/run），
+    使日志可直接按 id 关联到具体运行（无需按时间/内容猜测）。
+    """
+    cli = llm_mod.LLMClient(cfg, run_tag=run_tag)
     cli.timeout = 120
     cli.connect_timeout = 20
     cli.max_retries = 1
@@ -235,6 +239,19 @@ def _apply_variant_cfg(cfg, v: dict) -> None:
     cfg.set(bool(v["history"]), "qa", "inject_history")
 
 
+def _inject_style(cfg, style: str):
+    """把风格规则块临时并入 user_rules（内存内），返回原值以便还原。
+
+    用于让 translate/qa/judge 三端都真正带上所选风格（此前仅 translate 注入，
+    qa/judge 的 style 维度形同虚设）。
+    """
+    base_rules = cfg.get("user_rules", default="") or ""
+    sr = _style_rules_text(style)
+    if sr:
+        cfg.set((base_rules + "\n\n" + sr).strip(), "user_rules")
+    return base_rules
+
+
 def _translate_run(cfg, client, pages: list[str], style: str) -> dict:
     """重置目标页（清 TM/notes/短语）后整页翻译，返回每页最终译文快照。
 
@@ -243,10 +260,7 @@ def _translate_run(cfg, client, pages: list[str], style: str) -> dict:
     from booktr import styles as styles_mod
     from booktr.config import Config
     # 临时把风格规则并入 user_rules（内存内）
-    base_rules = cfg.get("user_rules", default="") or ""
-    sr = _style_rules_text(style)
-    if sr:
-        cfg.set((base_rules + "\n\n" + sr).strip(), "user_rules")
+    base_rules = _inject_style(cfg, style)
 
     sm = util.read_json(os.path.join(cfg.work_dir, "site_map.json"), {})
     plan = util.read_json(os.path.join(cfg.work_dir, "plan.json"), {})
@@ -348,20 +362,24 @@ def cmd_variant(cfg, args) -> None:
             style = v["style"]
             if args.end == "translate" and args.style != "auto":
                 style = args.style
+            run_tag = f"variant-{args.end}-{vkey}-run{run_i}"
             t0 = time.time()
             started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
             client = None
             try:
                 cfg2 = _cfg(args.data_dir, args.out)
                 _apply_variant_cfg(cfg2, v)
-                client = _client(cfg2)
+                if args.end != "translate":
+                    # qa/judge 也注入风格（否则 style 维度无效）
+                    _inject_style(cfg2, style)
+                client = _client(cfg2, run_tag=run_tag)
                 if args.end == "translate":
                     snap = _translate_run(cfg2, client, pages, style)
                     payload = {"style": style, "snapshot": snap}
                 elif args.end == "qa":
-                    payload = {"vcfg": v, "qa": _qa_run(cfg2, client, pages)}
+                    payload = {"vcfg": v, "style": style, "qa": _qa_run(cfg2, client, pages)}
                 else:
-                    payload = {"vcfg": v, "judge": _judge_run(cfg2, client, pages)}
+                    payload = {"vcfg": v, "style": style, "judge": _judge_run(cfg2, client, pages)}
                 err = ""
             except Exception as e:  # 单次失败不中断整批
                 payload = {}
@@ -371,6 +389,7 @@ def cmd_variant(cfg, args) -> None:
             st = client.stats_report() if client else {"calls": 0, "prompt_tokens": 0,
                                                        "completion_tokens": 0}
             rec = {"variant": vkey, "run": run_i, "end": args.end,
+                   "run_tag": run_tag,
                    "pages": pages, "duration_s": dur,
                    "started_at": started_at,
                    "ended_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
