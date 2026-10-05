@@ -592,6 +592,47 @@ def variant_analysis(vdir: str, out_dir: str, data_dir: str | None = None):
     return txt
 
 
+def link_logs(run_dir: str, logs_dir: str, out_dir: str):
+    """把 `_out/logs/` 的调用日志按时间窗关联到每个 (end, variant, run)。
+
+    运行记录 `variant_runs/*.json` 可能无 `started_at`（旧数据）——此时用**文件 mtime**
+    作结束时刻、`mtime - duration_s` 作开始时刻，统计落入窗口的日志文件（按 tag 前缀）。
+    输出 `log_index.json`：{run 文件 -> [日志文件名]}，供审阅完整多轮对话历史。
+    """
+    import glob
+    from collections import defaultdict
+
+    logs = []
+    for f in glob.glob(os.path.join(logs_dir, "*.json")):
+        try:
+            logs.append((os.path.basename(f), os.path.getmtime(f)))
+        except OSError:
+            pass
+    logs.sort(key=lambda x: x[1])
+
+    index = {}
+    for rf in sorted(glob.glob(os.path.join(run_dir, "*.json"))):
+        j = _read_json_opt(rf, None) or {}
+        end = j.get("end", "")
+        dur = float(j.get("duration_s", 0) or 0)
+        try:
+            mtime = os.path.getmtime(rf)
+        except OSError:
+            continue
+        end_t = mtime
+        start_t = mtime - max(dur, 1.0)
+        hit = [name for name, t in logs if start_t <= t <= end_t + 2]
+        index[os.path.basename(rf)] = hit
+
+    os.makedirs(out_dir, exist_ok=True)
+    p = os.path.join(out_dir, "log_index.json")
+    open(p, "w", encoding="utf-8").write(
+        json.dumps(index, ensure_ascii=False, indent=2))
+    tot = sum(len(v) for v in index.values())
+    print(f"关联 {len(index)} 个运行 → {tot} 条日志；留存: {p}")
+    return index
+
+
 def _jaccard(sets: list) -> float:
     if len(sets) < 2:
         return 1.0
@@ -633,6 +674,8 @@ def main():
                     help="变体实验目录（含 variant_runs/），汇总逐变体指标")
     ap.add_argument("--ref-data-dir", default=None,
                     help="变体分析参照的实例 data_dir（用于振荡敏感度）")
+    ap.add_argument("--link-logs", default=None,
+                    help="把 <out>/logs 的调用日志按时间窗关联到 <out>/variant_runs/*")
     ap.add_argument("--emit-category", default=None,
                     help="按类别筛选 QA2 open 条目，指向实例 data_dir；配合 --category")
     ap.add_argument("--category", default="DE",
@@ -649,6 +692,10 @@ def main():
     if args.emit_category:
         out = args.out or os.path.join(args.out_dir, "_out")
         emit_category(args.emit_category, args.category, out, args.qa2)
+        return
+    if args.link_logs:
+        link_logs(os.path.join(args.link_logs, "variant_runs"),
+                  os.path.join(args.link_logs, "logs"), args.out_dir)
         return
     if args.variant:
         variant_analysis(args.variant, args.out_dir, args.ref_data_dir)

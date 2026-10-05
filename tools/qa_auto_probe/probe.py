@@ -349,6 +349,7 @@ def cmd_variant(cfg, args) -> None:
             if args.end == "translate" and args.style != "auto":
                 style = args.style
             t0 = time.time()
+            started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
             client = None
             try:
                 cfg2 = _cfg(args.data_dir, args.out)
@@ -370,7 +371,10 @@ def cmd_variant(cfg, args) -> None:
             st = client.stats_report() if client else {"calls": 0, "prompt_tokens": 0,
                                                        "completion_tokens": 0}
             rec = {"variant": vkey, "run": run_i, "end": args.end,
-                   "pages": pages, "duration_s": dur, "llm": st,
+                   "pages": pages, "duration_s": dur,
+                   "started_at": started_at,
+                   "ended_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                   "llm": st,
                    "command": getattr(args, "_argv", ""), **payload}
             if err:
                 rec["error"] = err
@@ -379,7 +383,8 @@ def cmd_variant(cfg, args) -> None:
                   f"tokens p={st.get('prompt_tokens')} c={st.get('completion_tokens')} "
                   f"calls={st.get('calls')}" + ("  [FAILED]" if err else ""), flush=True)
             summary.append({"file": fname, "variant": vkey, "run": run_i,
-                            "end": args.end, "duration_s": dur, "llm": st,
+                            "end": args.end, "duration_s": dur,
+                            "started_at": started_at, "llm": st,
                             "error": err})
     util.write_json(os.path.join(args.out, f"variant_summary_{args.end}.json"),
                     {"testset": pages, "runs": args.runs, "rows": summary})

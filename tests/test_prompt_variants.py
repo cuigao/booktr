@@ -110,6 +110,25 @@ def test_probe_run_valid_skip_existing(tmp_path):
     assert m._run_valid(str(tmp_path / "missing.json"), "qa", 5) is False
 
 
+def test_link_logs_by_time_window(tmp_path):
+    m = _analyze()
+    vdir = str(tmp_path / "v")
+    runs = os.path.join(vdir, "variant_runs")
+    logs = os.path.join(vdir, "logs")
+    os.makedirs(runs, exist_ok=True)
+    os.makedirs(logs, exist_ok=True)
+    # 一个 run 记录（duration 100s），一个同窗日志
+    json.dump({"variant": "V1", "run": 1, "end": "qa", "duration_s": 100.0},
+              open(os.path.join(runs, "qa_V1_run1.json"), "w", encoding="utf-8"))
+    rp = os.path.join(runs, "qa_V1_run1.json")
+    logp = os.path.join(logs, "qa_20260101_000000_1.json")
+    open(logp, "w", encoding="utf-8").write("{}")
+    now = os.path.getmtime(rp)
+    os.utime(logp, (now - 30, now - 30))  # 落在 run 时间窗内
+    idx = m.link_logs(runs, logs, str(tmp_path / "o"))
+    assert idx["qa_V1_run1.json"] == ["qa_20260101_000000_1.json"]
+
+
 def test_variant_analysis_skips_bad_runs_and_hitset(tmp_path):
     m = _analyze()
     vdir = str(tmp_path / "v")
