@@ -4,3 +4,4 @@ logs/
 __pycache__/
 *.pyc
 drift_audit.txt
+variant_analysis.txt
