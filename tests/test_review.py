@@ -185,3 +185,48 @@ def test_finalize_accepted_goes_done(tmp_cfg, tmp_path):
     st = tr.State(tmp_cfg)
     assert st.page("page1.html")["status"] == "done"
     assert "page1.html" in st.data["done_pages"]
+
+
+def _seg_cache(cfg, rel):
+    import json
+    path = os.path.join(cfg.get("segments_dir", default=""),
+                        rel.replace("/", "__") + ".json")
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("segments", data) if isinstance(data, dict) else data
+
+
+def test_review_delete_on_done_page(tmp_cfg, tmp_path):
+    """done 页的 glossary_conflict 条目 [d]：页面转 pending + 段缓存同步清空。"""
+    _disable_auto_regenerate(tmp_cfg)
+    state, sid = _make_translated_page(tmp_cfg, tmp_path)
+    assert state.page("page1.html")["status"] == "done"
+    review_mod.save_queue(tmp_cfg, _queue(tmp_cfg, "page1.html", sid,
+                                          "glossary_conflict"))
+
+    review_mod.interactive_review(tmp_cfg, prompt="d", max_items=1)
+
+    st = tr.State(tmp_cfg)
+    pstate = st.page("page1.html")
+    assert pstate["status"] == "pending"
+    assert pstate["segments"][sid]["translation"] is None
+    assert "page1.html" not in st.data["done_pages"]
+    assert review_mod.load_queue(tmp_cfg)[0]["status"] == "deleted"
+    # 段缓存译文同步清空（否则 out 重组会残留旧译文）
+    cached = {str(s["id"]): s for s in _seg_cache(tmp_cfg, "page1.html")}
+    assert cached[sid]["translation"] is None
+
+
+def test_finalize_deleted_done_page_to_pending(tmp_cfg, tmp_path):
+    """done 页 + deleted 条目：_finalize_review 也应转 pending（等重译）。"""
+    state, sid = _make_translated_page(tmp_cfg, tmp_path)
+    assert state.page("page1.html")["status"] == "done"
+    review_mod.save_queue(tmp_cfg, _queue(tmp_cfg, "page1.html", sid,
+                                          "glossary_conflict", status="deleted"))
+
+    review_mod._finalize_review(tmp_cfg, "page1.html")
+
+    st = tr.State(tmp_cfg)
+    assert st.page("page1.html")["status"] == "pending"
+    assert "page1.html" not in st.data["done_pages"]
+

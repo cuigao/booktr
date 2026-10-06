@@ -44,6 +44,37 @@ def _regenerate_page(cfg: Config, rel: str) -> bool:
         return False
 
 
+def _clear_segment_cache_translation(cfg: Config, rel: str, sid: str) -> None:
+    """把段缓存中指定段的译文清空（与 state 的 ``translation=None`` 对齐）。
+
+    ``[d]`` 只清 state，缓存仍留旧译文，会使 ``_regenerate_page`` 用缓存重组出
+    旧 out。此处在删除段译文时同步清缓存，使 out 立即反映删除结果。
+    """
+    seg_path = os.path.join(
+        cfg.get("segments_dir", default=""), rel.replace("/", "__") + ".json"
+    )
+    if not os.path.exists(seg_path):
+        return
+    data = util.read_json(seg_path, {})
+    seg_list = data.get("segments", data) if isinstance(data, dict) else data
+    if not isinstance(seg_list, list):
+        return
+    changed = False
+    for s in seg_list:
+        if isinstance(s, dict) and str(s.get("id")) == str(sid):
+            s["translation"] = None
+            s["needs_human"] = False
+            s["untrusted"] = False
+            changed = True
+            break
+    if not changed:
+        return
+    if isinstance(data, dict):
+        util.write_json(seg_path, {"encoding": data.get("encoding", ""), "segments": seg_list})
+    else:
+        util.write_json(seg_path, seg_list)
+
+
 def _finalize_review(cfg: Config, page: str) -> None:
     """处理完所有审核条目后，更新页面状态并重生成 out。
 
@@ -62,7 +93,7 @@ def _finalize_review(cfg: Config, page: str) -> None:
     if not has_open:
         if page_deleted:
             # 有段被删除 → 保持 pending，等 --next 重译
-            if pstate.get("status") == STATUS["review"]:
+            if pstate.get("status") in (STATUS["review"], STATUS["done"]):
                 pstate["status"] = STATUS["pending"]
             # 防御性移除 done_pages（与 [d] 循环内逻辑一致）
             if page in state.data.get("done_pages", []):
@@ -166,11 +197,12 @@ def interactive_review(cfg: Config, prompt: str = None, max_items: int = 0,
                 seg_state["translation"] = None
                 seg_state["needs_human"] = False
                 seg_state["untrusted"] = False
-            if pstate.get("status") == STATUS["review"]:
+            if pstate.get("status") in (STATUS["review"], STATUS["done"]):
                 pstate["status"] = STATUS["pending"]
             if it["page"] in state.data.get("done_pages", []):
                 state.data["done_pages"].remove(it["page"])
             state.save()  # 立即持久化，避免被后续统一保存覆盖丢失
+            _clear_segment_cache_translation(cfg, it["page"], sid)
             from . import history as hist_mod
             hist_mod.commit(cfg, it["page"], sid, "review-delete",
                             hist_mod.new_op_id("review-delete"), state=state)
