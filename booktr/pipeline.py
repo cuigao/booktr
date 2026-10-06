@@ -1180,6 +1180,32 @@ def cmd_qa_review(cfg: Config, args) -> None:
     qa_queue_mod.interactive_qa_review(cfg, max_items=args.max_items)
 
 
+def cmd_qa_clear(cfg: Config, args) -> None:
+    """从 QA 队列移除条目（默认仅 open；先预览、同目录备份）。"""
+    from . import qa_queue as qa_queue_mod
+
+    status = args.status
+    page = args.page
+    gone, kept, _ = qa_queue_mod.remove(cfg, status, page, dry_run=True)
+    scope = f"status={status}" + (f" page={page}" if page else "")
+    print(f"QA 队列：共 {gone + kept} 条 | 将删除 {gone}（{scope}）| 保留 {kept}")
+    if gone == 0:
+        print("没有匹配条目，无需清理。")
+        return
+    if args.dry_run:
+        print("（--dry-run，未改动）")
+        return
+    if not args.yes:
+        val = input("确认清理？[y/N] ").strip().lower()
+        if val not in ("y", "yes"):
+            print("已取消。")
+            return
+    gone, kept, bak = qa_queue_mod.remove(cfg, status, page)
+    print(f"已删除 {gone} 条，保留 {kept} 条。")
+    if bak:
+        print(f"已备份 → {bak}")
+
+
 def cmd_qa_apply(cfg: Config, args) -> None:
     """对已采纳（adopted）的 QA 意见批量定点重译。"""
     from . import qa_queue as qa_queue_mod
@@ -2727,6 +2753,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp = mk("qa-review", help="交互式裁定 QA 队列（采纳/拒绝/丢弃）")
     sp.add_argument("--max-items", type=int, default=0, help="最多处理条数")
     sp.set_defaults(func=cmd_qa_review)
+
+    sp = mk("qa-clear", help="从 QA 队列移除条目（默认仅 open；先预览、同目录备份）")
+    sp.add_argument("--status", default="open",
+                    choices=["open", "adopted", "rejected", "applied", "all"],
+                    help="要移除的状态（默认 open；all=全部）")
+    sp.add_argument("--page", default=None, help="仅移除该页的条目")
+    sp.add_argument("--dry-run", action="store_true", help="仅预览，不改动")
+    sp.add_argument("-y", "--yes", action="store_true", help="跳过确认")
+    sp.set_defaults(func=cmd_qa_clear)
 
     sp = mk("qa-apply", help="对已采纳的 QA 意见批量定点重译")
     sp.add_argument("--page", default=None, help="限定页面")

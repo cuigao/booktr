@@ -94,6 +94,45 @@ def stats(cfg: Config) -> dict:
     }
 
 
+def _backup(cfg: Config) -> str:
+    """把当前队列备份到 ``<path>.<时间戳>.bak``（同目录），返回备份路径。"""
+    import time
+    path = _path(cfg)
+    if not os.path.exists(path):
+        return ""
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    bak = f"{path}.{ts}.bak"
+    with open(path, "r", encoding="utf-8") as f:
+        data = f.read()
+    with open(bak, "w", encoding="utf-8") as f:
+        f.write(data)
+    return bak
+
+
+def remove(cfg: Config, status: str | None = STATUS_OPEN, page: str | None = None,
+           dry_run: bool = False) -> tuple[int, int, str]:
+    """从队列移除匹配条目（默认 status=open）。返回 (删除数, 保留数, 备份路径)。
+
+    ``status`` 为 ``"all"``/``None`` 时匹配全部；``page`` 非空时仅匹配该页。
+    ``dry_run`` 或无可删项时不写、不备份。
+    """
+    items = load(cfg)
+    keep, gone = [], 0
+    for it in items:
+        hit = (status in (None, "all") or it.get("status") == status) and \
+              (not page or it.get("page") == page)
+        if hit:
+            gone += 1
+        else:
+            keep.append(it)
+    if dry_run or gone == 0:
+        return gone, len(keep), ""
+    bak = _backup(cfg)
+    save(cfg, keep)
+    return gone, len(keep), bak
+
+
+
 def _format_item(idx: int, it: dict) -> str:
     sev = it.get("severity", "")
     segs = it.get("segments", [])

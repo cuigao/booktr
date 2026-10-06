@@ -37,6 +37,47 @@ def test_stats(tmp_cfg):
     assert s["by_severity"] == {"high": 1, "mid": 1}
 
 
+def _seed_queue(tmp_cfg):
+    items = [
+        qq.make_item("a.html", _issue(reason="a1")),
+        qq.make_item("a.html", _issue(reason="a2")),
+        qq.make_item("b.html", _issue(reason="b1")),
+    ]
+    # 标记一条 applied，用于状态过滤
+    items[0]["status"] = qq.STATUS_APPLIED
+    qq.save(tmp_cfg, items)
+    return items
+
+
+def test_remove_default_open_only_and_backup(tmp_cfg):
+    _seed_queue(tmp_cfg)
+    gone, kept, bak = qq.remove(tmp_cfg)  # 默认 status=open
+    assert gone == 2 and kept == 1
+    assert bak and os.path.exists(bak)  # 同目录备份
+    left = qq.load(tmp_cfg)
+    assert len(left) == 1 and left[0]["status"] == qq.STATUS_APPLIED
+
+
+def test_remove_dry_run_no_side_effects(tmp_cfg):
+    _seed_queue(tmp_cfg)
+    before = open(qq._path(tmp_cfg), encoding="utf-8").read()
+    gone, kept, bak = qq.remove(tmp_cfg, dry_run=True)
+    assert gone == 2 and kept == 1 and bak == ""
+    assert open(qq._path(tmp_cfg), encoding="utf-8").read() == before
+    # 未产生备份文件
+    import glob
+    assert not glob.glob(qq._path(tmp_cfg) + ".*.bak")
+
+
+def test_remove_by_page_and_all(tmp_cfg):
+    _seed_queue(tmp_cfg)
+    gone, kept, _ = qq.remove(tmp_cfg, status="all", page="a.html")
+    assert gone == 2 and kept == 1  # 仅删 a.html 的两条
+    gone, kept, _ = qq.remove(tmp_cfg, status="all")
+    assert gone == 1 and kept == 0  # 清空
+    assert qq.load(tmp_cfg) == []
+
+
 def test_interactive_adopt(tmp_cfg, capsys):
     qq.append_items(tmp_cfg, [qq.make_item("p.html", _issue())])
     qq.interactive_qa_review(tmp_cfg, prompt="a")
