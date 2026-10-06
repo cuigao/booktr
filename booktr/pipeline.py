@@ -188,6 +188,17 @@ def _resolve_clone_dir(root: str, clone: str) -> str:
     return os.path.normpath(os.path.join(root, clone))
 
 
+def _rel_data(cfg: Config, path: str) -> str:
+    """把路径转成相对数据根的可读形式（写日志用，避免实例绝对路径落盘）。
+
+    跨盘符等无法计算相对路径时回退为原值。
+    """
+    try:
+        return os.path.relpath(path, cfg.data_dir).replace(os.sep, "/")
+    except ValueError:
+        return path
+
+
 def cmd_init(cfg: Config, args) -> None:
     """交互式初始化：从 config.json.template 或 ``--clone`` 实例生成 <data_dir>/config.json。
 
@@ -1509,7 +1520,7 @@ def cmd_qa_auto(cfg: Config, args) -> None:
     log(f"\nqa-auto 完成：裁定 采纳 {total['adopt']} / 拒绝 {total['reject']} / "
         f"跳过 {total['skip']}；已应用 {total['applied']} 段；涉及 {total['pages']} 页；"
         f"失败 {total['errors']} 页")
-    log(f"运行日志: {log_path}")
+    log(f"运行日志: {_rel_data(cfg, log_path)}")
     logf.close()
     if report_path and not args.dry_run:
         print(f"QA 报告: {report_path}（问题 {report['total_issues']}）")

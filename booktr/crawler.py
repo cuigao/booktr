@@ -121,7 +121,7 @@ def scan_site(cfg: Config, force: bool = False) -> dict:
                 assets.append(rel)
 
     result = {
-        "source_dir": src,
+        "source_dir": cfg.data.get("source_dir", src),
         "total_pages": len(pages),
         "total_assets": len(assets),
         "assets": sorted(assets),

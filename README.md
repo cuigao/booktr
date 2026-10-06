@@ -46,6 +46,8 @@ src/                       # 项目根（发布单元 / git 仓库根 / 运行�
 
 所有相对路径（`source_dir`、`output_dir`、`work_dir` 及 `work/...` 子路径）都相对数据根解析；config.json 不含 `data_dir` 字段。
 
+> **可移植性**：实例文件尽量不含绝对路径/实例名（`site_map.json` 的 `source_dir` 存配置原值、`qa_auto` 运行日志写相对数据根），便于整体移动。审计某一实例：`python tools/abs_scan.py --data-dir <dir>`（只读，报告含盘符绝对路径或 `instance/data-*` 的文件）。
+
 - **默认数据根**：`src/data/`。不传参时 config 与所有数据落在 `src/data/` 下。
 - **多站点独立工作区**：`--data-dir` 指向不同目录即可互不干扰，每个数据根有自己的 `config.json`、`work/`、`out/`：
 

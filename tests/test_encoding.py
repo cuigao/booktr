@@ -102,6 +102,14 @@ def test_scan_skips_undecodable(tmp_cfg, tmp_path):
     assert "page1.html" in sm.get("pages", {})  # 正常页仍被扫描
 
 
+def test_scan_site_map_source_dir_keeps_config_value(tmp_cfg, tmp_path):
+    """site_map.source_dir 写配置原值（相对），不含绝对路径。"""
+    write_sample_site(tmp_path)
+    sm = scan_site(tmp_cfg, force=True)
+    assert sm["source_dir"] == tmp_cfg.data["source_dir"] == "site"
+    assert ":" not in sm["source_dir"]  # 不含盘符
+
+
 # ── cmd_fix ─────────────────────────────────────────────────────────────
 
 
