@@ -194,3 +194,67 @@ def test_rebind_structural_fallback_without_old_index(tmp_path):
     again = m.rebind_logs(out, out, None)
     assert {k: sorted(v) for k, v in again.items()} == \
            {k: sorted(v) for k, v in index.items()}
+
+
+# ------------------------------------------------------------------
+# variant_stats：去 loop 真实思考的变体统计检验
+# ------------------------------------------------------------------
+def test_variant_stats_classifies_loops_and_reports(tmp_path):
+    m = _load()
+    import random as _rnd
+    out = tmp_path / "out"
+    runs = out / "variant_runs"
+
+    def filler(n):
+        r = _rnd.Random(n)
+        return "".join(r.choice("abcdefghijklmnopqrstuvwxyz ") for _ in range(n))
+
+    def call(rlen, ok=True, loop=False):
+        c = {"ok": ok, "reasoning": "", "usage": {"completion_tokens": rlen // 2}}
+        if loop:
+            c["reasoning"] = "Hmm. " * 4000  # 周期 5、重复数千 → 判 loop
+        else:
+            c["reasoning"] = filler(rlen)
+        return c
+
+    _write(str(runs / "qa_V0_run1.json"),
+           {"end": "qa", "variant": "V0",
+            "calls": [call(30000), call(40000), call(50000)]})
+    _write(str(runs / "qa_V1_run1.json"),
+           {"end": "qa", "variant": "V1",
+            "calls": [call(31000), call(33000), call(1, loop=True, ok=False)]})
+    outdir = str(tmp_path / "o")
+    txt = m.variant_stats(str(out), "qa", seed=0, iters=500, out_dir=outdir)
+    assert "Kruskal-Wallis" in txt and "## qa" in txt
+    # V1 有一个 loop 被剔除（真实 n 减少为 2）
+    assert "V1" in txt
+    assert os.path.exists(os.path.join(outdir, "variant_stats.txt"))
+    # 只读：runs 文件未被改动
+    assert m.variant_stats(str(out), "qa", seed=1, iters=200,
+                           out_dir=outdir) is not None
+    _v0 = json.load(open(runs / "qa_V0_run1.json", encoding="utf-8"))
+    assert _v0["variant"] == "V0"
+
+
+def test_variant_stats_identifies_clear_difference(tmp_path):
+    m = _load()
+    import random as _rnd
+    out = tmp_path / "out"
+    runs = out / "variant_runs"
+
+    def filler(n):
+        r = _rnd.Random(n)
+        return "".join(r.choice("abcdefghijklmnopqrstuvwxyz ") for _ in range(n))
+
+    def calls(lo, hi):
+        return [{"ok": True, "reasoning": filler(lo + i), "usage": {}}
+                for i in range(hi - lo)]
+
+    _write(str(runs / "qa_V0_run1.json"),
+           {"end": "qa", "variant": "V0", "calls": calls(1000, 1012)})
+    _write(str(runs / "qa_V1_run1.json"),
+           {"end": "qa", "variant": "V1", "calls": calls(9000, 9012)})
+    txt = m.variant_stats(str(out), "qa", seed=0, iters=2000, out_dir=str(tmp_path))
+    line = [l for l in txt.splitlines() if "Kruskal-Wallis" in l][0]
+    p = float(line.split("p=")[1].split()[0])
+    assert p < 0.05  # 明确分离 → 显著

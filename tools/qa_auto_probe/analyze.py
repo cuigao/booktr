@@ -592,6 +592,176 @@ def variant_analysis(vdir: str, out_dir: str, data_dir: str | None = None):
     return txt
 
 
+def _ranks(vals: list) -> list:
+    """平均秩（并列取平均），用于 Kruskal-Wallis。"""
+    order = sorted(range(len(vals)), key=lambda i: vals[i])
+    ranks = [0.0] * len(vals)
+    i = 0
+    while i < len(vals):
+        j = i
+        while j + 1 < len(vals) and vals[order[j + 1]] == vals[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        i = j + 1
+    return ranks
+
+
+def _kruskal_H(groups: list) -> float:
+    """Kruskal-Wallis H 统计量（秩和，含并列平均秩）。"""
+    allv = [v for g in groups for v in g]
+    N = len(allv)
+    if N == 0:
+        return 0.0
+    ranks = _ranks(allv)
+    idx = 0
+    H = 0.0
+    for g in groups:
+        n = len(g)
+        if n == 0:
+            continue
+        s = sum(ranks[idx:idx + n])
+        idx += n
+        H += s * s / n
+    return 12.0 / (N * (N + 1)) * H - 3 * (N + 1)
+
+
+def _median(xs: list) -> float:
+    import statistics
+    return float(statistics.median(xs)) if xs else 0.0
+
+
+def _perm_p_kruskal(groups: list, Hobs: float, iters: int, rng) -> float:
+    allv = [v for g in groups for v in g]
+    sizes = [len(g) for g in groups]
+    cnt = 0
+    for _ in range(iters):
+        perm = allv[:]
+        rng.shuffle(perm)
+        gs, idx = [], 0
+        for n in sizes:
+            gs.append(perm[idx:idx + n])
+            idx += n
+        if _kruskal_H(gs) >= Hobs - 1e-12:
+            cnt += 1
+    return (cnt + 1) / (iters + 1)
+
+
+def _perm_p_median_diff(a: list, b: list, obs: float, iters: int, rng) -> float:
+    """两样本中位数差的双侧置换检验 p。"""
+    pool = a + b
+    na = len(a)
+    cnt = 0
+    for _ in range(iters):
+        perm = pool[:]
+        rng.shuffle(perm)
+        d = _median(perm[:na]) - _median(perm[na:])
+        if abs(d) >= abs(obs) - 1e-12:
+            cnt += 1
+    return (cnt + 1) / (iters + 1)
+
+
+def _boot_ci_median_diff(a: list, b: list, iters: int, rng) -> tuple:
+    diffs = []
+    for _ in range(iters):
+        ma = _median([a[rng.randrange(len(a))] for _ in range(len(a))]) if a else 0.0
+        mb = _median([b[rng.randrange(len(b))] for _ in range(len(b))]) if b else 0.0
+        diffs.append(ma - mb)
+    diffs.sort()
+    lo = diffs[int(0.025 * iters)] if diffs else 0.0
+    hi = diffs[min(iters - 1, int(0.975 * iters))] if diffs else 0.0
+    return lo, hi
+
+
+def _load_variant_calls(out: str, end: str) -> dict:
+    """读取 <out>/variant_runs/{end}_V*_run*.json 的 calls，按变体分组。"""
+    import glob
+    from collections import defaultdict
+    by = defaultdict(list)
+    for f in sorted(glob.glob(os.path.join(out, "variant_runs", f"{end}_V*_run*.json"))):
+        j = _read_json_opt(f, None)
+        if not isinstance(j, dict):
+            continue
+        by[j.get("variant", "")].extend(j.get("calls") or [])
+    return by
+
+
+def variant_stats(out: str, end: str | None = None, seed: int = 0,
+                  iters: int = 10000, out_dir: str | None = None):
+    """去 loop 后的"真实思考"长度的**变体间统计检验**（Kruskal-Wallis + 两两）。
+
+    "真实思考" = 非 loop ∧ ``ok`` ∧ ``reasoning`` 非空；loop 由
+    ``booktr.llm.find_repetition``（window 16384 / min_repeats 2 / min_span 2048）判定。
+    纯标准库实现（无 scipy 依赖），置换/自助抽样以 ``seed`` 固定、可复现。
+    输出 ``variant_stats.txt``。
+    """
+    import random
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.dirname(os.path.dirname(here))
+    import sys
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from booktr.llm import find_repetition
+    out_dir = out_dir or os.path.dirname(os.path.abspath(__file__))
+
+    def isloop(c):
+        rz = c.get("reasoning") or ""
+        return bool(rz) and find_repetition(
+            rz, window=16384, min_repeats=2, min_span=2048) is not None
+
+    ends = [end] if end and end != "all" else ["qa", "judge", "translate"]
+    lines = ["# 变体真实思考统计检验（去 loop）",
+             f"\n种子 seed={seed} | 置换/自助次数 iters={iters}",
+             "真实思考 = 非loop ∧ ok ∧ reasoning非空；长度=reasoning 字符数"]
+    for e in ends:
+        by = _load_variant_calls(out, e)
+        if not by:
+            continue
+        order = sorted(by, key=_vkey_order)
+        data, loops = {}, {}
+        for v in order:
+            cs = by[v]
+            loops[v] = sum(1 for c in cs if isloop(c))
+            data[v] = [len(c.get("reasoning") or "") for c in cs
+                       if not isloop(c) and c.get("ok") and (c.get("reasoning") or "")]
+        groups = [data[v] for v in order if data[v]]
+        lines.append(f"\n## {e}")
+        lines.append(f"{'变体':6}{'loop':>6}{'真实n':>7}{'中位':>9}{'均值':>9}{'最大':>9}")
+        for v in order:
+            vals = data[v]
+            if not vals:
+                lines.append(f"{v:6}{loops[v]:>6}{0:>7}{'-':>9}{'-':>9}{'-':>9}")
+                continue
+            lines.append(f"{v:6}{loops[v]:>6}{len(vals):>7}"
+                         f"{int(_median(vals)):>9}{int(sum(vals) / len(vals)):>9}"
+                         f"{max(vals):>9}")
+        if len(groups) < 2:
+            lines.append("  （有效变体 < 2，跳过检验）")
+            continue
+        rng = random.Random(seed)
+        H = _kruskal_H(groups)
+        p = _perm_p_kruskal(groups, H, iters, rng)
+        lines.append(f"  Kruskal-Wallis: H={H:.2f}  p={p:.3f}"
+                     f"  （{'不显著' if p >= 0.05 else '显著'}，全 {len(groups)} 变体）")
+        vv = [v for v in order if data[v]]
+        for i in range(len(vv)):
+            for k in range(i + 1, len(vv)):
+                a, b = data[vv[i]], data[vv[k]]
+                obs = _median(a) - _median(b)
+                pp = _perm_p_median_diff(a, b, obs, iters, rng)
+                lo, hi = _boot_ci_median_diff(a, b, iters, rng)
+                lines.append(f"  中位差 {vv[i]}-{vv[k]}={int(obs):>7}  p={pp:.3f}"
+                             f"  95%CI=[{int(lo)},{int(hi)}]")
+    txt = "\n".join(lines)
+    os.makedirs(out_dir, exist_ok=True)
+    pth = os.path.join(out_dir, "variant_stats.txt")
+    open(pth, "w", encoding="utf-8").write(txt)
+    print(txt)
+    print("\n留存:", pth)
+    return txt
+
+
 def link_logs(run_dir: str, logs_dir: str, out_dir: str):
     """把 `_out/logs/` 的调用日志关联到每个 (end, variant, run)。
 
@@ -1098,6 +1268,10 @@ def main():
                     help="把 <out>/logs 完整调用日志回填进 <out>/variant_runs/*.json 的 calls 字段")
     ap.add_argument("--rebind-logs", default=None,
                     help="一次性内容签名重绑定：修正 <out>/log_index.json 的 run↔日志对应")
+    ap.add_argument("--variant-stats", default=None,
+                    help="去 loop 真实思考的变体统计检验（Kruskal-Wallis+两两）；值为 <out>")
+    ap.add_argument("--stats-seed", type=int, default=0, help="--variant-stats 随机种子")
+    ap.add_argument("--stats-iters", type=int, default=10000, help="--variant-stats 置换/自助次数")
     ap.add_argument("--emit-category", default=None,
                     help="按类别筛选 QA2 open 条目，指向实例 data_dir；配合 --category")
     ap.add_argument("--category", default="DE",
@@ -1121,6 +1295,10 @@ def main():
         return
     if args.rebind_logs:
         rebind_logs(args.rebind_logs, None, args.ref_data_dir)
+        return
+    if args.variant_stats:
+        variant_stats(args.variant_stats, args.end, args.stats_seed,
+                      args.stats_iters, args.out_dir)
         return
     if args.embed_thinking:
         embed_thinking(args.embed_thinking)

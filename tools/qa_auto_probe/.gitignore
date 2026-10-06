@@ -5,5 +5,6 @@ __pycache__/
 *.pyc
 drift_audit.txt
 variant_analysis.txt
+variant_stats.txt
 # 本地样例（含本地数据/特定轮次译文），不通用、不入库
 _samples/

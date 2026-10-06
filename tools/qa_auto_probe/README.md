@@ -112,6 +112,16 @@ python tools/qa_auto_probe/analyze.py --rebind-logs tools/qa_auto_probe/_out \
 新日志携带 `run` 字段（= run 的 `run_tag`）→ 直接绑定；无 `run` 的旧日志回退旧索引 /
 结构分段。输出 `log_index.json` + `rebind_audit.txt`。
 
+`--variant-stats`（去 loop 真实思考的**统计检验**，需先 `--embed-thinking`）：
+按变体统计"真实思考"长度（= 非 loop ∧ `ok` ∧ `reasoning` 非空；loop 由
+`booktr.llm.find_repetition` 判定），做 **Kruskal-Wallis + 两两中位数差**（置换 p +
+自助 95%CI）。纯标准库、以 `--stats-seed` 固定可复现；输出 `variant_stats.txt`。
+
+```bash
+python tools/qa_auto_probe/analyze.py --variant-stats tools/qa_auto_probe/_out \
+    [--end qa|judge|translate|all] [--stats-seed 0] [--stats-iters 10000]
+```
+
 `--audit`（只读）审计判官日志，检测重置态调用 / 索引回显不符 / 响应错位：
 
 ```bash
