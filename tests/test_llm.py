@@ -354,6 +354,41 @@ def test_stream_ceiling_caps_doubling(tmp_path, monkeypatch):
     assert calls == [3000, 4096]  # 3000*2=6000 被 ceiling 4096 截断
 
 
+def test_stream_empty_none_retries_then_raises(tmp_path, monkeypatch):
+    """finish=None 且正文空 → 同参数重试（call_retries）；耗尽则抛。"""
+    c = _client(tmp_path, stream=True, call_retries=1)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        calls.append(1)
+        if len(calls) == 1:
+            return _FakeStream(_sse(
+                {"choices": [{"delta": {"reasoning": "think"}, "finish_reason": None}]}))
+        return _FakeStream(_sse(
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}))
+
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    assert c.chat("s", "u") == "ok"
+    assert len(calls) == 2  # 首次空 + 1 次重试
+
+
+def test_stream_empty_none_exhausted_raises(tmp_path, monkeypatch):
+    """空正文重试耗尽仍空 → 抛 LLMError（带 reasoning / finish_reason）。"""
+    c = _client(tmp_path, stream=True, call_retries=1)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        calls.append(1)
+        return _FakeStream(_sse(
+            {"choices": [{"delta": {"reasoning": "think"}, "finish_reason": None}]}))
+
+    monkeypatch.setattr("booktr.llm.requests.post", fake_post)
+    with pytest.raises(llm.LLMError) as ei:
+        c.chat("s", "u")
+    assert "空内容" in str(ei.value)
+    assert len(calls) == 2  # 首次 + 1 次重试后放弃
+
+
 def test_stream_network_error_retries(tmp_path, monkeypatch):
     c = _client(tmp_path, stream=True, max_retries=1)
     calls = []

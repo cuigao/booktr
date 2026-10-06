@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -14,6 +15,8 @@ from . import prompts
 from . import segments as seg_mod
 from . import util
 from .config import Config
+
+log = logging.getLogger("booktr.annotator")
 
 
 def _notes_path(cfg: Config) -> str:
@@ -86,6 +89,7 @@ def generate_for_page(cfg: Config, client, rel: str, translated: str = "") -> in
     try:
         data = llm_mod.parse_json_response(resp)
     except llm_mod.LLMError:
+        log.warning("译者注解析失败 %s（响应无法解析为 JSON）", rel)
         return 0
 
     # 定位用段对象（与展示层同口径）

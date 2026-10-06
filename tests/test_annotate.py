@@ -152,3 +152,23 @@ def test_related_pages_filtered(tmp_path):
         "real.html", "nope.html", ""])]}, ensure_ascii=False)
     ann.generate_for_page(cfg, FakeLLM(sequence=[resp]), "page1.html")
     assert ann.load(cfg)[0]["related_pages"] == ["real.html"]
+
+
+def test_generate_for_page_parse_failure_logs(tmp_path, caplog):
+    """响应无法解析为 JSON → 返回 0 且记录 warning（区分于'该页本无注'）。"""
+    import logging
+    cfg = _write_site(tmp_path)
+    html = (tmp_path / "site" / "page1.html").read_text(encoding="utf-8")
+    segs = seg_mod.split_segments(html, cfg)
+    for s in segs:
+        if s.kind == "text":
+            s.translation = s.text
+    util.write_json(os.path.join(cfg.get("segments_dir", default=""),
+                                 "page1.html.json"),
+                    {"encoding": "utf-8",
+                     "segments": [s.to_dict() for s in segs]})
+    with caplog.at_level(logging.WARNING, logger="booktr.annotator"):
+        n = ann.generate_for_page(cfg, FakeLLM(sequence=["这不是 JSON，无法解析"]),
+                                  "page1.html")
+    assert n == 0
+    assert any("译者注解析失败" in r.message for r in caplog.records)

@@ -1784,17 +1784,37 @@ def cmd_annotate(cfg: Config, args) -> None:
     done_pages = state.data.get("done_pages", [])
     if args.pages:
         done_pages = args.pages
+    # 续跑幂等：默认跳过已生成过译者注的页面（--force 可强制重生成）
+    annotated = {n.get("page") for n in annotator.load(cfg)}
+    force = getattr(args, "force", False)
     total = 0
+    gen = skipped = 0
+    failures: list[tuple[str, str]] = []
     for rel in done_pages:
         out_path = os.path.join(cfg.output_dir, rel.replace("/", os.sep))
         if not os.path.exists(out_path):
             continue
+        if rel in annotated and not force:
+            skipped += 1
+            print(f"  跳过（已有注）: {rel}")
+            continue
         with open(out_path, "r", encoding="utf-8") as f:
             content = f.read()
-        n = annotator.generate_for_page(cfg, client, rel, content)
+        try:
+            n = annotator.generate_for_page(cfg, client, rel, content)
+        except Exception as e:  # 单页失败不中断整批
+            failures.append((rel, f"{type(e).__name__}: {e}"))
+            print(f"  ⚠ 跳过 {rel}: {type(e).__name__}: {e}")
+            continue
         total += n
+        gen += 1
         print(f"  {rel}: +{n} 条译者注")
-    print(f"译者注总计：{len(annotator.load(cfg))} 条（新增 {total}）")
+    print(f"\n译者注：已生成 {gen} 页 / 跳过 {skipped} 页 / 新增 {total} 条"
+          f"（总计 {len(annotator.load(cfg))} 条）")
+    if failures:
+        print(f"失败 {len(failures)} 页：")
+        for rel, err in failures:
+            print(f"  - {rel}: {err}")
 
 
 def cmd_fix(cfg: Config, args) -> None:
@@ -2840,6 +2860,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = mk("annotate", help="生成译者注；--export 渲染注本")
     sp.add_argument("--pages", nargs="*", help="限定页面")
+    sp.add_argument("--force", action="store_true",
+                    help="已生成注的页面也重新生成（默认跳过，保证续跑幂等）")
     sp.add_argument("--export", nargs="?", const="out_annotated", default=None,
                     metavar="DIR",
                     help="离线渲染注本到 DIR（缺省 <data_dir>/out_annotated）；"

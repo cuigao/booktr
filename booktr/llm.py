@@ -394,6 +394,7 @@ class LLMClient:
         net_attempts = 0
         loop_aborts = 0
         call_aborts = 0
+        empty_aborts = 0
         # 诊断：尽力记录失败前已累加的 reasoning / finish_reason / usage（供失败日志）
         last_reasoning = ""
         last_finish: str | None = None
@@ -480,9 +481,15 @@ class LLMClient:
                     f"max_tokens={base_body.get('max_tokens', self.max_tokens)}）；"
                     "已尝试翻倍仍不足，请提高 llm.max_tokens_ceiling",
                     reasoning=reasoning, finish_reason=finish, usage=usage)
-            else:
-                last_err = LLMError(f"LLM 返回空内容（finish_reason={finish}）",
-                                    reasoning=reasoning, finish_reason=finish, usage=usage)
+                break
+            # 其它空内容（finish=None/stop 等）：同参数重试一次（复用 call_retries 预算）
+            last_err = LLMError(f"LLM 返回空内容（finish_reason={finish}）",
+                                reasoning=reasoning, finish_reason=finish, usage=usage)
+            if empty_aborts < self.call_retries:
+                empty_aborts += 1
+                log.warning("LLM 返回空内容（finish_reason=%s），同参数重试 %s/%s",
+                            finish, empty_aborts, self.call_retries)
+                continue
             break
         if isinstance(last_err, LLMError):
             if diag is not None and diag.get("loop_aborts") and not getattr(
