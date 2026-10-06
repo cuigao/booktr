@@ -228,11 +228,6 @@ VARIANT_TABLE = {
 }
 
 
-def _style_rules_text(style: str) -> str:
-    from booktr import pipeline as pl
-    return next((r for k, _, r in pl.TRANSLATION_STYLES if k == style), "")
-
-
 def _apply_variant_cfg(cfg, v: dict) -> None:
     """把变体开关写入 cfg（影响提示词构建）。"""
     cfg.set(bool(v["policy"]), "qa", "reduce_style_reports")
@@ -243,12 +238,12 @@ def _inject_style(cfg, style: str):
     """把风格规则块临时并入 user_rules（内存内），返回原值以便还原。
 
     用于让 translate/qa/judge 三端都真正带上所选风格（此前仅 translate 注入，
-    qa/judge 的 style 维度形同虚设）。
+    qa/judge 的 style 维度形同虚设）。复用生产端 apply_style_preset（先剥离已有
+    风格块），口径与 init 一致。
     """
+    from booktr import pipeline as pl
     base_rules = cfg.get("user_rules", default="") or ""
-    sr = _style_rules_text(style)
-    if sr:
-        cfg.set((base_rules + "\n\n" + sr).strip(), "user_rules")
+    cfg.set(pl.apply_style_preset(base_rules, style), "user_rules")
     return base_rules
 
 

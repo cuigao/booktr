@@ -142,7 +142,7 @@ def _run_init(tmp_path, monkeypatch, answers, prefs_path, clone=None):
     return json.loads((data_dir / "config.json").read_text(encoding="utf-8"))
 
 
-def _make_clone_source(root, monkeypatch, key_mode="plain"):
+def _make_clone_source(root, monkeypatch, key_mode="plain", user_rules="基础规则CLONE"):
     """构造一个 --clone 源实例（完整 config + glossary + style_refs）。
 
     key_mode: plain（明文 SECRET）/ env（BOOKTR_API_KEY 环境变量）。
@@ -165,7 +165,7 @@ def _make_clone_source(root, monkeypatch, key_mode="plain"):
         "output_dir": "out", "work_dir": "work",
         "lang": {"source": "ja", "target": "zh-Hans"},
         "llm": llm,
-        "user_rules": "基础规则CLONE",
+        "user_rules": user_rules,
         "qa": {"deep_llm_check": True},
         "glossary": {"path": "work/glossary.json"},
     }
@@ -244,8 +244,8 @@ def test_init_prefs_then_style_appends(tmp_path, monkeypatch):
     assert "避免仅保留日文原形" not in saved["user_rules"]
 
 
-def test_init_prefs_with_dialect_no_duplicate(tmp_path, monkeypatch):
-    """init --prefs(已含方言) + 上海话 → 方言块不重复。"""
+def test_init_prefs_with_dialect_replaced(tmp_path, monkeypatch):
+    """init --prefs(已含方言) + 上海话 → 旧自定义块被规范块取代。"""
     pref = tmp_path / "p2.json"
     pref.write_text(json.dumps({
         "version": 1,
@@ -255,11 +255,12 @@ def test_init_prefs_with_dialect_no_duplicate(tmp_path, monkeypatch):
     answers = ["", "", "", "", "", "4", "1"]
     saved = _run_init(tmp_path, monkeypatch, answers, pref)
     assert saved["user_rules"].count("## 翻译风格：上海话") == 1
-    assert "旧方言块" in saved["user_rules"]
+    assert "旧方言块" not in saved["user_rules"]
+    assert "基础规则" in saved["user_rules"]
 
 
-def test_init_prefs_standard_keeps_rules(tmp_path, monkeypatch):
-    """init --prefs(含方言) + 标准 → 保持 pref 原样（标准=不改动）。"""
+def test_init_prefs_standard_strips_rules(tmp_path, monkeypatch):
+    """init --prefs(含方言) + 标准 → 剥离风格块、保留基础规则。"""
     pref = tmp_path / "p3.json"
     rules = "基础规则\n\n## 翻译风格：上海话\n- 旧方言块"
     pref.write_text(json.dumps({
@@ -267,7 +268,29 @@ def test_init_prefs_standard_keeps_rules(tmp_path, monkeypatch):
     }, ensure_ascii=False), encoding="utf-8")
     answers = ["", "", "", "", "", "1", "1"]  # 1 = 标准
     saved = _run_init(tmp_path, monkeypatch, answers, pref)
-    assert saved["user_rules"] == rules
+    assert saved["user_rules"] == "基础规则"
+
+
+def test_init_clone_keep_style_default(tmp_path, monkeypatch):
+    """--clone 源含风格块 → 默认「保留」，原样沿用（不剥离、不追加）。"""
+    clone = _make_clone_source(
+        tmp_path, monkeypatch,
+        user_rules="基础规则CLONE\n\n## 翻译风格：流畅优先\n- 旧流畅块")
+    answers = ["" for _ in range(16)]
+    saved = _run_init(tmp_path, monkeypatch, answers, None, clone=clone)
+    assert "## 翻译风格：流畅优先" in saved["user_rules"]
+    assert "旧流畅块" in saved["user_rules"]
+
+
+def test_init_clone_switch_style_strips_old(tmp_path, monkeypatch):
+    """--clone 源含流畅块 + 选忠实 → 旧块剥离，仅余忠实块。"""
+    clone = _make_clone_source(
+        tmp_path, monkeypatch,
+        user_rules="基础规则CLONE\n\n## 翻译风格：流畅优先\n- 旧流畅块")
+    answers = ["", "", "", "", "", "2", "", "", "", "", "", "", "", "", "", ""]
+    saved = _run_init(tmp_path, monkeypatch, answers, None, clone=clone)
+    assert "翻译风格：忠实优先" in saved["user_rules"]
+    assert "翻译风格：流畅优先" not in saved["user_rules"]
 
 
 # ── API key 提供方式（init 三选一）────────────────────────────────────

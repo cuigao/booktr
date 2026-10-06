@@ -118,8 +118,11 @@ def _select_lang(label: str, default: str = "") -> str:
     return val
 
 
+# 风格块的统一标题前缀：strip_style_presets 据此定位并移除风格块。
+_STYLE_HEADING = "## 翻译风格："
+
 _SHANGHAI_STYLE_RULES = (
-    "## 翻译风格：上海话\n"
+    _STYLE_HEADING + "上海话\n"
     "- 本页译文以简体中文（上海话）风格呈现\n"
     "- 使用上海话（沪语）表达，保留口语特征（如「阿拉」「侬」「伊」「蛮好」「勿要」「哪能」等）\n"
     "- 语气自然口语化，可适当使用上海话语气词\n"
@@ -127,7 +130,7 @@ _SHANGHAI_STYLE_RULES = (
 )
 
 _FAITHFUL_STYLE_RULES = (
-    "## 翻译风格：忠实优先\n"
+    _STYLE_HEADING + "忠实优先\n"
     "- 在不影响目标语言可读性的前提下，尽量贴近原文的措辞、信息与语气，宁可略书面、"
     "不刻意追求地道改写；避免为顺畅而增删或改变原意\n"
     "- 允许保留原文的信息密度与表达习惯；确有必要时才做最小限度的顺化\n"
@@ -135,20 +138,24 @@ _FAITHFUL_STYLE_RULES = (
 )
 
 _FLUENT_STYLE_RULES = (
-    "## 翻译风格：流畅优先\n"
+    _STYLE_HEADING + "流畅优先\n"
     "- 以地道、自然、可读的简体中文为第一目标，允许为通顺适度意译\n"
     "- 只要不改变命题内容、言外之力、语域语气与关键术语，个别字词/联想色彩的调整可接受\n"
     "- 避免逐字硬译与翻译腔；优先考虑中文母语读者的表达习惯\n"
     "- 全角写法、专名处理、占位符与 JSON 格式等前述要求不变"
 )
 
-# 翻译风格预设：(key, label, 追加到 user_rules 的规则块)。standard 为空表示不改动。
+# 翻译风格预设：(key, label, 追加到 user_rules 的规则块)。standard 为空表示清空风格块。
 TRANSLATION_STYLES = [
     ("standard", "标准", ""),
     ("faithful", "忠实优先", _FAITHFUL_STYLE_RULES),
     ("fluent", "流畅优先", _FLUENT_STYLE_RULES),
     ("shanghai", "上海话", _SHANGHAI_STYLE_RULES),
 ]
+
+# 「保留」选项的 key（不属预设表，用于沿用 base 中已有的风格块）。
+KEEP_STYLE_KEY = "keep"
+KEEP_STYLE_LABEL = "保留原有风格"
 
 # API key 提供方式预设：(key, label)。plain=明文写入 config；env=从环境变量读取；none=无需 key。
 KEY_MODES = [
@@ -165,20 +172,37 @@ def _key_mode_default(llm: dict) -> str:
     return "env" if bool(llm.get("api_key_required", True)) else "none"
 
 
-def apply_style_preset(user_rules: str, key: str) -> str:
-    """把指定风格预设追加到 user_rules 末尾；standard 或未知 key 原样返回。
+def strip_style_presets(user_rules: str) -> str:
+    """移除 user_rules 中的全部风格块（以 ``## 翻译风格：`` 标题行定位）。
 
-    幂等：若 user_rules 已含该预设块（以块首行 marker 判定），不重复追加。
+    按 H2（``^## ``）切分为若干段，丢弃标题行以风格前缀开头的整段，其余以空行
+    重连。无风格块时原样返回；用户手工编写的非风格规则不受影响。
     """
+    text = user_rules or ""
+    if _STYLE_HEADING not in text:
+        return text
+    parts = re.split(r"(?m)(?=^## )", text)
+    kept = [p for p in parts
+            if not p.lstrip().startswith(_STYLE_HEADING)]
+    return "\n\n".join(p.strip() for p in kept if p.strip()).strip()
+
+
+def apply_style_preset(user_rules: str, key: str, keep: bool = False) -> str:
+    """把指定风格预设写入 user_rules。
+
+    - ``keep=True``：沿用 base 中已有风格块，不剥离、不追加（原样返回）。
+    - 未知 key 或 ``standard``：剥离全部风格块、不追加（即切回无风格）。
+    - 其余预设：先剥离 base 中的全部风格块，再追加所选预设块（避免忠实/流畅等并存）。
+    """
+    if keep:
+        return user_rules
+    base = strip_style_presets(user_rules)
     rules = next((r for k, _, r in TRANSLATION_STYLES if k == key), "")
     if not rules:
-        return user_rules
-    marker = rules.splitlines()[0]
-    if marker and marker in user_rules:
-        return user_rules
-    if not user_rules:
+        return base
+    if not base:
         return rules
-    return user_rules + "\n\n" + rules
+    return base + "\n\n" + rules
 
 
 def _resolve_clone_dir(root: str, clone: str) -> str:
@@ -265,12 +289,22 @@ def cmd_init(cfg: Config, args) -> None:
             prefs_data = prefs_mod.load(args.prefs)
         except ValueError as e:
             print(f"⚠ 偏好导入失败: {e}")
-    base_rules = (prefs_data.get("user_rules") if prefs_data
-                  else data.get("user_rules", ""))
+    base_rules = str((prefs_data.get("user_rules") if prefs_data
+                      else data.get("user_rules", "")) or "")
+    # 仅当 base 已含风格块（clone/pref 引入）时，菜单追加「保留」项并默认选中；
+    # 否则菜单即预设表，默认「标准」。选择非「保留」会先剥离全部旧风格块，避免并存。
+    has_style = strip_style_presets(base_rules) != base_rules
     style_labels = [label for _, label, _ in TRANSLATION_STYLES]
-    chosen = _select("翻译风格", style_labels, "标准")
-    style_key = next((k for k, label, _ in TRANSLATION_STYLES if label == chosen), "standard")
-    data["user_rules"] = apply_style_preset(str(base_rules or ""), style_key)
+    if has_style:
+        style_labels.append(KEEP_STYLE_LABEL)
+    default_label = KEEP_STYLE_LABEL if has_style else "标准"
+    chosen = _select("翻译风格", style_labels, default_label)
+    if chosen == KEEP_STYLE_LABEL:
+        data_val = base_rules
+    else:
+        style_key = next((k for k, label, _ in TRANSLATION_STYLES if label == chosen), "standard")
+        data_val = apply_style_preset(base_rules, style_key)
+    data["user_rules"] = data_val
 
     llm = data.setdefault("llm", {})
     print("\n-- LLM 配置 --")
