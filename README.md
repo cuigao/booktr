@@ -145,8 +145,9 @@ python booktr-cli.py rollback --backfill                                   # 为
 python booktr-cli.py rollback --page today/today90.html --purge --keep-last 20  # 历史管理
 
 # 11) 生成译者注 / 渲染注本
-python booktr-cli.py annotate                    # 生成（写入 work/translators_notes.json）
+python booktr-cli.py annotate                    # 生成（写入 work/translators_notes.json）；默认跳过已生成过注的页（幂等续跑）
 python booktr-cli.py annotate --pages today/today11.html   # 限定页面
+python booktr-cli.py annotate --force            # 已生成注的页也重新生成（覆盖）
 python booktr-cli.py annotate --export           # 离线渲染注本到 out_annotated/（不调 LLM）
 python booktr-cli.py annotate --export --dry-run # 仅打印定位报告
 
@@ -210,7 +211,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 
 配置来源优先级：`<数据根>/config.json`（用户配置）> 代码内 DEFAULTS。
 
-- `python booktr-cli.py init`：交互式生成 `config.json`（询问站点目录、语言、翻译风格、LLM provider、增强工具等）；`--prefs <file>` 可同时导入个人偏好文件
+- `python booktr-cli.py init`：交互式生成 `config.json`（询问站点目录、语言、**翻译风格**、LLM provider、增强工具等）；翻译风格菜单为 `标准 / 忠实优先 / 流畅优先 / 上海话`，base 已含风格块时额外提供末位「保留原有风格」（见下「翻译风格」）；`--prefs <file>` 可同时导入个人偏好文件
 - 手动方式：复制 `config.json.template` 为 `<数据根>/config.json` 后编辑
 - 关键配置项（除注明外，相对路径均相对数据根解析）：
   - `source_dir` 站点镜像目录（如 `love.life.coocan.jp`，相对数据根；**或填完整绝对路径指向 src 之外**）
@@ -234,6 +235,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
     - **三层防护互不冲突**：`llm.timeout`（默认 120s，**流式读取间隔**超时）专防真正网络卡死/无数据停顿——合法长响应因持续有分块而不触发；`loop_guard` 秒级抓周期循环；`max_call_seconds` 兜底非周期超长。三者按"谁先触发"生效，预算各自独立。
     - **注意**：非流式（`llm.stream=false`）下无中途检测机会，read timeout 即等于总时长，故 `_post_once` 以 `min(timeout, max_call_seconds)` 作为超时。
     - **未来可选**：真正的"首 token 120s、其后 60s"分段读取超时需 `urllib3>=2.0`（`HTTPResponse.settimeout`）；当前栈固定单值，暂以 120s 单值覆盖。
+  - **空内容同参数重试**（复用 `llm.call_retries` 预算，计数器 `empty_aborts`）：正文为空且 `finish_reason≠length`（如 `stop`/空）时以**相同参数**重试最多 `call_retries` 次；`finish_reason=length` 则走上面的 `max_tokens` 翻倍逻辑。
   - `llm.max_history_segments`：多轮对话保留历史段落数（默认 50）
   - `llm.summary_enabled`：摘要接力开关（默认 true）
   - `llm_logs.auto_export`：translate 完成后自动导出对话日志（默认 true）
@@ -257,7 +259,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   - 不指定 `--prefs` 时不导入任何偏好。
 - 偏好文件建议放在仓库外（如工作区 `pref/`），**不入库**——它是个人偏好，不应成为他人默认。
 - 重建翻译实例时，先 `init --prefs <file>`，再 `scan → plan → translate`，即可恢复全部个人偏好。
-- **与翻译风格的关系**：`init` 会**先采用偏好中的 `user_rules`（若有），再追加所选翻译风格块**；风格块带幂等去重（同一风格不会重复追加）。选「标准」表示不改动（保留偏好原样的 `user_rules`）。`export-prefs` 导出的是完整 `user_rules`（含已追加的风格块）。
+- **与翻译风格的关系**：`init` 会**先载入偏好中的 `user_rules`（若有）作为 base，再按所选风格处理**——选非「保留」预设会先剥离 base 中全部旧风格块再追加所选；选「标准」= 清空全部风格块；因偏好引入了风格块时，菜单额外提供末位「保留原有风格」（默认），原样沿用不做改动。`export-prefs` 导出的是完整 `user_rules`（含已存在的风格块）。
 
 ### 基于已有实例初始化（`init --clone`）
 
@@ -275,6 +277,8 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
       init --clone ../instance/data-deepseek-v4.1-flash   # 交互中选「上海话」
   ```
 
+  > `--clone` 会**继承源实例的风格块**，故风格菜单会显示末位「保留原有风格」且**默认选中**（回车即沿用）；要改风格则主动选择其他预设（会先剥离全部旧风格块再追加）。
+
 - 优先级：**内置默认 < `--clone` 配置 < `--prefs` < 交互输入**。
 
 ## 核心机制
@@ -283,7 +287,9 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 - **编码**：逐文件探测，候选优先级为 `<meta charset>` 声明 → **源语言常见编码列表**（`lang.source`，如 `ja`→`cp932/euc_jp/iso2022_jp`、`zh-Hans`→`gbk`、`zh-Hant`→`big5` 等；未预设语言回退 `utf-8`）→ `utf-8` 兜底。全部候选均无法严格解码时抛 `EncodingError`（拒绝，不静默替换），scan 跳过该页并汇总 `encoding_failed`，提示运行 `fix`。scan 探测到的编码缓存进 site_map（`pages[rel].encoding`），后续流程优先复用缓存编码解码。输出统一 UTF-8 并在 `<head>` 补/改 `<meta charset>`（这是唯一必要改动）。
 - **编码修复（`fix` 命令）**：`booktr fix` 遍历源目录，对无法严格解码的 html 用 `errors='replace'` 修复为 UTF-8 输出到 `fix` 目录（默认 `<data_dir>/fix`，保持目录结构），**不修改原始文件**；`--dry-run` 仅列出需修复文件；`--all` 额外复制全部文件（资源与正常 html），使 fix 目录可直接作为新源。用户审核后手动合并回源目录。
 - **全角字符保留**：全角写法保留（全角英文字母、全角数字、全角符号保持全角；几何符号、省略号、破折号、智能引号保持原样）是**站点特定规则**，经 `user_rules` 注入 system prompt（本模板默认含该规则；可改、可删）。人名保留原形、英文/拉丁字母不翻译同为 `user_rules` 可配置项（默认已含）。`user_rules` 小节带有优先级声明，冲突时以用户规则为准。
-- **翻译风格**：`init` 可选预设风格（`[1] 标准`、`[2] 上海话`），选中后把对应规则块追加到 `user_rules` 末尾（`standard` 不改动），从而风格化译文而无需改动代码结构或新增语言码。预设表（`pipeline.TRANSLATION_STYLES`）可扩展，未来可增其他方言或风格。风格仅作用于翻译/重译的 system prompt，摘要/QA 等仍用标准中文。
+- **翻译风格**：`init` 提供预设风格菜单 `标准 / 忠实优先 / 流畅优先 / 上海话`，选中后把对应规则块写入 `user_rules`（块首统一为 `## 翻译风格：`），从而风格化译文而无需改动代码结构或新增语言码。为避免多套风格并存，选择**非「保留」**的任一预设会先经 `strip_style_presets` **剥离 `user_rules` 中全部旧风格块**再追加所选；选「标准」= **清空全部风格块、不追加**（切回无风格）。
+  - **「保留原有风格」**：仅当 base（`--clone`/`--prefs` 引入）**已含风格块**时，菜单在预设表后**追加末位「保留原有风格」并设为默认**，选中则**原样沿用**（不剥离、不追加，含自定义/特别块）。`apply_style_preset(rules, key, keep=True)` 等价于「保留」。
+  - 预设表（`pipeline.TRANSLATION_STYLES`）可扩展，未来可增其他方言或风格。风格仅作用于翻译/重译的 system prompt，摘要/QA 等仍用标准中文。
 - **占位符**：段内内联标签（`<img>/<font>/<a>…`）转为 `[[P0]]` 占位符交给 LLM，译文必须原样保留，拼接时还原。相邻 inline 标签（含纯空白分隔）合并为单个占位符，减少 LLM 困惑。短语记忆命中后从原始 chunk 恢复占位符。
 - **解析自愈**：LLM 输出非法 JSON 时自动重试（最多 `max_repair` 次），每次携带具体错误信息让 LLM 修正；占位符丢失时触发额外 repair；兜底清理去除 `|TEXT|`/JSON 残渣。
 - **JSON 机械修复**：解析失败时按序用机械修复做后处理（`ESCAPE_VALUE_STRINGS` 值字符串转义覆盖未转义引号/裸换行，`CLOSE_ARRAY` 按已知 key 先验补全缺 `]`），成功且含 `translation` key 则附加 `repaired: true` + `repair_methods` 规范字段；仍失败才触发 LLM repair。该信息持久化到段状态（`state.json`）与段缓存（`work/segments/*.json`），并在 export-log 中标注 `⚠ 修复` 及头部汇总，便于追溯与改进修复逻辑。
@@ -314,8 +320,8 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   - 所有指标分与排序证据（权重公式、每页各指标分、语义序来源）持久化在 `plan.json`，供 GUI 调权（v2）实时重算。
   - 上下文包把前 N 页摘要随页送入。
 - **暂停与人工介入**：LLM 每段返回结构化结果（confidence/冲突/needs_human）；冲突或低置信度写入 `work/review_queue.json`，批量边界暂停请求人工。用户任何时刻可向 `work/inbox/` 写入 `.txt`/`.md`/`.json` 注入笔记或规则，下个检查点生效。
-  - **审核条目操作**：`[a]`接受（保留译文）`[s]`跳过 `[d]`删除（清除该段译文，页面转 pending，`--next` 可重译；删除前预览并二次确认，同时清理该段对应的翻译记忆 TM 与翻译笔记 notes，避免重译自我锚定）`[c]`确认加入词汇表 `[q]`退出。QA 条目（`qa_*` 原因）仅 `[a]`标记已处理，不改变页面翻译状态。
-  - **页面状态流转**：页面有 open 审核项时 status=`review`，`--next` 会跳过；需处理完该页全部 open 项（或 `[d]` 使页面转 `pending`）后才会被 `--next` 重新翻译。删除段译文后，`translate --next` 只重译被删除的段，其余已译段保留。
+  - **审核条目操作**：`[a]`接受（保留译文）`[s]`跳过 `[d]`删除（清除该段译文，页面转 pending，`--next` 可重译；删除前预览并二次确认，同时清理该段对应的翻译记忆 TM 与翻译笔记 notes，避免重译自我锚定；并**同步清空段缓存译文**，使 `out` 立即反映删除）`[c]`确认加入词汇表 `[q]`退出。QA 条目（`qa_*` 原因）仅 `[a]`标记已处理，不改变页面翻译状态。
+  - **页面状态流转**：页面有 open 审核项时 status=`review`，`--next` 会跳过；需处理完该页全部 open 项（或 `[d]` 使页面转 `pending`）后才会被 `--next` 重新翻译。`[d]` 对 `review` 与 `done` 页均可用（`done` 页删除段译文后转回 `pending`）。删除段译文后，`translate --next` 只重译被删除的段，其余已译段保留。
 
 ## 增强工具
 
@@ -331,7 +337,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 | 一致性 QA | 对已译页做体检：本地规则（占位符完整性=高危、术语一致=中危）+ LLM 深度语义检查（`qa.deep_llm_check`）；问题以 `qa_*` 原因写入审核队列供人工确认，不自动触发重译 | `qa.deep_llm_check` |
 | 词汇/短语审计 | `audit-terms` 用新词汇表/短语记忆重建已译段（按占位符边界精确匹配），同步 state+段缓存并重生成 out | `audit-terms` |
 | 残留检测 | `check-residual` 只读扫描已译段，列出译文残留的源语言片段（当前仅日语·平假名），逐项给出 reset 命令供人工核验后手动重译；不自动重译 | `check-residual` |
-| 译者注 | 跨页关联/趣味发现 → 外部 JSON（每条含可锚定 `src_quote`/`dst_quote`）；`--export` 离线渲染注本（复制 out + 插 `<sup>` 角标 + 内联 JS 侧栏，源 out 零改动） | `annotate [--export]`、`translators_notes.max_notes_per_page` |
+| 译者注 | 跨页关联/趣味发现 → 外部 JSON（每条含可锚定 `src_quote`/`dst_quote`）；`--export` 离线渲染注本（复制 out + 插 `<sup>` 角标 + 内联 JS 侧栏，源 out 零改动）；生成默认**幂等跳过已生成页**（`--force` 覆盖），单页 LLM/解析失败仅告警跳过、不中断整批 | `annotate [--force] [--export]`、`translators_notes.max_notes_per_page` |
 | 段落定位 | 按原文/译文片段在页面内定位段号（精确→去占位符→跨行→模糊 Dice）；`qa` 与 `rollback` 共用 | `locate` |
 | 段落回滚 | 段颗粒度版本管理：提交即版本、非线性 pick 恢复、`--op` 整命令撤销、`--dry-run` 预览、`--purge` 管理 | `rollback` |
 | 短语记忆清理 | 覆盖路径（reset/review `[d]`/qa-apply/rollback）按 `源文 ∩ 旧译文 ∖ 新译文` 对称清理短语；qa-apply 清后按同条件回写新短语（与 TM 对齐）；不纳入版本快照 | 自动 |
