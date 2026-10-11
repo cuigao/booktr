@@ -139,6 +139,50 @@ def test_review_skip(tmp_cfg, tmp_path):
     assert review_mod.load_queue(tmp_cfg)[0]["status"] == "skipped"
 
 
+def test_review_skip_finalizes_page(tmp_cfg, tmp_path):
+    """[s] 跳过后，页面若无其它 open 条目应收尾为 done（不再卡在 review）。"""
+    state, sid = _make_translated_page(tmp_cfg, tmp_path)
+    state.page("page1.html")["status"] = "review"
+    state.save()
+    review_mod.save_queue(tmp_cfg, _queue(tmp_cfg, "page1.html", sid, "low_confidence"))
+
+    review_mod.interactive_review(tmp_cfg, prompt="s", max_items=1)
+
+    assert review_mod.load_queue(tmp_cfg)[0]["status"] == "skipped"
+    st = tr.State(tmp_cfg)
+    assert st.page("page1.html")["status"] == "done"
+    assert "page1.html" in st.data["done_pages"]
+
+
+def test_resolve_skipped_marks_accepted_and_finalizes(tmp_cfg, tmp_path):
+    """resolve_skipped：skipped → accepted，并收尾其页 review → done。"""
+    state, sid = _make_translated_page(tmp_cfg, tmp_path)
+    state.page("page1.html")["status"] = "review"
+    state.save()
+    review_mod.save_queue(tmp_cfg, _queue(tmp_cfg, "page1.html", sid, "low_confidence",
+                                          status="skipped"))
+
+    n = review_mod.resolve_skipped(tmp_cfg)
+
+    assert n == 1
+    assert review_mod.load_queue(tmp_cfg)[0]["status"] == "accepted"
+    st = tr.State(tmp_cfg)
+    assert st.page("page1.html")["status"] == "done"
+    assert "page1.html" in st.data["done_pages"]
+
+
+def test_reopen_skipped_flips_open(tmp_cfg, tmp_path):
+    """reopen_skipped：skipped → open。"""
+    state, sid = _make_translated_page(tmp_cfg, tmp_path)
+    review_mod.save_queue(tmp_cfg, _queue(tmp_cfg, "page1.html", sid, "low_confidence",
+                                          status="skipped"))
+
+    n = review_mod.reopen_skipped(tmp_cfg)
+
+    assert n == 1
+    assert review_mod.load_queue(tmp_cfg)[0]["status"] == "open"
+
+
 def test_review_qa_does_not_change_page(tmp_cfg, tmp_path):
     _disable_auto_regenerate(tmp_cfg)
     state, sid = _make_translated_page(tmp_cfg, tmp_path)

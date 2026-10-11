@@ -799,6 +799,13 @@ def cmd_translate(cfg: Config, args) -> None:
 
 
 def cmd_review(cfg: Config, args) -> None:
+    if getattr(args, "resolve_skipped", False):
+        n = review_mod.resolve_skipped(cfg)
+        print(f"已将 {n} 条 skipped 条目标记为已处理并收尾其所在页。")
+        return
+    if getattr(args, "reopen", False):
+        n = review_mod.reopen_skipped(cfg)
+        print(f"已将 {n} 条 skipped 条目重新置为 open，进入复审。")
     stats = review_mod.queue_stats(cfg)
     print(f"审核队列：open={stats['open']}  按原因={stats['by_reason']}")
     if args.page:
@@ -2996,6 +3003,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = mk("review", help="处理审核队列")
     sp.add_argument("--page", default=None, help="只看某页的审核项")
     sp.add_argument("--max-items", type=int, default=0, help="最多处理条数")
+    sp.add_argument("--resolve-skipped", action="store_true",
+                    help="把所有 skipped 条目标记为已处理并收尾其页（用于清理遗留）")
+    sp.add_argument("--reopen", action="store_true",
+                    help="把所有 skipped 条目重新置为 open 以再次复审")
     sp.set_defaults(func=cmd_review)
 
     sp = mk("regenerate", help="重新生成指定页面的 out 文件（从段索引离线重组）")

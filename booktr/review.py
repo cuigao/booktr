@@ -217,14 +217,50 @@ def interactive_review(cfg: Config, prompt: str = None, max_items: int = 0,
         state = State(cfg)
         state.save()
 
-    # 自动重生成
+    # 自动收尾：对本次涉及的所有页（含仅被 skip 的页）finalize。
+    # _finalize_review 在该页仍有 open 条目时自动 no-op，因此可安全地对全部 touched 页调用。
+    # 这样"只剩 skipped 条目"的页也能 review → done，避免卡页。
     auto_regenerate = cfg.get("review", "auto_regenerate", default=True)
-    if auto_regenerate and changed_pages:
-        for page in changed_pages:
+    if auto_regenerate:
+        touched = {it["page"] for it in remaining}
+        for page in sorted(touched):
             _finalize_review(cfg, page)
             print(f"  📄 已重生成: {page}")
 
     return handled
+
+
+def resolve_skipped(cfg: Config) -> int:
+    """把队列中所有 skipped 条目视为已处理（置 accepted），并收尾其所在页。
+
+    用于处理历史遗留：`[s]` 跳过后页面若再无 open 条目，应收尾为 done。
+    返回处理的条目数。"""
+    items = load_queue(cfg)
+    pages: set[str] = set()
+    n = 0
+    for it in items:
+        if it.get("status") == "skipped":
+            it["status"] = "accepted"
+            pages.add(it["page"])
+            n += 1
+    save_queue(cfg, items)
+    if n:
+        for page in sorted(pages):
+            _finalize_review(cfg, page)
+            print(f"  📄 已收尾: {page}")
+    return n
+
+
+def reopen_skipped(cfg: Config) -> int:
+    """把队列中所有 skipped 条目重新置为 open，供再次交互复审。返回条目数。"""
+    items = load_queue(cfg)
+    n = 0
+    for it in items:
+        if it.get("status") == "skipped":
+            it["status"] = "open"
+            n += 1
+    save_queue(cfg, items)
+    return n
 
 
 def queue_stats(cfg: Config) -> dict:

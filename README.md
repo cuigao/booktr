@@ -104,6 +104,8 @@ python booktr-cli.py translate --next --dry-run   # 仅显示下一个待译页�
 
 # 9) 处理审核队列（LLM 发现冲突/不确定时暂停在此）
 python booktr-cli.py review
+python booktr-cli.py review --resolve-skipped   # 把遗留的 skipped 条目标记已处理并收尾其页（清理卡页）
+python booktr-cli.py review --reopen            # 把 skipped 条目重新置为 open 以再次复审
 
 # 10) 一致性 QA
 python booktr-cli.py qa
@@ -335,7 +337,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   - 所有指标分与排序证据（权重公式、每页各指标分、语义序来源）持久化在 `plan.json`，供 GUI 调权（v2）实时重算。
   - 上下文包把前 N 页摘要随页送入。
 - **暂停与人工介入**：LLM 每段返回结构化结果（confidence/冲突/needs_human）；冲突或低置信度写入 `work/review_queue.json`，批量边界暂停请求人工。用户任何时刻可向 `work/inbox/` 写入 `.txt`/`.md`/`.json` 注入笔记或规则，下个检查点生效。
-  - **审核条目操作**：`[a]`接受（保留译文）`[s]`跳过 `[d]`删除（清除该段译文，页面转 pending，`--next` 可重译；删除前预览并二次确认，同时清理该段对应的翻译记忆 TM 与翻译笔记 notes，避免重译自我锚定；并**同步清空段缓存译文**，使 `out` 立即反映删除）`[c]`确认加入词汇表 `[q]`退出。QA 条目（`qa_*` 原因）仅 `[a]`标记已处理，不改变页面翻译状态。
+  - **审核条目操作**：`[a]`接受（保留译文）`[s]`跳过 `[d]`删除（清除该段译文，页面转 pending，`--next` 可重译；删除前预览并二次确认，同时清理该段对应的翻译记忆 TM 与翻译笔记 notes，避免重译自我锚定；并**同步清空段缓存译文**，使 `out` 立即反映删除）`[c]`确认加入词汇表 `[q]`退出。QA 条目（`qa_*` 原因）仅 `[a]`标记已处理，不改变页面翻译状态。`[s]` 跳过后若该页再无 open 条目，页面会**自动收尾为 `done`**（不再卡在 `review`）；历史遗留的 skipped 条目用 `review --resolve-skipped` 批量收尾，或 `review --reopen` 重新置为 open 复审。
   - **页面状态流转**：页面有 open 审核项时 status=`review`，`--next` 会跳过；需处理完该页全部 open 项（或 `[d]` 使页面转 `pending`）后才会被 `--next` 重新翻译。`[d]` 对 `review` 与 `done` 页均可用（`done` 页删除段译文后转回 `pending`）。删除段译文后，`translate --next` 只重译被删除的段，其余已译段保留。
 
 ## 增强工具
