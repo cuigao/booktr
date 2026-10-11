@@ -434,6 +434,18 @@ def export_annotated(cfg: Config, out_dir: str, pages: list[str] | None = None,
         rel = n.get("page") or (n.get("anchor") or {}).get("page")
         if rel:
             by_page.setdefault(rel, []).append(n)
+    # 参考勘误：以「参考勘误」类注记并入（独立于 translators_notes，reset/clean 不清）
+    if cfg.get("refs", "render_corrections", default=True):
+        from . import refs as refs_mod
+        for rel, cors in refs_mod.all_active(cfg).items():
+            for c in cors:
+                by_page.setdefault(rel, []).append({
+                    "id": c.get("id", ""),
+                    "dst_quote": (c.get("corrected") or "")[:24],
+                    "type": "参考勘误",
+                    "content": f"参考译文此处有误（原：{c.get('ref_err', '')}），已修正。",
+                    "related_pages": [],
+                })
     if pages:
         by_page = {p: by_page.get(p, []) for p in pages}
         by_page = {p: v for p, v in by_page.items() if v}

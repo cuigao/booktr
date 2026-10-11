@@ -56,6 +56,7 @@ def build_translate_system(
     focus: str,
     is_retranslation: bool = False,
     is_qa_fix: bool = False,
+    ref_mode: bool = False,
 ) -> str:
     tgt = cfg.get("lang", "target", default="zh-Hans")
     src = cfg.get("lang", "source", default="ja")
@@ -80,17 +81,56 @@ def build_translate_system(
         parts.append(f"## 风格指南\n{style_guide}")
     if focus:
         parts.append(f"## 译者关注点\n{focus}")
-    parts.append(
+    if ref_mode:
+        parts.append(_build_ref_use_rules(tgt_name))
+        parts.append(_build_ref_correction_rules(tgt_name))
+    fmt = (
         "## 输出格式\n"
         '返回 JSON：{"translation": "译文", "confidence": 0到1, '
         '"glossary_conflicts": ["发现问题的术语条目"], '
-        '"notes": ["需要记录的重要/存疑信息"], "needs_human": true/false}'
+        '"notes": ["需要记录的重要/存疑信息"], "needs_human": true/false'
     )
+    if ref_mode:
+        fmt += (', "corrections": [{"ref_err": "被替换掉的参考译文片段", '
+                '"corrected": "修正后的译文", "reason": "依据"}]')
+    fmt += "}"
+    parts.append(fmt)
     if is_retranslation:
         parts.append(_build_retranslate_rules(src_name, tgt_name))
     if is_qa_fix:
         parts.append(_build_qa_fix_rules(src_name, tgt_name))
     return "\n\n".join(parts)
+
+
+def _build_ref_use_rules(tgt_name: str) -> str:
+    """参考译文使用规则（参考模式 system 追加，声明最高优先级）。"""
+    return (
+        "## 参考译文使用规则（最高优先级，优先于翻译要求与用户附加规则）\n"
+        "- 本节规则优先于上文所有相冲突的条目——包括“不要逐字硬译”、全角/半角保留、"
+        "专名必须译出中文、英文不译等；冲突时一律以参考译文为准。\n"
+        "- 对每个待翻译段落，若参考译文中存在对应内容，必须近乎逐字采用参考译文，"
+        "以其用词、标点、全半角、专名形式为准（仅可为插入 [[Px]] 占位符、空白做最小调整），"
+        "不得改写、增删、润色。\n"
+        "- 参考译文中与原文无关的彩蛋、注释、额外板块应如实保留（不得丢弃或改写），"
+        "置于其紧邻的正文段落之后；若位于页尾，则附于该页最后一个正文段之后。\n"
+        f"- 若参考译文中没有对应内容（如标题、导航、新增内容），则照常翻译成{tgt_name}。"
+    )
+
+
+def _build_ref_correction_rules(tgt_name: str) -> str:
+    """参考译文纠错规则（结构化字段，不内联标记）。"""
+    return (
+        "## 参考译文纠错规则\n"
+        "- 原则上逐字采用参考译文，不得仅因措辞偏好而改动。\n"
+        "- 若参考译文确有明显错误（漏译/误译/事实错误/格式必要调整），可修正；"
+        "并且**凡你对参考译文原句所作的任何改动，都必须逐处记入 `corrections`**：\n"
+        "  {\"ref_err\": 被改动的参考原句片段, \"corrected\": 你改正后的文字, \"reason\": 依据}。\n"
+        "- `translation` 直接写改正后的完整译文。\n"
+        f"- `corrected` 必须是{tgt_name}译文（不得保留源语言原词/罗马字）。\n"
+        "- **未记入 `corrections` 却偏离参考译文者，视为错误。**\n"
+        "- 无改动时 `corrections` 为空数组 []。"
+    )
+
 
 
 def term_lines(items: list[dict]) -> list[str]:
@@ -174,6 +214,77 @@ def build_translate_user_subsequent(
         tm_lines = [f"{h['src']} → {h['dst']}" for h in tm_hits]
         parts.append("## 翻译记忆命中（可参考，但优先词汇表）\n" + "\n".join(tm_lines))
     parts.append(f"### 待翻译文本\n\n{src_text}")
+    return "\n\n".join(parts)
+
+
+def build_translate_user_first_ref(
+    cfg,
+    src_text: str,
+    full_src: str,
+    full_ref: str,
+    page_ctx: str,
+    prior_ctx: str,
+    exemplars: list[dict],
+    tm_hits: list[dict],
+    summary: str = "",
+    term_hints: str = "",
+) -> str:
+    """参考模式首条消息：在常规上下文之外，注入整页原文 + 整页人工参考译文。"""
+    tgt = cfg.get("lang", "target", default="zh-Hans")
+    tgt_name = lang_name(tgt)
+    parts = [f"请将下面的{_srcname(cfg)}翻译成{tgt_name}。"]
+    if term_hints:
+        parts.append(term_hints)
+    if summary:
+        parts.append(f"## 前文翻译摘要（保持术语与风格一致）\n{summary}")
+    if page_ctx:
+        parts.append(f"## 当前页面上下文\n{page_ctx}")
+    if prior_ctx:
+        parts.append(f"## 前文上下文（保持叙事与术语一致）\n{prior_ctx}")
+    if tm_hits:
+        tm_lines = [f"{h['src']} → {h['dst']}" for h in tm_hits]
+        parts.append("## 翻译记忆命中（可参考，但优先词汇表）\n" + "\n".join(tm_lines))
+    if exemplars:
+        ex_lines = [f"原文：{e['src']}\n参考译文：{e['dst']}" for e in exemplars]
+        parts.append(
+            "## 风格参照样例（仅模仿其风格与措辞倾向，勿照抄内容）\n"
+            + "\n\n".join(ex_lines)
+        )
+    if full_src:
+        parts.append("## 本页完整原文（逐段，段序即阅读顺序）\n" + full_src)
+    if full_ref:
+        parts.append(
+            "## 本页参考译文（人工，仅供对应段落逐字采用；无对应者照常翻译）\n" + full_ref
+        )
+    parts.append("### 待翻译文本\n\n" + src_text)
+    return "\n\n".join(parts)
+
+
+def build_ref_fix_user(cfg, src_text: str, current_translation: str,
+                       ref_fragment: str, diff: str, context: dict) -> str:
+    """参考一致性重译：给出参考片段与差异，要求据其修正为与参考一致。"""
+    tgt = cfg.get("lang", "target", default="zh-Hans")
+    tgt_name = lang_name(tgt)
+    parts = [f"请依据人工参考译文，修正下面这段{_srcname(cfg)}→{tgt_name}的译文，"
+             "使其与参考译文一致；其余尽量保持不变。"]
+    for key, title in (
+        ("summary", "页面摘要"), ("page_ctx", "页面上下文"),
+        ("prior_ctx", "前文上下文（保持叙事与术语一致）"),
+    ):
+        if context.get(key):
+            parts.append(f"## {title}\n{context[key]}")
+    if context.get("term_hints"):
+        parts.append(context["term_hints"])
+    if context.get("context_before"):
+        parts.append(f"## 前文（已翻译）\n{context['context_before']}")
+    parts.append(f"## 参考译文片段（以此为准）\n{ref_fragment}")
+    if diff:
+        parts.append(f"## 参考译文独有 / 当前译文独有（- 前缀＝参考译文独有，+ 前缀＝当前译文独有）\n{diff}")
+    if current_translation:
+        parts.append(f"## 现有译文\n{current_translation}")
+    parts.append(f"## 待翻译文本（原文）\n\n{src_text}")
+    if context.get("context_after"):
+        parts.append(f"## 后文（已翻译）\n{context['context_after']}")
     return "\n\n".join(parts)
 
 

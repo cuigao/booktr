@@ -311,6 +311,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
   在**整个页面主翻译结束后**统一用重翻译提示词再试（`auto_retranslate_attempts` 次）。
   此时全页段均已翻译，前后文上下文完整。成功则采用新译文并清除 review 标记（含已入队的词汇表冲突条目）；
   仍失败则保留结果并进入 review 队列。
+- **人工参考译文参考层（`refs`）**：站点存在人工译文时，可按"镜像目录 + 纯译文 txt"提供参考（`init` 配置 `refs.dir`，或用 `refs --legacy-archive` 从旧稿件导迁到 `work/refs/`，支持 `photoNNNNNN` 按标题日期映射到页面并查重）。**存在参考的页面**启用参考模式：首条 prompt 注入整页原文 + 整页参考译文，要求 LLM **近乎逐字采用**参考；页面局部无参考（标题/导航/新增内容）照常翻译。参考模式**默认不注入**词表/短语/TM/样例/笔记，也**跳过**词表/短语机械替换（避免与人工参考冲突；可用 `refs.inject_glossary`/`refs.inject_memory` 打开），可用 `translate --no-refs` 临时关闭。逐段翻译后追加**参考一致性校验**：去占位符+空白后与运行时定位到的参考片段做 `difflib.ratio` 比对（阈值 `refs.threshold`，默认 0.97）；不达标则用"参考片段 + diff"自动重译一次（`refs.auto_retry`），仍失败则作为 `参考译文不一致` 条目入 `qa_queue`（人工审核后走 `qa-apply`）。LLM 若判定参考确有明显错误（漏译/误译/事实错），把纠错写入 `work/ref_corrections.jsonl`（**append-only**，`reset`/`clean` 不清；失效标 `superseded` **保留可追溯**）；导出注本时以「参考勘误」类角标渲染。已译页面可用 `refs-check` 单独补跑"校验→重译→入队→勘误"。详见 `instance/plan/refs_layer_plan.md`。
 - **LLM 异常防护**：所有 LLM 返回路径均有防护——None 内容检查、API 格式异常捕获、confidence null 防护、`parse_json_response` 空响应处理。
 - **翻译顺序（统一加权模型）**：每页计算一组归一化指标分（`semantic` 层级语义序 / `has_semantic` / `is_index` / `is_orphan` / `hotness` 引用热度 / `depth` / `chrono` 日期 / `volume` 编号 / `nav` 导航位次 / `dfs` 遍历序 / `len` 原文长度），按**加权总分降序**排列。
   - **层级语义序**：递归发现各级索引页（root 的 `index.html`、`today0.html`、`photo0.html`、`rec_idx.html` 等，判定 = 链接覆盖本级成员比例 ≥ `index_threshold`），页面语义分 = 目录链上各级位置的级联，跨目录自然分层、组内按索引链接序连续。
@@ -331,6 +332,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 | 术语初筛辨析 | `terms-scan`：零词条起步，机械算法（脚本串/跨页模板/n-gram 等）抽高频候选 → LLM 语义辨析判定价值并给建议译名 → 并入词汇表（auto-candidate，待人工确认）；`extract-terms` 为旧版逐页抽取，保留兼容 | `terms_scan` |
 | 翻译记忆 TM | 双语片段缓存，跨页复用 | `tm.enabled` |
 | 短语记忆 | 导航短语精确匹配复用；自动学习；长句经宽松匹配注入 user prompt 作推荐译法 | `phrases.max_len` |
+| 参考译文 | `refs`（预处理/导迁参考译文 → `work/refs/`）、`refs-check`（对已有译文跑一致性校验）；参考模式 prompt + 勘误 sidecar `work/ref_corrections.jsonl` | `refs` |
 | 风格指南 | `style-extract` 从对照样例提炼规则注入 | `style.rules_enabled` |
 | 风格锚定 | 字符 n-gram 相似度检索 top-k 样例 few-shot 注入 | `style.exemplar_enabled` |
 | 上下文包 | plan 前 N1 篇 + 时间前导 N2 + 链接前导 N3 摘要（逐级去重） | `planner.context` |

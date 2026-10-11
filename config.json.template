@@ -161,6 +161,21 @@
     "path": "work/translators_notes.json",
     "focus": ""
   },
+  "refs": {
+    "dir": "",
+    "store_dir": "work/refs",
+    "metric": "ratio",
+    "threshold": 0.97,
+    "auto_retry": 1,
+    "enqueue_qa": true,
+    "min_seg_chars": 4,
+    "inject_glossary": false,
+    "inject_memory": false,
+    "corrections_path": "work/ref_corrections.jsonl",
+    "render_corrections": true,
+    "preserve_tail": true,
+    "weights": {}
+  },
   "review": {
     "path": "work/review_queue.json",
     "auto_regenerate": true

@@ -155,6 +155,21 @@ DEFAULTS: dict[str, Any] = {
            "auto_log_dir": "work/qa_auto_runs"},
     "translators_notes": {"path": "work/translators_notes.json", "focus": "",
                           "max_notes_per_page": 0},
+    "refs": {
+        "dir": "",  # 参考译文目录（镜像站点结构，纯译文 txt）；空=禁用
+        "store_dir": "work/refs",  # 预处理规范化产物目录
+        "metric": "ratio",  # ratio(difflib) | edit | dice
+        "threshold": 0.97,  # 去占位符+空白后的相似度阈值
+        "auto_retry": 1,  # 首译不达标自动重译次数
+        "enqueue_qa": True,  # 重译仍失败→写入 qa_queue
+        "min_seg_chars": 4,  # 过短段（标题/导航）跳过校验
+        "inject_glossary": False,  # 参考模式是否注入词表/短语
+        "inject_memory": False,  # 参考模式是否注入 TM/exemplars/notes
+        "corrections_path": "work/ref_corrections.jsonl",  # 勘误 sidecar
+        "render_corrections": True,  # 渲染期注入「参考勘误」角标
+        "preserve_tail": True,  # 把参考末尾未被采用的彩蛋/注释附到最后一个正文段
+        "weights": {},  # 预留：按 Segment.kind 的 diff 权重
+    },
     "review": {"path": "work/review_queue.json", "auto_regenerate": True},
     "state": {"path": "work/state.json"},
     "summaries": {"dir": "work/summaries"},
@@ -209,6 +224,8 @@ class Config:
         return self._path(self.data["work_dir"])
 
     def _path(self, rel: str) -> str:
+        if not rel:
+            return ""
         if os.path.isabs(rel):
             return rel
         return os.path.normpath(os.path.join(self.data_dir, rel))

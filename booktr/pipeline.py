@@ -755,7 +755,8 @@ def cmd_translate(cfg: Config, args) -> None:
         print(f"[{i}/{len(targets)}] 翻译 {rel} ...", flush=True)
         try:
             r = tr.translate_page(cfg, client, rel, state, sm, plan, review_items,
-                                  interactive=args.interactive, progress=progress)
+                                  interactive=args.interactive, progress=progress,
+                                  use_refs=not getattr(args, "no_refs", False))
         except llm_mod.LLMError as e:
             print(f"  ✗ {rel}: {e}")
             break
@@ -860,6 +861,7 @@ def cmd_reset(cfg: Config, args) -> None:
     说明经检索注入形成自我锚定；`--keep-tm` / `--keep-notes` 可分别关闭。
     """
     from . import notes as notes_mod
+    from . import refs as refs_mod
     from . import tm as tm_mod
 
     state = tr.State(cfg)
@@ -937,6 +939,10 @@ def cmd_reset(cfg: Config, args) -> None:
             for sid in target:
                 if sid in segs:
                     hist_mod.commit(cfg, rel, sid, "reset", reset_op, state=state)
+
+        # 旧勘误标 superseded（保留可追溯，重译后不再渲染）
+        for sid in (list(segs.keys()) if target is None else target):
+            refs_mod.supersede_segment(cfg, rel, sid)
 
         if target is None:
             # 方式 A：整页重置
@@ -2098,6 +2104,8 @@ def _build_clean_items(cfg: Config, args) -> list[_CleanItem]:
                    lambda c: _count_json_list(c, "review_queue.json")),
         _CleanItem("notes", "翻译笔记", "notes.jsonl", "truncate",
                    lambda c: _count_jsonl(c, "notes.jsonl")),
+        _CleanItem("ref_corrections", "参考勘误", "ref_corrections.jsonl", "truncate",
+                   lambda c: _count_jsonl(c, "ref_corrections.jsonl"), default=False),
         _CleanItem("logs", "导出日志", "logs", "dir",
                    lambda c: _count_dir_files(c, "logs")),
         _CleanItem("output", "输出目录", cfg.output_dir, "dir",
@@ -2627,6 +2635,150 @@ def cmd_export_log(cfg: Config, args) -> None:
         print(f"未找到 {args.page} 的日志")
 
 
+def cmd_refs(cfg: Config, args) -> None:
+    """预处理人工参考译文目录 → 规范化到 work/refs（镜像结构，纯文本）。"""
+    from . import refs as refs_mod
+
+    out_dir = args.out or cfg.get("refs", "store_dir", default="work/refs")
+    if args.legacy_archive:
+        pairs = _legacy_ref_map(cfg, args.legacy_archive)
+    else:
+        src = args.from_dir or cfg.get("refs", "dir", default="")
+        if not src:
+            print("未指定参考译文目录（--from 或 config.refs.dir）")
+            return
+        pairs = []
+        for root, _dirs, files in os.walk(src):
+            for fn in sorted(files):
+                if not fn.lower().endswith((".txt", ".md")):
+                    continue
+                fp = os.path.join(root, fn)
+                rel = os.path.relpath(fp, src).replace(os.sep, "/")
+                pairs.append((fp, rel))
+
+    matched = unmapped = written = 0
+    print(f"参考译文预处理 → {out_dir}（{len(pairs)} 个文件）")
+    for fp, rel in pairs:
+        if not rel:
+            unmapped += 1
+            print(f"  [未匹配] {os.path.basename(fp)}")
+            continue
+        matched += 1
+        try:
+            with open(fp, "r", encoding="utf-8-sig", errors="replace") as f:
+                raw = f.read()
+        except OSError as e:
+            print(f"  [读取失败] {fp}: {e}")
+            continue
+        text = _extract_ref_text(raw) if args.legacy_archive else refs_mod._normalize_ref(raw)
+        if not text.strip():
+            print(f"  [空] {rel}")
+            continue
+        dst = os.path.join(out_dir, rel.replace("/", os.sep))
+        if args.dry_run:
+            print(f"  {os.path.basename(fp)} → {rel}（{len(text)} 字）")
+            continue
+        os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+        with open(dst, "w", encoding="utf-8") as f:
+            f.write(text)
+        written += 1
+        print(f"  {os.path.basename(fp)} → {rel}（{len(text)} 字）")
+    if args.dry_run:
+        print(f"\n[dry-run] 匹配 {matched} / 未匹配 {unmapped}")
+    else:
+        print(f"\n完成：写入 {written} 页（匹配 {matched} / 未匹配 {unmapped}）")
+
+
+def _legacy_ref_map(cfg: Config, arc_dir: str) -> list[tuple[str, str]]:
+    """把 archive/forritz 映射到 page rel：todayN→名字；photoNNNNNN→标题日期。"""
+    sm = planner.load_site_map(cfg)
+    pages = sm.get("pages", {})
+    byname = {}
+    date2page = {}
+    for k, p in pages.items():
+        byname.setdefault(os.path.splitext(os.path.basename(k))[0], k)
+        if p.get("date"):
+            date2page.setdefault(p["date"], k)
+    out = []
+    for fn in sorted(os.listdir(arc_dir)):
+        if not fn.lower().endswith(".txt"):
+            continue
+        stem = os.path.splitext(fn)[0]
+        page = byname.get(stem)
+        if not page and stem.startswith("photo") and stem[5:].isdigit():
+            d = stem[5:]
+            page = date2page.get(f"19{d[0:2]}-{d[2:4]}-{d[4:6]}")
+        out.append((os.path.join(arc_dir, fn), page or ""))
+    return out
+
+
+def _extract_ref_text(raw: str) -> str:
+    """从混合稿件提取人工译文（去原文行/分隔线/页眉）。"""
+    lines = []
+    for ln in raw.splitlines():
+        s = ln.strip()
+        if not s or set(s) <= set("-=—―_ \t") or s.startswith("●"):
+            continue
+        k = sum(1 for c in s if "\u3040" <= c <= "\u30ff")
+        h = sum(1 for c in s if "\u4e00" <= c <= "\u9fff")
+        if k > 0 and k >= h:
+            continue
+        if h == 0 and k == 0:
+            continue
+        lines.append(s)
+    return "\n".join(lines)
+
+
+def cmd_refs_check(cfg: Config, args) -> None:
+    """对已有译文单独跑参考一致性校验：定位 → 重译 → 入 QA / 采集勘误。"""
+    from . import refs as refs_mod
+    from .crawler import decode_page
+
+    if getattr(args, "no_retry", False):
+        cfg.set(0, "refs", "auto_retry")
+    client = _client(cfg)
+    sm = planner.load_site_map(cfg)
+    plan = util.read_json(os.path.join(cfg.work_dir, "plan.json"), {})
+    state = tr.State(cfg)
+    guide = styles_mod.load_guide(cfg) if cfg.get("style", "rules_enabled", default=True) else ""
+    user_rules = tr.effective_user_rules(cfg)
+    focus = cfg.get("translators_notes", "focus", default="")
+
+    if args.pages:
+        pages = args.pages
+    elif args.all:
+        pages = list(state.data.get("done_pages", []))
+    else:
+        pages = _page_scope(cfg, args)
+    total_fixed = 0
+    for rel in pages:
+        ref_text = refs_mod.load_page(cfg, rel)
+        if not ref_text:
+            print(f"  跳过（无参考）: {rel}")
+            continue
+        html, _enc = decode_page(cfg, rel)
+        segs = seg_mod.segments_for_page(cfg, rel, html=html)
+        pstate = state.page(rel)
+        for s in segs:
+            sv = pstate.get("segments", {}).get(str(s.id))
+            if sv and sv.get("translation") is not None:
+                s.translation = sv["translation"]
+        if args.dry_run:
+            issues = refs_mod.check_page(cfg, rel, segs)
+            print(f"  {rel}: {len(issues)} 段与参考不一致")
+            for it in issues[:8]:
+                print(f"    段{it['sid']} ratio={it['score']}")
+            continue
+        n = tr._ref_check(cfg, client, rel, segs, state, [], sm, plan,
+                          guide, user_rules, focus, ref_text, "refs-check")
+        if n:
+            seg_mod.write_page_output(cfg, rel, seg_mod.reassemble(html, segs))
+        total_fixed += n
+        print(f"  {rel}: 修正 {n} 段")
+    state.save()
+    print(f"\n完成，共修正 {total_fixed} 段。")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="booktr", description="古早网站本地化翻译 agent")
 
@@ -2751,6 +2903,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-pause", action="store_true", help="遇到审核项不暂停")
     sp.add_argument("-v", "--verbose", action="store_true", default=None,
                     help="显示翻译进度详情（默认跟随 config verbose_translation）")
+    sp.add_argument("--no-refs", action="store_true",
+                    help="禁用参考译文参考层（本页有参考也不使用）")
     sp.set_defaults(func=cmd_translate)
 
     sp = mk("review", help="处理审核队列")
@@ -2886,6 +3040,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--state", action="store_true", help="重置翻译状态")
     sp.add_argument("--review", action="store_true", help="清理审核队列")
     sp.add_argument("--notes", action="store_true", help="清理翻译笔记")
+    sp.add_argument("--ref-corrections", action="store_true", help="清理参考勘误 sidecar")
     sp.add_argument("--output", action="store_true", help="清理输出目录")
     sp.add_argument("--reset", action="store_true", help="额外清理 plan.json 和 site_map.json")
     sp.add_argument("-y", "--yes", action="store_true", help="跳过交互确认")
@@ -2918,6 +3073,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--out", default=None, help="fix 输出目录（默认 <data_dir>/fix）")
     sp.add_argument("--dry-run", action="store_true", help="仅列出需修复文件，不输出")
     sp.set_defaults(func=cmd_fix)
+
+    sp = mk("refs", help="预处理人工参考译文目录 → work/refs（镜像结构）")
+    sp.add_argument("--from", dest="from_dir", default=None,
+                    help="源参考译文目录（默认 config.refs.dir）")
+    sp.add_argument("--out", default=None, help="规范化输出目录（默认 config.refs.store_dir）")
+    sp.add_argument("--legacy-archive", default=None,
+                    help="从 archive/forritz 兼容导迁（按名/日期自动映射到页面）")
+    sp.add_argument("--dry-run", action="store_true", help="仅预览映射，不写入")
+    sp.set_defaults(func=cmd_refs)
+
+    sp = mk("refs-check", help="对已有译文跑参考一致性校验（定位→重译→入QA/勘误）")
+    sp.add_argument("--pages", nargs="*", help="限定页面")
+    sp.add_argument("--all", action="store_true", help="处理所有已译页")
+    sp.add_argument("--start", type=int, default=None, help="按 plan.order 从第 N 篇开始")
+    sp.add_argument("--count", type=int, default=None, help="与 --start 搭配")
+    sp.add_argument("--no-retry", action="store_true", help="不自动重译，仅校验并（如需）入队")
+    sp.add_argument("--dry-run", action="store_true", help="仅列出不一致段")
+    sp.set_defaults(func=cmd_refs_check)
 
     return p
 

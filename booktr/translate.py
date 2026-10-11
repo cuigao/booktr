@@ -13,6 +13,7 @@ from . import llm as llm_mod
 from . import notes as notes_mod
 from . import phrases as phrases_mod
 from . import prompts
+from . import refs as refs_mod
 from . import segments as seg_mod
 from . import styles as styles_mod
 from . import tm as tm_mod
@@ -339,7 +340,7 @@ def _summarize_conversation(
 
 def _translate_chunk_with_repair_multi(
     cfg: Config, client, messages: list[dict], rel: str, sid: str, chk: str,
-    task_id: str = "", context_id: str = "",
+    task_id: str = "", context_id: str = "", tag: str = "",
 ) -> dict:
     """多轮对话模式翻译单个 chunk，带解析失败自愈与占位符校验。
 
@@ -347,7 +348,7 @@ def _translate_chunk_with_repair_multi(
     """
     max_repair = cfg.get("llm", "max_repair", default=3)
     temperature = cfg.get("llm", "temperature", default=0.3)
-    tag = f"translate_{rel.replace('/', '_')}"
+    tag = tag or f"translate_{rel.replace('/', '_')}"
 
     resp = ""
     for attempt in range(max_repair + 1):
@@ -560,6 +561,18 @@ def _build_retranslate_context(cfg: Config, rel: str, seg, segs: list,
     }
 
 
+def _ref_blocks(full_src: str, ref_text: str) -> str:
+    """整页原文 + 整页人工参考译文块（参考模式）。"""
+    parts = []
+    if full_src:
+        parts.append("## 本页完整原文（逐段，段序即阅读顺序）\n" + full_src)
+    if ref_text:
+        parts.append(
+            "## 本页参考译文（人工，仅供对应段落逐字采用；无对应者照常翻译）\n" + ref_text
+        )
+    return "\n\n".join(parts)
+
+
 def translate_page(
     cfg: Config,
     client,
@@ -570,6 +583,7 @@ def translate_page(
     review_queue: list[dict],
     interactive: bool = False,
     progress=None,
+    use_refs: bool | None = None,
 ) -> dict:
     """翻译单个页面（多轮对话模式）。返回 {status, segments_total, review_count}。"""
     _ev = lambda event, data: progress(event, data) if progress else None
@@ -586,6 +600,15 @@ def translate_page(
     total_chars = sum(len(s.text) for s in text_segs)
     _ev("plan", {"segments": len(text_segs), "total_chars": total_chars, "rel": rel})
 
+    # 参考译文模式：仅当本页存在人工参考译文时启用
+    ref_text = refs_mod.load_page(cfg, rel)
+    ref_mode = bool(ref_text) and (use_refs is not False)
+    ref_inject_glossary = bool(cfg.get("refs", "inject_glossary", default=False))
+    ref_inject_memory = bool(cfg.get("refs", "inject_memory", default=False))
+    full_src = ("\n".join(f"[{s.id}] {s.text}" for s in text_segs)
+                if ref_mode else "")
+
+
     page_ctx, prior_ctx, user_rules = build_context(cfg, site_map, plan, rel, client=client)
     guide = styles_mod.load_guide(cfg) if cfg.get("style", "rules_enabled", default=True) else ""
     focus = cfg.get("translators_notes", "focus", default="")
@@ -595,10 +618,12 @@ def translate_page(
     summary_on = cfg.get("llm", "summary_enabled", default=True)
 
     # 构建 system prompt（整页共享，仅含全局规则；词条推荐译法注入 user prompt）
-    sysp = prompts.build_translate_system(cfg, [], guide, user_rules, focus)
+    sysp = prompts.build_translate_system(cfg, [], guide, user_rules, focus,
+                                          ref_mode=ref_mode)
     # 重译专用 system（追加"重新翻译任务"规则；仅在被 reset 的段使用）
     sysp_rt = prompts.build_translate_system(cfg, [], guide, user_rules, focus,
-                                             is_retranslation=True)
+                                             is_retranslation=True,
+                                             ref_mode=ref_mode)
 
     result = {"status": "done", "skipped": False, "segments_total": len(segs), "review_count": 0}
 
@@ -646,6 +671,7 @@ def translate_page(
         skipped_phrases = []  # 短语记忆跳过的翻译，注入到下一条 user message
         seg_repaired = False
         seg_repair_methods: list[str] = []
+        seg_corrections: list[dict] = []  # 参考模式：本段 LLM 报出的参考勘误
 
         # 重新翻译模式：构建上下文窗口 + 新对话（仅 review 删除的段）
         retranslate_context = None
@@ -664,7 +690,7 @@ def translate_page(
         for chk in chunks:
             chk_plain = re.sub(r"\[\[P\d+\]\]", "", chk).strip()
 
-            # 1. 词汇表 read_only 条目 → 机械替换
+            # 1. 词汇表 read_only 条目 → 机械替换（导航/站点固定语；参考模式亦保留）
             gl_hit = gl.lookup_read_only(cfg, chk_plain)
             if gl_hit:
                 restored = _restore_placeholders_from_src(chk, gl_hit)
@@ -675,8 +701,8 @@ def translate_page(
                 history_count += 1
                 continue
 
-            # 2. 短语记忆 → 机械替换
-            ph_hit = phrases_mod.lookup(cfg, chk_plain)
+            # 2. 短语记忆 → 机械替换（参考模式跳过）
+            ph_hit = None if ref_mode else phrases_mod.lookup(cfg, chk_plain)
             if ph_hit:
                 restored = _restore_placeholders_from_src(chk, ph_hit)
                 translated_chunks.append(restored)
@@ -687,14 +713,19 @@ def translate_page(
                 continue
 
             # 3. 检索相关条目 + 构建推荐译法（注入 user prompt，而非 system）
-            gl_items = gl.relevant(cfg, chk)  # 词汇表相关（含 read_only）
-            ph_items = phrases_mod.relevant(cfg, chk)  # 短语记忆相关
+            #    参考模式默认不注入词表/记忆（避免与人工参考冲突）
+            if ref_mode and not ref_inject_glossary:
+                gl_items, ph_items = [], []
+            else:
+                gl_items = gl.relevant(cfg, chk)  # 词汇表相关（含 read_only）
+                ph_items = phrases_mod.relevant(cfg, chk)  # 短语记忆相关
             all_injections = gl_items + ph_items
             term_hints = prompts.format_term_hints(all_injections) if all_injections else ""
 
-            tm_hits = tm_mod.lookup(cfg, chk) if tm_on else []
-            ex_refs = styles_mod.retrieve_exemplars(cfg, chk) if exemplar_on else []
-            notes_ctx = build_translation_context(cfg, rel, chk, page_ctx)
+            use_mem = not ref_mode or ref_inject_memory
+            tm_hits = tm_mod.lookup(cfg, chk) if (tm_on and use_mem) else []
+            ex_refs = styles_mod.retrieve_exemplars(cfg, chk) if (exemplar_on and use_mem) else []
+            notes_ctx = build_translation_context(cfg, rel, chk, page_ctx) if use_mem else ""
             chk_prior = prior_ctx
             if notes_ctx:
                 chk_prior = (chk_prior + "\n\n## 相关笔记\n" + notes_ctx).strip()
@@ -712,6 +743,14 @@ def translate_page(
                         "exemplars": ex_refs,
                     })
                     usr = prompts.build_retranslate_user(cfg, chk, rt_ctx)
+                    if ref_mode:
+                        usr = _ref_blocks(full_src, ref_text) + "\n\n" + usr
+                elif ref_mode:
+                    usr = prompts.build_translate_user_first_ref(
+                        cfg, chk, full_src, ref_text, page_ctx, chk_prior,
+                        ex_refs, tm_hits, summary=conversation_summary,
+                        term_hints=term_hints,
+                    )
                 else:
                     usr = prompts.build_translate_user_first(
                         cfg, chk, page_ctx, chk_prior, ex_refs, tm_hits,
@@ -789,6 +828,9 @@ def translate_page(
             for note in data.get("notes", []) or []:
                 if isinstance(note, str) and note.strip():
                     collected_notes.append(note)
+            for c in data.get("corrections", []) or []:
+                if isinstance(c, dict) and (c.get("ref_err") or c.get("corrected")):
+                    seg_corrections.append(c)
             for c in data.get("glossary_conflicts", []) or []:
                 if isinstance(c, str) and c.strip():
                     review_queue.append(
@@ -833,6 +875,10 @@ def translate_page(
         if seg_repaired:
             seg_state["repaired"] = True
             seg_state["repair_methods"] = list(seg_repair_methods)
+        if ref_mode:
+            refs_mod.supersede_segment(cfg, rel, sid)  # 覆盖前把旧勘误标 superseded
+            if seg_corrections:
+                refs_mod.record_corrections(cfg, rel, sid, seg_corrections, op_id=op_id)
         committed_sids.append(sid)
         if needs_human:
             result["review_count"] += 1
@@ -956,6 +1002,20 @@ def translate_page(
         else:
             pstate["status"] = STATUS["done"]
 
+    # ── 参考一致性校验：定位 → 自动重译 → 入 QA 队列 → 采集勘误 ──
+    if ref_mode:
+        n_fixed = _ref_check(cfg, client, rel, segs, state, review_queue,
+                             site_map, plan, guide, user_rules, focus, ref_text, op_id)
+        if n_fixed:
+            result["review_count"] = sum(
+                1 for sv in pstate.get("segments", {}).values() if sv.get("needs_human"))
+            pstate["status"] = (STATUS["review"] if result["review_count"] > 0
+                                else STATUS["done"])
+
+    # ── 参考末尾彩蛋/注释兜底：附到最后一个正文段 ──
+    if ref_mode:
+        _append_ref_tail(cfg, rel, segs, state)
+
     _save_segment_index(cfg, rel, segs)
 
     # 提交本次翻译的段版本（段缓存已写，快照完整；同一页面翻译共享 op_id）
@@ -1045,6 +1105,122 @@ def apply_qa_fix(cfg: Config, client, rel: str, sid: str, opinions: list[dict],
     out_html = seg_mod.reassemble(html, segs)
     seg_mod.write_page_output(cfg, rel, out_html)
     return {"ok": True, "sid": sid, "translation": new_t}
+
+
+def _ref_check(cfg, client, rel, segs, state, review_queue, site_map, plan,
+               guide, user_rules, focus, ref_text, op_id) -> int:
+    """参考一致性校验：不达标段 → 自动重译 ≤auto_retry → 复检 → 入 QA 队列/采集勘误。
+
+    仅更新 seg.translation 与 state（最终 reassemble 由调用方完成）。返回成功修正段数。
+    """
+    from . import qa_queue as qq
+
+    corr_map: dict[str, list[dict]] = {}
+    for c in refs_mod.active_corrections(cfg, rel):
+        corr_map.setdefault(str(c.get("segment_id")), []).append(c)
+    issues = refs_mod.check_page(cfg, rel, segs, corrections=corr_map)
+    if not issues:
+        return 0
+    attempts = max(0, int(cfg.get("refs", "auto_retry", default=1)))
+    enqueue = bool(cfg.get("refs", "enqueue_qa", default=True))
+    tm_on = cfg.get("tm", "enabled", default=True)
+    pstate = state.page(rel)
+    seg_by_id = {str(getattr(s, "id", "")): s for s in segs}
+    tag = "refsfix_" + rel.replace("/", "_")
+    fixed = 0
+    for it in issues:
+        if not it.get("covered", True):
+            continue  # 参考未覆盖该段（非不一致）
+        sid = it["sid"]
+        if corr_map.get(str(sid)):
+            continue  # 该段已有 active 纠错 → 视为已处理，避免 ref-fix 循环
+        seg = seg_by_id.get(str(sid))
+        if seg is None:
+            continue
+        ok = False
+        data: dict = {}
+        for _ in range(attempts):
+            ctx = _build_retranslate_context(cfg, rel, seg, segs, state, site_map, plan)
+            ctx.update({"term_hints": "", "tm_hits": [], "exemplars": []})
+            sysp = prompts.build_translate_system(cfg, [], guide, user_rules, focus,
+                                                  is_retranslation=True, ref_mode=True)
+            usr = prompts.build_ref_fix_user(cfg, seg.text, seg.translation,
+                                             it["fragment"], it["diff"], ctx)
+            conv = [{"role": "system", "content": sysp},
+                    {"role": "user", "content": usr}]
+            try:
+                data = _translate_chunk_with_repair_multi(
+                    cfg, client, conv, rel, sid, seg.text,
+                    task_id=f"tsk_ref_{sid}", context_id=f"ctx_ref_{sid}", tag=tag)
+            except llm_mod.LLMError:
+                data = {}
+            new_t = (data.get("translation") or "").strip()
+            if not new_t or _check_placeholders(seg.text, new_t):
+                continue
+            old_t = seg.translation
+            seg.translation = new_t
+            if not refs_mod.check_page(cfg, rel, [seg], corrections=corr_map):
+                ok = True
+                break
+            seg.translation = old_t
+        if not ok:
+            if enqueue:
+                sid_int = int(sid) if str(sid).isdigit() else sid
+                qq.append_items(cfg, [qq.make_item(rel, {
+                    "segments": [sid_int],
+                    "severity": "high",
+                    "reason": "参考译文不一致",
+                    "src_quote": (getattr(seg, "text", "") or "")[:120],
+                    "dst_quote": (getattr(seg, "translation", "") or "")[:120],
+                    "suggestion": (it.get("fragment") or "")[:200],
+                })])
+            continue
+        tm_mod.purge_segments(cfg, rel, [sid])
+        notes_mod.purge_segments(cfg, rel, [sid])
+        if tm_on and util.normalize_ws(new_t) != util.normalize_ws(seg.text):
+            tm_mod.add(cfg, seg.text, new_t, rel, seg.id)
+        phrases_mod.purge_for_segment(cfg, seg.text, seg.translation or "", new_t)
+        phrases_mod.learn(cfg, seg.text, new_t)
+        seg.translation = new_t
+        st = pstate.setdefault("segments", {}).setdefault(str(sid), {})
+        st["translation"] = new_t
+        st["confidence"] = float(data.get("confidence") or 0.9)
+        st["needs_human"] = False
+        st["untrusted"] = False
+        refs_mod.supersede_segment(cfg, rel, sid)
+        cors = [c for c in (data.get("corrections") or []) if isinstance(c, dict)]
+        if cors:
+            refs_mod.record_corrections(cfg, rel, sid, cors, op_id=op_id)
+        hist_mod.commit(cfg, rel, str(sid), "refs-fix",
+                        hist_mod.new_op_id("refs-fix"), state=state)
+        fixed += 1
+    return fixed
+
+
+def _append_ref_tail(cfg, rel, segs, state) -> int:
+    """把参考末尾未被任何段采用的彩蛋/注释块附到最后一个正文段（确定性兜底）。"""
+    if not cfg.get("refs", "preserve_tail", default=True):
+        return 0
+    tail = refs_mod.trailing_orphan(cfg, rel, segs)
+    if not tail:
+        return 0
+    target = None
+    for s in segs:
+        if getattr(s, "kind", "") != "text":
+            continue
+        t = getattr(s, "translation", None)
+        if not t or not t.strip():
+            continue
+        # 跳过机械替换的导航/站点固定语
+        if gl.lookup_read_only(cfg, refs_mod.strip_placeholders(getattr(s, "text", "") or "").strip()):
+            continue
+        target = s
+    if target is None or tail in (target.translation or ""):
+        return 0
+    target.translation = (target.translation or "").rstrip() + "\n\n" + tail
+    st = state.page(rel).setdefault("segments", {}).setdefault(str(target.id), {})
+    st["translation"] = target.translation
+    return 1
 
 
 def _make_review(cfg, rel, sid, src_text, reason, detail) -> dict:
