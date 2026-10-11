@@ -36,6 +36,27 @@ def test_canon():
     assert refs.canon("[[P0]]你 好[[P1]]") == "你好"
 
 
+def test_canon_collapses_decorations():
+    assert refs.canon("正文------结尾") == "正文-结尾"
+    assert refs.canon("————————") == "-"
+    assert refs.canon("========") == "="
+    assert refs.canon("＿＿＿＿") == "_"
+    assert refs.canon("********") == "*"
+    assert refs.canon("-=") == "-="          # 不同族不互相折叠
+    assert refs.canon("---===") == "-="
+
+
+def test_trailing_orphan_skips_separator(tmp_cfg):
+    _write_ref(tmp_cfg, "p5.html", "正文第一句。\n正文第二句。\n【彩蛋】\n地址说明。\n------")
+    segs = [
+        Segment(1, "text", 0, 0, text="a", translation="正文第一句。"),
+        Segment(2, "text", 0, 0, text="b", translation="正文第二句。"),
+    ]
+    tail = refs.trailing_orphan(tmp_cfg, "p5.html", segs)
+    assert tail.startswith("【彩蛋】") and "地址说明" in tail
+    assert not tail.rstrip().endswith("-")   # 尾部分隔行不并入
+
+
 def test_locate_exact_and_fuzzy():
     ref = "今天天气很好。明天可能会下雨。后天放晴。"
     loc = refs.locate_fragment(ref, "明天可能会下雨")

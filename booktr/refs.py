@@ -42,13 +42,33 @@ _PUNCT_MAP = (
 )
 
 
+_DECOR_RE = (
+    (re.compile(r"[-\u2013\u2014\u2015\u2500]{2,}"), "-"),     # 破折/横线
+    (re.compile(r"[=\uff1d]{2,}"), "="),                       # 等号
+    (re.compile(r"[_\uff3f]{2,}"), "_"),                       # 下划线
+    (re.compile(r"[*\uff0a]{2,}"), "*"),                       # 星号
+    (re.compile(r"[\u30fb\u2027]{2,}"), "\u30fb"),            # 中点 ・ ‥
+    (re.compile(r"[\u2026.\uff0e]{2,}"), "..."),               # 省略号
+)
+
+
 def canon(text: str) -> str:
-    """比对用归一化（**不改输出**）：去占位符 → NFKC 全半角 → 标点统一 → 折叠空白。"""
+    """比对用归一化（**不改输出**）：去占位符 → NFKC 全半角 → 标点统一 → 装饰串折叠 → 折叠空白。"""
     t = strip_placeholders(text or "")
     t = unicodedata.normalize("NFKC", t)
     for a, b in _PUNCT_MAP:
         t = t.replace(a, b)
+    for rx, rep in _DECOR_RE:
+        t = rx.sub(rep, t)
     return re.sub(r"[\s\u3000]+", "", t)
+
+
+def _is_blank_like(line: str) -> bool:
+    """空行，或仅由装饰符组成的行（如 `------`、`====`）。"""
+    if not line.strip():
+        return True
+    c = canon(line)
+    return bool(re.fullmatch(r"[-=_*\u30fb\u2026.]+", c))
 
 
 def similarity(a: str, b: str, metric: str = "ratio") -> float:
@@ -281,7 +301,7 @@ def trailing_orphan(cfg: Config, rel: str, segs: list) -> str:
                 covered.add(line_of[i])
     tail: list[str] = []
     for ln in range(len(lines) - 1, -1, -1):
-        if not lines[ln].strip():
+        if _is_blank_like(lines[ln]):
             if tail:
                 tail.append(lines[ln])
             continue
