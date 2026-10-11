@@ -65,6 +65,26 @@ def make_item(page: str, issue: dict, origin: dict | None = None) -> dict:
     return item
 
 
+def make_human_item(page: str, src_quote: str = "", dst_quote: str = "",
+                    reason: str = "", suggestion: str = "", severity: str = "high",
+                    segments=None, adopt: bool = False) -> dict:
+    """构造人工新增的 QA 条目（source=human）。segments 非空即 resolved。"""
+    segs = list(segments or [])
+    item = make_item(page, {
+        "segments": segs,
+        "resolved": bool(segs),
+        "severity": severity or "high",
+        "reason": reason,
+        "src_quote": src_quote,
+        "dst_quote": dst_quote,
+        "suggestion": suggestion,
+    }, origin={"source": "human"})
+    item["source"] = "human"
+    if adopt:
+        item["status"] = STATUS_ADOPTED
+    return item
+
+
 def append_items(cfg: Config, items: list[dict]) -> int:
     """把新条目并入队列（按 id 去重，已存在则保留原状态）。返回新增条数。"""
     queue = load(cfg)

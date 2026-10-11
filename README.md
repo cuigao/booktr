@@ -116,6 +116,7 @@ python booktr-cli.py qa-status --pending-only  # 只列未 QA 的页
 python booktr-cli.py qa-clear                  # 移除队列中的 open 条目（先预览、同目录备份 <ts>.bak）
 python booktr-cli.py qa-clear --dry-run        # 仅预览
 python booktr-cli.py qa-clear --status all     # 清空整个队列（默认仅 open；--page 可限页）
+python booktr-cli.py qa-add --page today/today35.html --src "原文片段" --reason "漏译" --suggestion "建议译文"   # 人工新增 QA 条目（缺 --page 进入交互）；随后 qa-review / qa-apply
 
 # 10b-2) 监督式自动 QA（qa → 判官裁定 → 自动定点重译，全自动闭环）
 python booktr-cli.py qa-auto                          # 默认：处理所有【未 QA】的已译页（可续跑）
@@ -373,6 +374,7 @@ python booktr-cli.py fix --all              # 复制全部文件，fix 目录可
 
 QA 只发现问题，纠正走"人工裁定 + 定点重译"闭环：
 
+0. `qa-add`：**人工新增 QA 条目**——人工查阅时发现不完善处，用"引文 + 原因"引导 LLM 重译。`qa-add --page <rel> --src <原文片段> --dst <译文片段> --reason <原因> --suggestion <建议> [--severity high|mid|low] [--segment N…] [--adopt]`；缺 `--page` 进入**交互模式**（先列出已译页）。用 `qa.locate_segments` **机械定位**段（`--segment` 可强制指定），未定位则 `resolved=false` 保留；条目 `source=human`（`qa-review` 显示 `[人工]`）、按 id **去重**；默认 `open`，`--adopt` 直接标 `adopted`（随后 `qa-apply` 定点重译）。`--dry-run` 仅预览。
 1. `qa-review`：逐条检阅（严重度/原因/相关原文/现有译文/建议，并展示定位段的**完整原文+现译+前后文**）。操作 `[a]采纳` `[e]自定义意见` `[r]拒绝` `[m]手工指定段号` `[d]丢弃` `[s]跳过` `[q]退出`。**未定位**（`resolved=false`）的条目会提示，须 `[m]` 指定段号或 `[d]` 丢弃（保留在队列直至手动处理）。
    - `[e]自定义意见`：LLM 检出问题但不满意其提案时，人工输入**建议译文/说明**覆盖有效字段 `suggestion`/`reason`，原 LLM 值归档到 `llm_suggestion`/`llm_reason`（**仅留档，后续 `qa-apply` 不再引用**），标记来源 `source=human` 后采纳。字段级输入：**回车=沿用 LLM 原值**、**`-`=清空该字段**、其它文本=覆盖；两字段均回车视为无变化，取消 `[e]`、不采纳（如需直接采纳 LLM 建议用 `[a]`）。人工建议仍作为提示交 LLM 重译（非逐字硬写）。
 2. `qa-apply`：对 `adopted` 条目按 `(页面, 段)` 分组、合并同段意见，逐段定点重译——在基础重译上下文之上，追加 **QA 意见 + 现有译文**，并提示"在此基础上修正、其余尽量保持不变"。重译前清理该段旧 TM/notes、成功后写入新 TM（与 `reset` 一致，避免自我锚定），同步更新 state/段缓存并重生成 out，条目标记 `applied`。`--dry-run` 仅列出将修正的段。

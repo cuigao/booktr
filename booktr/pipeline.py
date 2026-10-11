@@ -1269,6 +1269,80 @@ def cmd_qa_clear(cfg: Config, args) -> None:
         print(f"已备份 → {bak}")
 
 
+def cmd_qa_add(cfg: Config, args) -> None:
+    """人工新增 QA 条目：指定页面/引文/原因，机械定位到段，引导定点重译。"""
+    from . import qa_queue as qa_queue_mod
+
+    interactive = not args.page
+    page = args.page
+    if interactive:
+        done = list(tr.State(cfg).data.get("done_pages", []))
+        if done:
+            print("已译页（供参考）：")
+            for p in done[:40]:
+                print(f"  {p}")
+            if len(done) > 40:
+                print(f"  ...（共 {len(done)} 页）")
+        page = input("页面路径（如 today/today35.html）: ").strip()
+    if not page:
+        print("未指定页面。")
+        return
+
+    def _field(name, val):
+        if val is not None:
+            return val
+        return input(f"{name}: ").strip() if interactive else ""
+
+    src = _field("原文片段（用于定位，可留空）", args.src)
+    dst = _field("现译文片段（用于定位，可留空）", args.dst)
+    reason = _field("原因", args.reason)
+    suggestion = _field("建议译文/修改方向（可留空）", args.suggestion)
+    severity = args.severity or "high"
+    if interactive and not args.severity:
+        v = input("严重度 [high/mid/low]（默认 high）: ").strip()
+        if v in ("high", "mid", "low"):
+            severity = v
+
+    force = list(args.segment or [])
+    if force:
+        sids = force
+    else:
+        try:
+            segs = seg_mod.segments_for_page(cfg, page)
+        except Exception:
+            segs = []
+        sids = qa.locate_segments(segs, src, dst) if (segs and (src or dst)) else []
+    resolved = bool(sids)
+
+    print("\n将新增 QA 条目：")
+    print(f"  页面: {page}")
+    print(f"  段: {sids if sids else '（未定位，resolved=false；可 --segment 指定或 qa-review [m]）'}")
+    print(f"  严重度: {severity}")
+    print(f"  原因: {reason}")
+    print(f"  原文片段: {src}")
+    print(f"  译文片段: {dst}")
+    print(f"  建议: {suggestion}")
+    print(f"  状态: {'adopted' if args.adopt else 'open'}")
+    if sids:
+        qa_queue_mod._show_segment_context(cfg, page, sids)
+
+    if args.dry_run:
+        print("（--dry-run，未写入）")
+        return
+    if not args.yes:
+        if input("确认新增？[y/N] ").strip().lower() not in ("y", "yes"):
+            print("已取消。")
+            return
+
+    item = qa_queue_mod.make_human_item(
+        page, src, dst, reason, suggestion, severity, sids, adopt=args.adopt)
+    n = qa_queue_mod.append_items(cfg, [item])
+    if n:
+        print(f"已新增 1 条（id={item['id']}）。→ 可 `qa-review` 裁定，或 `qa-apply` 直接定点重译。")
+    else:
+        print(f"已存在相同条目（id={item['id']}），未重复添加。")
+
+
 def cmd_qa_apply(cfg: Config, args) -> None:
     """对已采纳（adopted）的 QA 意见批量定点重译。"""
     from . import qa_queue as qa_queue_mod
@@ -2993,6 +3067,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", help="仅预览，不改动")
     sp.add_argument("-y", "--yes", action="store_true", help="跳过确认")
     sp.set_defaults(func=cmd_qa_clear)
+
+    sp = mk("qa-add", help="人工新增 QA 条目（页/引文/原因 → 引导定点重译）")
+    sp.add_argument("--page", default=None, help="页面路径（缺省进入交互模式）")
+    sp.add_argument("--src", default=None, help="原文片段（用于定位段）")
+    sp.add_argument("--dst", default=None, help="现有译文片段（用于定位段）")
+    sp.add_argument("--reason", default=None, help="问题原因")
+    sp.add_argument("--suggestion", default=None, help="建议译文/修改方向")
+    sp.add_argument("--severity", default=None, choices=["high", "mid", "low"],
+                    help="严重度（默认 high）")
+    sp.add_argument("--segment", type=int, nargs="*", default=None,
+                    help="强制指定段号（跳过机械定位）")
+    sp.add_argument("--adopt", action="store_true", help="直接标记 adopted（可立即 qa-apply）")
+    sp.add_argument("--dry-run", action="store_true", help="仅预览，不写入")
+    sp.add_argument("-y", "--yes", action="store_true", help="跳过确认")
+    sp.set_defaults(func=cmd_qa_add)
 
     sp = mk("qa-apply", help="对已采纳的 QA 意见批量定点重译")
     sp.add_argument("--page", default=None, help="限定页面")
