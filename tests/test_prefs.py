@@ -183,7 +183,7 @@ def test_init_clone_inherits_config_and_data(tmp_path, monkeypatch):
     clone = _make_clone_source(tmp_path, monkeypatch)
     # 源目录/输出/工作/源语言/目标语言/风格(2=上海话)/provider(回车=openai-compatible)
     # base_url/model 回车 + API key 回车（保留）、N1..N3、其余开关回车
-    answers = ["", "", "", "", "", "4", "", "", "", "", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "4", "", "", "", "", "", "", "", "", "", ""]
     saved = _run_init(tmp_path, monkeypatch, answers, None, clone=clone)
     # 继承自 clone
     assert saved["llm"]["model"] == "deepseek-v4.1-flash:cloud"
@@ -203,12 +203,27 @@ def test_init_clone_inherits_config_and_data(tmp_path, monkeypatch):
 def test_init_clone_source_dir_recomputed(tmp_path, monkeypatch):
     """--clone：仅 source_dir 按新数据根重算（同深度=不变），output/work 保持。"""
     clone = _make_clone_source(tmp_path, monkeypatch)
-    answers = ["", "", "", "", "", "1", "", "", "", "", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "1", "", "", "", "", "", "", "", "", "", ""]
     saved = _run_init(tmp_path, monkeypatch, answers, None, clone=clone)
     # tmp_path 下 clone 与 inst_* 同深度 → 相对路径不变
     assert saved["source_dir"] == "../../love.life.coocan.jp"
     assert saved["output_dir"] == "out"
     assert saved["work_dir"] == "work"
+
+
+def test_init_refs_dir_prompt(tmp_path, monkeypatch):
+    """init 询问参考译文目录并写入 refs.dir。"""
+    # 源/输出/工作/源语言/目标语言/参考译文目录/风格/provider...
+    answers = ["", "", "", "", "", "../../forritz", "1", "2", "", "", "", "", "", "", "", "", "", ""]
+    saved = _run_init(tmp_path, monkeypatch, answers, None)
+    assert saved["refs"]["dir"] == "../../forritz"
+
+
+def test_init_refs_dir_blank_disabled(tmp_path, monkeypatch):
+    """留空 → refs.dir 为空（禁用参考层）。"""
+    answers = ["" for _ in range(20)]
+    saved = _run_init(tmp_path, monkeypatch, answers, None)
+    assert saved["refs"]["dir"] == ""
 
 
 def test_init_clone_with_prefs_overrides_glossary(tmp_path, monkeypatch):
@@ -220,7 +235,7 @@ def test_init_clone_with_prefs_overrides_glossary(tmp_path, monkeypatch):
         "glossary": [{"src": "P", "dst": "Pee", "category": "term", "status": "confirmed"}],
         "style_refs": [],
     }, ensure_ascii=False), encoding="utf-8")
-    answers = ["", "", "", "", "", "1", "", "", "", "", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "1", "", "", "", "", "", "", "", "", "", ""]
     saved = _run_init(tmp_path, monkeypatch, answers, pref, clone=clone)
     assert saved["user_rules"] == "覆盖规则"  # prefs 的 rules 作为风格基础
     inst = clone.parent / ("inst_" + str(abs(hash(str(answers) + str(pref) + str(clone)))))
@@ -235,7 +250,7 @@ def test_init_prefs_then_style_appends(tmp_path, monkeypatch):
         "version": 1, "user_rules": "偏好基础规则", "glossary": [], "style_refs": [],
     }, ensure_ascii=False), encoding="utf-8")
     # 输入顺序：源目录/输出/工作/源语言/目标语言/风格(4=上海话)/provider(1=mock)... 
-    answers = ["", "", "", "", "", "4", "1"]
+    answers = ["", "", "", "", "", "", "4", "1"]
     saved = _run_init(tmp_path, monkeypatch, answers, pref)
     assert "偏好基础规则" in saved["user_rules"]
     assert "## 翻译风格：上海话" in saved["user_rules"]
@@ -252,7 +267,7 @@ def test_init_prefs_with_dialect_replaced(tmp_path, monkeypatch):
         "user_rules": "基础规则\n\n## 翻译风格：上海话\n- 旧方言块",
         "glossary": [], "style_refs": [],
     }, ensure_ascii=False), encoding="utf-8")
-    answers = ["", "", "", "", "", "4", "1"]
+    answers = ["", "", "", "", "", "", "4", "1"]
     saved = _run_init(tmp_path, monkeypatch, answers, pref)
     assert saved["user_rules"].count("## 翻译风格：上海话") == 1
     assert "旧方言块" not in saved["user_rules"]
@@ -266,7 +281,7 @@ def test_init_prefs_standard_strips_rules(tmp_path, monkeypatch):
     pref.write_text(json.dumps({
         "version": 1, "user_rules": rules, "glossary": [], "style_refs": [],
     }, ensure_ascii=False), encoding="utf-8")
-    answers = ["", "", "", "", "", "1", "1"]  # 1 = 标准
+    answers = ["", "", "", "", "", "", "1", "1"]  # 1 = 标准
     saved = _run_init(tmp_path, monkeypatch, answers, pref)
     assert saved["user_rules"] == "基础规则"
 
@@ -287,7 +302,7 @@ def test_init_clone_switch_style_strips_old(tmp_path, monkeypatch):
     clone = _make_clone_source(
         tmp_path, monkeypatch,
         user_rules="基础规则CLONE\n\n## 翻译风格：流畅优先\n- 旧流畅块")
-    answers = ["", "", "", "", "", "2", "", "", "", "", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "2", "", "", "", "", "", "", "", "", "", ""]
     saved = _run_init(tmp_path, monkeypatch, answers, None, clone=clone)
     assert "翻译风格：忠实优先" in saved["user_rules"]
     assert "翻译风格：流畅优先" not in saved["user_rules"]
@@ -298,7 +313,7 @@ def test_init_key_mode_plain_default_blank(tmp_path, monkeypatch):
     """直接 init：模式默认「明文」，明文留空 → 无需 key。"""
     # 顺序：源/输出/工作/源语言/目标语言/风格(1)/provider(2=openai-compatible)
     #       base_url/model + 模式(回车=plain) + key(留空)
-    answers = ["", "", "", "", "", "1", "2", "", "", "", "", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "1", "2", "", "", "", "", "", "", "", "", "", ""]
     saved = _run_init(tmp_path, monkeypatch, answers, None)
     assert saved["llm"]["api_key"] == ""
     assert saved["llm"]["api_key_required"] is False
@@ -306,7 +321,7 @@ def test_init_key_mode_plain_default_blank(tmp_path, monkeypatch):
 
 def test_init_key_mode_plain_writes_key(tmp_path, monkeypatch):
     """直接 init：明文模式输入 key → 写入 config 且 required=true。"""
-    answers = ["", "", "", "", "", "1", "2", "", "", "", "MYKEY", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "1", "2", "", "", "", "MYKEY", "", "", "", "", "", ""]
     saved = _run_init(tmp_path, monkeypatch, answers, None)
     assert saved["llm"]["api_key"] == "MYKEY"
     assert saved["llm"]["api_key_required"] is True
@@ -315,7 +330,7 @@ def test_init_key_mode_plain_writes_key(tmp_path, monkeypatch):
 def test_init_key_mode_env_default_name(tmp_path, monkeypatch):
     """直接 init：env 模式 + 名留空 → 默认 BOOKTR_API_KEY。"""
     # 模式选 2（环境变量） + 名留空
-    answers = ["", "", "", "", "", "1", "2", "", "", "2", "", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "1", "2", "", "", "2", "", "", "", "", "", "", ""]
     saved = _run_init(tmp_path, monkeypatch, answers, None)
     assert saved["llm"]["api_key"] == ""
     assert saved["llm"]["api_key_env"] == "BOOKTR_API_KEY"
@@ -324,7 +339,7 @@ def test_init_key_mode_env_default_name(tmp_path, monkeypatch):
 
 def test_init_key_mode_env_custom_name(tmp_path, monkeypatch):
     """直接 init：env 模式 + 自定义名。"""
-    answers = ["", "", "", "", "", "1", "2", "", "", "2", "MY_KEY_ENV", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "1", "2", "", "", "2", "MY_KEY_ENV", "", "", "", "", "", ""]
     saved = _run_init(tmp_path, monkeypatch, answers, None)
     assert saved["llm"]["api_key_env"] == "MY_KEY_ENV"
     assert saved["llm"]["api_key_required"] is True
@@ -332,7 +347,7 @@ def test_init_key_mode_env_custom_name(tmp_path, monkeypatch):
 
 def test_init_key_mode_none(tmp_path, monkeypatch):
     """直接 init：无需 key 模式 → required=false。"""
-    answers = ["", "", "", "", "", "1", "2", "", "", "3", "", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "1", "2", "", "", "3", "", "", "", "", "", "", ""]
     saved = _run_init(tmp_path, monkeypatch, answers, None)
     assert saved["llm"]["api_key"] == ""
     assert saved["llm"]["api_key_required"] is False
@@ -343,7 +358,7 @@ def test_init_clone_key_mode_mirrors_env_source(tmp_path, monkeypatch):
     clone = _make_clone_source(tmp_path, monkeypatch, key_mode="env")
     # 源/输出/工作/源语言/目标语言/风格(1)/provider(回车=openai-compatible)
     # base_url/model 回车 + 模式(回车=env) + env 名(回车=继承 CLONE_KEY_ENV)
-    answers = ["", "", "", "", "", "1", "", "", "", "", "", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "1", "", "", "", "", "", "", "", "", "", "", ""]
     saved = _run_init(tmp_path, monkeypatch, answers, None, clone=clone)
     assert saved["llm"]["api_key"] == ""
     assert saved["llm"]["api_key_env"] == "CLONE_KEY_ENV"
@@ -353,7 +368,7 @@ def test_init_clone_key_mode_mirrors_env_source(tmp_path, monkeypatch):
 def test_init_clone_key_mode_mirrors_plain_source(tmp_path, monkeypatch):
     """--clone 源为明文 → 模式回车默认明文，回车保留源 key。"""
     clone = _make_clone_source(tmp_path, monkeypatch, key_mode="plain")
-    answers = ["", "", "", "", "", "1", "", "", "", "", "", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "1", "", "", "", "", "", "", "", "", "", "", ""]
     saved = _run_init(tmp_path, monkeypatch, answers, None, clone=clone)
     assert saved["llm"]["api_key"] == "SECRET"
     assert saved["llm"]["api_key_required"] is True

@@ -280,6 +280,18 @@ def cmd_init(cfg: Config, args) -> None:
     data["lang"]["source"] = _select_lang("源语言", str(data.get("lang", {}).get("source", "ja")))
     data["lang"]["target"] = _select_lang("目标语言", str(data.get("lang", {}).get("target", "zh-Hans")))
 
+    print("\n-- 参考译文 --")
+    print("  （人工参考译文目录：镜像站点结构、纯译文 .txt，如 forritz/today/today1.txt；留空则禁用）")
+    refs = data.setdefault("refs", {})
+    refs_default = str(refs.get("dir", "") or "")
+    if clone_dir and refs_default and not os.path.isabs(refs_default):
+        try:
+            abs_refs = os.path.normpath(os.path.join(clone_dir, refs_default))
+            refs_default = os.path.relpath(abs_refs, cfg.data_dir).replace(os.sep, "/")
+        except ValueError:
+            pass  # 跨盘符等无法计算相对路径时，保留原值
+    refs["dir"] = _prompt("参考译文目录", refs_default)
+
     print("\n-- 翻译风格 --")
     print("  （写入 user_rules 实现风格化译文；预设可扩展）")
     # 偏好文件先于风格载入：其 user_rules 作为风格追加的基础
