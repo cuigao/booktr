@@ -120,7 +120,6 @@ def test_host_injected_into_frameset(tmp_path):
 
 
 def test_dry_run_no_side_effects(tmp_path):
-    # 构造最小 out 与注
     outdir = tmp_path / "out"
     outdir.mkdir()
     (outdir / "a.html").write_text(HTML, encoding="utf-8")
@@ -138,3 +137,38 @@ def test_dry_run_no_side_effects(tmp_path):
     assert not target.exists()
     # 源 out 未变
     assert (outdir / "a.html").read_text(encoding="utf-8") == HTML
+
+
+# ── 勘误卡片差异高亮 ────────────────────────────────────────────────────
+
+
+def test_diff_html_replace_marks_del_ins():
+    h = ann._diff_html("用巧克力机淋上去", "蘸上液态巧克力")
+    assert '<del class="booktr-del">' in h
+    assert '<ins class="booktr-ins">' in h
+
+
+def test_diff_html_identical_is_empty():
+    assert ann._diff_html("完全相同的一句话", "完全相同的一句话") == ""
+    # 仅空白差异（plain 折叠空白）也视为无实质差异
+    assert ann._diff_html("11月 26日", "11月26日") == ""
+
+
+def test_diff_html_escapes_markup():
+    h = ann._diff_html('a<b>&"c', 'aXb>&"c')
+    assert "<b>" not in h
+    assert "&lt;" in h and "&amp;" in h and "&quot;" in h
+
+
+def test_render_correction_card_carries_diff_html():
+    import json
+    import re
+    note = _note(
+        "Libretto", type="参考勘误", content="参考译文此处有误，已修正：",
+        diff_html=ann._diff_html("旧说法", "新说法"))
+    out, _ = ann.render_page(HTML, "a.html", [note], _cfg())
+    data = json.loads(re.search(r'id="booktr-data">(.*?)</script>', out, re.S).group(1))
+    dh = data[0]["diff_html"]
+    assert "booktr-del" in dh and "booktr-ins" in dh
+    # 渲染脚本走 diff 分支
+    assert "n.diff_html" in out

@@ -1,6 +1,8 @@
 """译者注：发现跨页关联与趣味细节，输出外部 JSON；并提供注本渲染导出。"""
 from __future__ import annotations
 
+import difflib
+import html
 import json
 import logging
 import os
@@ -148,6 +150,9 @@ STYLE = """<style id="booktr-css">
 #booktr-panel .booktr-body{display:block;margin:0 0 6px;white-space:normal}
 #booktr-panel .booktr-rel{display:block;font-size:12.5px;color:#6a5a3a}
 #booktr-panel .booktr-rel a{color:#1a6fb5;text-decoration:none;border-bottom:1px dotted #9bc}
+#booktr-panel .booktr-diff{display:block;margin-top:5px;line-height:1.8;word-break:break-word}
+#booktr-panel .booktr-del{color:#b3402e;text-decoration:line-through;opacity:.85}
+#booktr-panel .booktr-ins{color:#1a7f37;background:#eafff0;border-radius:2px}
 #booktr-panel .booktr-close{position:absolute;top:10px;right:12px;cursor:pointer;
   font-size:18px;line-height:1;color:#9a8a60;background:none;border:none;padding:2px 6px}
 @media print{#booktr-panel{display:none}}
@@ -172,7 +177,10 @@ READER_JS = """<script id="booktr-js">
     notes.forEach(function(n){
       h+='<div class="booktr-card'+(String(n.n)===a?' booktr-active':'')+'" id="booktr-card-'+n.n+'">';
       h+='<span class="booktr-head">'+esc(n.type)+' ['+n.n+']</span>';
-      h+='<div class="booktr-body">'+esc(n.content)+'</div>';
+      var body = n.diff_html
+        ? esc(n.content)+'<div class="booktr-diff">'+n.diff_html+'</div>'
+        : esc(n.content);
+      h+='<div class="booktr-body">'+body+'</div>';
       if(n.related_pages&&n.related_pages.length){
         h+='<div class="booktr-rel">\\u5173\\u8054\\u9875\\u9762\\uff1a';
         n.related_pages.forEach(function(p,i){
@@ -262,6 +270,39 @@ HOST_JS = """<script id="booktr-host-js">
 </script>"""
 
 _PLACEHOLDER_RE = re.compile(r"\[\[P\d+\]\]")
+
+
+def _esc(s: str) -> str:
+    return html.escape(s or "", quote=True)
+
+
+def _diff_html(old: str, new: str) -> str:
+    """把 ``old -> new`` 的字符级差异渲染为内联合并 HTML（``<del>``/``<ins>``）。
+
+    文本段一律 :func:`html.escape`，输出只含自定义标签，可安全内联进侧栏。
+    归一化（去占位符 + 折叠空白）后如无差异则返回空串（表示"无实质差异"）。
+    """
+    from . import refs as refs_mod
+
+    a = refs_mod.plain(old or "")
+    b = refs_mod.plain(new or "")
+    sm = difflib.SequenceMatcher(None, a, b)
+    parts: list[str] = []
+    changed = False
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            parts.append(_esc(a[i1:i2]))
+        elif tag == "delete":
+            changed = True
+            parts.append(f'<del class="booktr-del">{_esc(a[i1:i2])}</del>')
+        elif tag == "insert":
+            changed = True
+            parts.append(f'<ins class="booktr-ins">{_esc(b[j1:j2])}</ins>')
+        else:  # replace
+            changed = True
+            parts.append(f'<del class="booktr-del">{_esc(a[i1:i2])}</del>'
+                         f'<ins class="booktr-ins">{_esc(b[j1:j2])}</ins>')
+    return "".join(parts) if changed else ""
 
 
 def _norm(text: str) -> str:
@@ -372,6 +413,7 @@ def render_page(html: str, rel: str, notes: list[dict], cfg: Config) -> tuple[st
         data.append({
             "n": num, "id": note.get("id", ""), "type": note.get("type", ""),
             "content": note.get("content", ""),
+            "diff_html": note.get("diff_html", ""),
             "related_pages": note.get("related_pages", []) or [],
             "prefix": prefix,
         })
@@ -439,11 +481,15 @@ def export_annotated(cfg: Config, out_dir: str, pages: list[str] | None = None,
         from . import refs as refs_mod
         for rel, cors in refs_mod.all_active(cfg).items():
             for c in cors:
+                diff_html = _diff_html(c.get("ref_err", ""), c.get("corrected", ""))
+                content = ("参考译文此处有误，已修正：" if diff_html
+                           else "参考译文此处有误，已修正（无实质差异）。")
                 by_page.setdefault(rel, []).append({
                     "id": c.get("id", ""),
                     "dst_quote": (c.get("corrected") or "")[:24],
                     "type": "参考勘误",
-                    "content": f"参考译文此处有误（原：{c.get('ref_err', '')}），已修正。",
+                    "content": content,
+                    "diff_html": diff_html,
                     "related_pages": [],
                 })
     if pages:
