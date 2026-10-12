@@ -150,7 +150,7 @@ STYLE = """<style id="booktr-css">
 #booktr-panel .booktr-body{display:block;margin:0 0 6px;white-space:normal}
 #booktr-panel .booktr-rel{display:block;font-size:12.5px;color:#6a5a3a}
 #booktr-panel .booktr-rel a{color:#1a6fb5;text-decoration:none;border-bottom:1px dotted #9bc}
-#booktr-panel .booktr-diff{display:block;margin-top:5px;line-height:1.8;word-break:break-word}
+#booktr-panel .booktr-diff{display:block;margin-top:5px;line-height:1.8;word-break:break-word;white-space:pre-wrap}
 #booktr-panel .booktr-del{color:#b3402e;text-decoration:line-through;opacity:.85}
 #booktr-panel .booktr-ins{color:#1a7f37;background:#eafff0;border-radius:2px}
 #booktr-panel .booktr-close{position:absolute;top:10px;right:12px;cursor:pointer;
@@ -280,16 +280,11 @@ def _esc(s: str) -> str:
 # 计数口径：删除记 1 处、添加记 1 处、替换（删+添）记 2 处。
 _DIFF_INLINE_MAX = 2
 # 停顿类标点：用于把勘误文本切分为「短句」（标点归入前一句句尾）。
-# 不含 `.`（避免把省略号 "..."、小数等误切），省略号在切分前统一归一为 "…"。
-_PAUSE_PUNCT = frozenset("。，、！？…；：,.!?;:")
-_ELLIPSIS_RE = re.compile(r"[.．]{2,}")
-_ELLIPSIS2_RE = re.compile(r"…{2,}")
+# 不含 `.` 与 `…`：避免省略号 "..." / "…" 造成不对称分句，从而可原样比对出省略号差异。
+_PAUSE_PUNCT = frozenset("。，、！？；：,?!;:")
 _PUNCT_ONLY_STR = "".join(_PAUSE_PUNCT)
-
-
-def _prep(s: str) -> str:
-    """切分前归一省略号（``...``/``……`` → ``…``），使两侧短句边界一致。"""
-    return _ELLIPSIS2_RE.sub("…", _ELLIPSIS_RE.sub("…", s))
+# 空白可视化：纯空白变更片段中的空白替换为可见符号。
+_WS_VIS = {" ": "␣", "\u3000": "␣", "\t": "⇥", "\n": "⏎", "\r": ""}
 
 
 def _clauses(s: str) -> list[str]:
@@ -318,6 +313,21 @@ def _nchanges(a: str, b: str) -> int:
     return n
 
 
+def _esc_delim(s: str) -> str:
+    """del/ins 片段转义；纯空白片段用可见符号标出（便于发现空格/换行变更）。"""
+    if s and not s.strip():
+        return "".join(_WS_VIS.get(ch, _esc(ch)) for ch in s)
+    return _esc(s)
+
+
+def _del_span(s: str) -> str:
+    return f'<del class="booktr-del">{_esc_delim(s)}</del>'
+
+
+def _ins_span(s: str) -> str:
+    return f'<ins class="booktr-ins">{_esc_delim(s)}</ins>'
+
+
 def _inline_diff(a: str, b: str) -> str:
     """逐字内联 diff（``<del>``/``<ins>``），文本段一律转义。"""
     parts: list[str] = []
@@ -325,12 +335,11 @@ def _inline_diff(a: str, b: str) -> str:
         if tag == "equal":
             parts.append(_esc(a[i1:i2]))
         elif tag == "delete":
-            parts.append(f'<del class="booktr-del">{_esc(a[i1:i2])}</del>')
+            parts.append(_del_span(a[i1:i2]))
         elif tag == "insert":
-            parts.append(f'<ins class="booktr-ins">{_esc(b[j1:j2])}</ins>')
+            parts.append(_ins_span(b[j1:j2]))
         else:  # replace
-            parts.append(f'<del class="booktr-del">{_esc(a[i1:i2])}</del>'
-                         f'<ins class="booktr-ins">{_esc(b[j1:j2])}</ins>')
+            parts.append(_del_span(a[i1:i2]) + _ins_span(b[j1:j2]))
     return "".join(parts)
 
 
@@ -344,13 +353,14 @@ def _diff_html(old: str, new: str) -> str:
 
     其中「修正处」按 :func:`_nchanges` 计数（删除 1、添加 1、替换 2）。
 
+    仅去除占位符，**保留空白与标点**（空格/省略号等微小变更亦可见）。
     文本段一律 :func:`html.escape`，输出只含自定义标签，安全可内联。
-    归一化（去占位符 + 折叠空白）后无差异返回空串（表示"无实质差异"）。
+    原始文本（去占位符后）相同则返回空串。
     """
     from . import refs as refs_mod
 
-    A = _clauses(_prep(refs_mod.plain(old or "")))
-    B = _clauses(_prep(refs_mod.plain(new or "")))
+    A = _clauses(refs_mod.strip_placeholders(old or ""))
+    B = _clauses(refs_mod.strip_placeholders(new or ""))
     parts: list[str] = []
     changed = False
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, A, B).get_opcodes():
@@ -364,16 +374,15 @@ def _diff_html(old: str, new: str) -> str:
                 if x == y:
                     parts.append(_esc(x))
                 elif _nchanges(x, y) > _DIFF_INLINE_MAX:
-                    parts.append(f'<del class="booktr-del">{_esc(x)}</del>'
-                                 f'<ins class="booktr-ins">{_esc(y)}</ins>')
+                    parts.append(_del_span(x) + _ins_span(y))
                 else:
                     parts.append(_inline_diff(x, y))
         else:
             old_c, new_c = "".join(oa), "".join(ob)
             if old_c:
-                parts.append(f'<del class="booktr-del">{_esc(old_c)}</del>')
+                parts.append(_del_span(old_c))
             if new_c:
-                parts.append(f'<ins class="booktr-ins">{_esc(new_c)}</ins>')
+                parts.append(_ins_span(new_c))
     return "".join(parts) if changed else ""
 
 
@@ -554,13 +563,13 @@ def export_annotated(cfg: Config, out_dir: str, pages: list[str] | None = None,
         for rel, cors in refs_mod.all_active(cfg).items():
             for c in cors:
                 diff_html = _diff_html(c.get("ref_err", ""), c.get("corrected", ""))
-                content = ("参考译文此处有误，已修正：" if diff_html
-                           else "参考译文此处有误，已修正（无实质差异）。")
+                if not diff_html:
+                    continue  # 真·空改（去占位符后原始文本相同）不渲染卡片
                 by_page.setdefault(rel, []).append({
                     "id": c.get("id", ""),
                     "dst_quote": (c.get("corrected") or "")[:24],
                     "type": "参考勘误",
-                    "content": content,
+                    "content": "参考译文此处有误，已修正：",
                     "diff_html": diff_html,
                     "related_pages": [],
                 })

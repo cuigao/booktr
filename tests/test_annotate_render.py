@@ -150,8 +150,12 @@ def test_diff_html_replace_marks_del_ins():
 
 def test_diff_html_identical_is_empty():
     assert ann._diff_html("完全相同的一句话", "完全相同的一句话") == ""
-    # 仅空白差异（plain 折叠空白）也视为无实质差异
-    assert ann._diff_html("11月 26日", "11月26日") == ""
+
+
+def test_diff_whitespace_visible():
+    # 空格变更可视化：被删除的空格以 ␣ 标出
+    h = ann._diff_html("11月 26日", "11月26日")
+    assert h == '11月<del class="booktr-del">␣</del>26日'
 
 
 def test_diff_html_escapes_markup():
@@ -184,12 +188,11 @@ def test_diff_multi_clause_mixed():
     assert '<ins class="booktr-ins">而且我相信自己一定「能做到」。</ins>' in h
 
 
-def test_diff_ellipsis_normalized_not_fragmented():
-    assert ann._diff_html("我犯了个错误...", "我犯了个错误…") == ""
-    assert ann._diff_html("等一下...真的可以吗？", "等一下…真的可以吗？") == ""
-    # 省略号不切碎短句：句中省略号两侧仍作同一短句判定
-    h = ann._diff_html("等一下...真的可以吗？", "等一下…真的可以吗？嗯。")
-    assert h  # 有变化仍渲染（追加了「嗯。」）
+def test_diff_ellipsis_visible_not_fragmented():
+    # 省略号变更可视化，且不因 "..." 碎切短句
+    h = ann._diff_html("我犯了个错误...", "我犯了个错误…")
+    assert '<del class="booktr-del">...</del>' in h
+    assert '<ins class="booktr-ins">…</ins>' in h
 
 
 def test_render_correction_card_carries_diff_html():
@@ -220,3 +223,40 @@ def test_diff_two_replaces_goes_whole():
     h = ann._diff_html("甲乙丙丁", "甲X丙Y")
     assert h == ('<del class="booktr-del">甲乙丙丁</del>'
                  '<ins class="booktr-ins">甲X丙Y</ins>')
+
+
+def test_export_skips_true_noop_correction(tmp_path):
+    import json
+    import re
+    outdir = tmp_path / "out"
+    outdir.mkdir()
+    (outdir / "a.html").write_text(HTML, encoding="utf-8")
+    (tmp_path / "work").mkdir()
+    data = {
+        "source_dir": "site", "output_dir": "out", "work_dir": "work",
+        "lang": {"source": "ja", "target": "zh-Hans"},
+        "refs": {"corrections_path": "work/ref_corrections.jsonl",
+                 "render_corrections": True},
+        "llm_logs": {"dir": "work/llm_logs", "auto_export": False},
+    }
+    cfg = Config(root=tmp_path, data=data, data_dir=str(tmp_path))
+    rows = [
+        # 真·空改（原始相同）→ 不渲染
+        {"id": "c1", "page": "a.html", "segment_id": 1, "status": "active",
+         "ref_err": "你好，Libretto很小。", "corrected": "你好，Libretto很小。"},
+        # 实质修改（corrected 须为正文中存在的文本，方能定位）→ 渲染
+        {"id": "c2", "page": "a.html", "segment_id": 1, "status": "active",
+         "ref_err": "你好，Libretto非常大。", "corrected": "你好，Libretto很小。"},
+    ]
+    p = tmp_path / "work" / "ref_corrections.jsonl"
+    with open(p, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    target = tmp_path / "out_annotated"
+    ann.export_annotated(cfg, str(target))
+    h = (target / "a.html").read_text(encoding="utf-8")
+    data_json = json.loads(
+        re.search(r'id="booktr-data">(.*?)</script>', h, re.S).group(1))
+    corr = [d for d in data_json if d.get("type") == "参考勘误"]
+    assert len(corr) == 1
+    assert "diff_html" in corr[0] and corr[0]["diff_html"]
