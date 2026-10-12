@@ -277,6 +277,7 @@ def _esc(s: str) -> str:
 
 
 # 单个「短句」内允许 inline 高亮的最大修正处数；超过则整句划掉重写（避免碎改影响阅读）。
+# 计数口径：删除记 1 处、添加记 1 处、替换（删+添）记 2 处。
 _DIFF_INLINE_MAX = 2
 # 停顿类标点：用于把勘误文本切分为「短句」（标点归入前一句句尾）。
 # 不含 `.`（避免把省略号 "..."、小数等误切），省略号在切分前统一归一为 "…"。
@@ -306,10 +307,15 @@ def _clauses(s: str) -> list[str]:
     return out
 
 
-def _nregions(a: str, b: str) -> int:
-    """两串间的连续编辑区数（非 equal opcode 个数）。"""
-    return sum(1 for o in difflib.SequenceMatcher(None, a, b).get_opcodes()
-               if o[0] != "equal")
+def _nchanges(a: str, b: str) -> int:
+    """两串间的修正处数：删除记 1、添加记 1、替换记 2（删+添）。"""
+    n = 0
+    for tag, *_ in difflib.SequenceMatcher(None, a, b).get_opcodes():
+        if tag == "replace":
+            n += 2
+        elif tag in ("delete", "insert"):
+            n += 1
+    return n
 
 
 def _inline_diff(a: str, b: str) -> str:
@@ -336,6 +342,8 @@ def _diff_html(old: str, new: str) -> str:
     - 单句内修正处 > ``_DIFF_INLINE_MAX`` → 整句划掉重写（``<del>整句</del><ins>重写</ins>``）；
     - 短句数不一致的替换块 → 整块划掉重写。
 
+    其中「修正处」按 :func:`_nchanges` 计数（删除 1、添加 1、替换 2）。
+
     文本段一律 :func:`html.escape`，输出只含自定义标签，安全可内联。
     归一化（去占位符 + 折叠空白）后无差异返回空串（表示"无实质差异"）。
     """
@@ -355,7 +363,7 @@ def _diff_html(old: str, new: str) -> str:
             for x, y in zip(oa, ob):
                 if x == y:
                     parts.append(_esc(x))
-                elif _nregions(x, y) > _DIFF_INLINE_MAX:
+                elif _nchanges(x, y) > _DIFF_INLINE_MAX:
                     parts.append(f'<del class="booktr-del">{_esc(x)}</del>'
                                  f'<ins class="booktr-ins">{_esc(y)}</ins>')
                 else:

@@ -185,7 +185,6 @@ def test_diff_multi_clause_mixed():
 
 
 def test_diff_ellipsis_normalized_not_fragmented():
-    # "..." 与 "…" 归一后视为相同（不因省略号碎切/误判差异）
     assert ann._diff_html("我犯了个错误...", "我犯了个错误…") == ""
     assert ann._diff_html("等一下...真的可以吗？", "等一下…真的可以吗？") == ""
     # 省略号不切碎短句：句中省略号两侧仍作同一短句判定
@@ -205,3 +204,19 @@ def test_render_correction_card_carries_diff_html():
     assert "booktr-del" in dh and "booktr-ins" in dh
     # 渲染脚本走 diff 分支
     assert "n.diff_html" in out
+
+
+def test_nchanges_counting():
+    # 删除/添加各计 1，替换（删+添）计 2
+    assert ann._nchanges("abc", "ab") == 1       # 1 删除
+    assert ann._nchanges("abc", "abcd") == 1      # 1 添加
+    assert ann._nchanges("abc", "axc") == 2       # 1 替换 = 删+添
+    assert ann._nchanges("abc", "xyc") == 2       # 整段替换 = 2
+    assert ann._nchanges("abcd", "axcy") == 4     # 两处替换 = 4
+
+
+def test_diff_two_replaces_goes_whole():
+    # 两处独立替换 = 4 处（>2）→ 整句划掉重写（旧口径会误判为 inline）
+    h = ann._diff_html("甲乙丙丁", "甲X丙Y")
+    assert h == ('<del class="booktr-del">甲乙丙丁</del>'
+                 '<ins class="booktr-ins">甲X丙Y</ins>')
