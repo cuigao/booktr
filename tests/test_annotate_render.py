@@ -160,6 +160,39 @@ def test_diff_html_escapes_markup():
     assert "&lt;" in h and "&amp;" in h and "&quot;" in h
 
 
+def test_diff_short_clause_gt2_changes_goes_whole():
+    # 单句 3+ 处修正 → 整句划掉重写，句内不再 inline
+    h = ann._diff_html("要相信自己一定能够办得到。", "而且我相信自己一定「能做到」。")
+    assert h.startswith('<del class="booktr-del">要相信自己一定能够办得到。</del>')
+    assert h.endswith('<ins class="booktr-ins">而且我相信自己一定「能做到」。</ins>')
+
+
+def test_diff_short_clause_le2_stays_inline():
+    # 单句仅 1 处（错别字）→ 逐字 inline
+    h = ann._diff_html("到没什么特别担心的", "倒没什么特别担心的")
+    assert "<del class=\"booktr-del\">到</del><ins class=\"booktr-ins\">倒</ins>" in h
+
+
+def test_diff_multi_clause_mixed():
+    old = "第一句保持不变。要相信自己一定能够办得到。"
+    new = "第一句保持不变。而且我相信自己一定「能做到」。"
+    h = ann._diff_html(old, new)
+    # 未变短句原样保留（未包进 del/ins）
+    assert h.startswith("第一句保持不变。")
+    # 被改写的短句整句划掉重写
+    assert '<del class="booktr-del">要相信自己一定能够办得到。</del>' in h
+    assert '<ins class="booktr-ins">而且我相信自己一定「能做到」。</ins>' in h
+
+
+def test_diff_ellipsis_normalized_not_fragmented():
+    # "..." 与 "…" 归一后视为相同（不因省略号碎切/误判差异）
+    assert ann._diff_html("我犯了个错误...", "我犯了个错误…") == ""
+    assert ann._diff_html("等一下...真的可以吗？", "等一下…真的可以吗？") == ""
+    # 省略号不切碎短句：句中省略号两侧仍作同一短句判定
+    h = ann._diff_html("等一下...真的可以吗？", "等一下…真的可以吗？嗯。")
+    assert h  # 有变化仍渲染（追加了「嗯。」）
+
+
 def test_render_correction_card_carries_diff_html():
     import json
     import re

@@ -276,32 +276,96 @@ def _esc(s: str) -> str:
     return html.escape(s or "", quote=True)
 
 
-def _diff_html(old: str, new: str) -> str:
-    """把 ``old -> new`` 的字符级差异渲染为内联合并 HTML（``<del>``/``<ins>``）。
+# 单个「短句」内允许 inline 高亮的最大修正处数；超过则整句划掉重写（避免碎改影响阅读）。
+_DIFF_INLINE_MAX = 2
+# 停顿类标点：用于把勘误文本切分为「短句」（标点归入前一句句尾）。
+# 不含 `.`（避免把省略号 "..."、小数等误切），省略号在切分前统一归一为 "…"。
+_PAUSE_PUNCT = frozenset("。，、！？…；：,.!?;:")
+_ELLIPSIS_RE = re.compile(r"[.．]{2,}")
+_ELLIPSIS2_RE = re.compile(r"…{2,}")
+_PUNCT_ONLY_STR = "".join(_PAUSE_PUNCT)
 
-    文本段一律 :func:`html.escape`，输出只含自定义标签，可安全内联进侧栏。
-    归一化（去占位符 + 折叠空白）后如无差异则返回空串（表示"无实质差异"）。
-    """
-    from . import refs as refs_mod
 
-    a = refs_mod.plain(old or "")
-    b = refs_mod.plain(new or "")
-    sm = difflib.SequenceMatcher(None, a, b)
+def _prep(s: str) -> str:
+    """切分前归一省略号（``...``/``……`` → ``…``），使两侧短句边界一致。"""
+    return _ELLIPSIS2_RE.sub("…", _ELLIPSIS_RE.sub("…", s))
+
+
+def _clauses(s: str) -> list[str]:
+    """按停顿类标点切分为「短句」（标点归入前一句句尾），丢弃纯标点空句。"""
+    out: list[str] = []
+    buf = ""
+    for ch in s:
+        buf += ch
+        if ch in _PAUSE_PUNCT:
+            if buf.strip(_PUNCT_ONLY_STR):
+                out.append(buf)
+            buf = ""
+    if buf:
+        out.append(buf)
+    return out
+
+
+def _nregions(a: str, b: str) -> int:
+    """两串间的连续编辑区数（非 equal opcode 个数）。"""
+    return sum(1 for o in difflib.SequenceMatcher(None, a, b).get_opcodes()
+               if o[0] != "equal")
+
+
+def _inline_diff(a: str, b: str) -> str:
+    """逐字内联 diff（``<del>``/``<ins>``），文本段一律转义。"""
     parts: list[str] = []
-    changed = False
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b).get_opcodes():
         if tag == "equal":
             parts.append(_esc(a[i1:i2]))
         elif tag == "delete":
-            changed = True
             parts.append(f'<del class="booktr-del">{_esc(a[i1:i2])}</del>')
         elif tag == "insert":
-            changed = True
             parts.append(f'<ins class="booktr-ins">{_esc(b[j1:j2])}</ins>')
         else:  # replace
-            changed = True
             parts.append(f'<del class="booktr-del">{_esc(a[i1:i2])}</del>'
                          f'<ins class="booktr-ins">{_esc(b[j1:j2])}</ins>')
+    return "".join(parts)
+
+
+def _diff_html(old: str, new: str) -> str:
+    """把 ``old -> new`` 的差异渲染为 HTML（勘误卡片用）。
+
+    按停顿标点切分为「短句」后逐句比较：
+    - 单句内修正处 ≤ ``_DIFF_INLINE_MAX`` → 逐字内联高亮；
+    - 单句内修正处 > ``_DIFF_INLINE_MAX`` → 整句划掉重写（``<del>整句</del><ins>重写</ins>``）；
+    - 短句数不一致的替换块 → 整块划掉重写。
+
+    文本段一律 :func:`html.escape`，输出只含自定义标签，安全可内联。
+    归一化（去占位符 + 折叠空白）后无差异返回空串（表示"无实质差异"）。
+    """
+    from . import refs as refs_mod
+
+    A = _clauses(_prep(refs_mod.plain(old or "")))
+    B = _clauses(_prep(refs_mod.plain(new or "")))
+    parts: list[str] = []
+    changed = False
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, A, B).get_opcodes():
+        if tag == "equal":
+            parts.append(_esc("".join(A[i1:i2])))
+            continue
+        changed = True
+        oa, ob = A[i1:i2], B[j1:j2]
+        if tag == "replace" and len(oa) == len(ob):
+            for x, y in zip(oa, ob):
+                if x == y:
+                    parts.append(_esc(x))
+                elif _nregions(x, y) > _DIFF_INLINE_MAX:
+                    parts.append(f'<del class="booktr-del">{_esc(x)}</del>'
+                                 f'<ins class="booktr-ins">{_esc(y)}</ins>')
+                else:
+                    parts.append(_inline_diff(x, y))
+        else:
+            old_c, new_c = "".join(oa), "".join(ob)
+            if old_c:
+                parts.append(f'<del class="booktr-del">{_esc(old_c)}</del>')
+            if new_c:
+                parts.append(f'<ins class="booktr-ins">{_esc(new_c)}</ins>')
     return "".join(parts) if changed else ""
 
 
